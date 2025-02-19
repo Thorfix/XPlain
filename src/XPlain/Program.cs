@@ -177,9 +177,10 @@ public class Program
         var configuration = new ConfigurationBuilder()
             .SetBasePath(Directory.GetCurrentDirectory())
             .AddJsonFile("appsettings.json", optional: false)
+            .AddJsonFile($"appsettings.{Environment.GetEnvironmentVariable("DOTNET_ENVIRONMENT") ?? "Production"}.json", optional: true)
             .AddEnvironmentVariables("XPLAIN_")
             .Build();
-
+        
         IServiceCollection services = new ServiceCollection();
 
         services.AddOptions<AnthropicSettings>()
