@@ -226,6 +226,10 @@ file class Program
                 {
                     Console.WriteLine($"Using LLM Provider: {provider.ProviderName} with model: {provider.ModelName}");
                     Console.WriteLine("Configuration loaded and API connection validated successfully!");
+                    
+                    var cacheProvider = serviceProvider.GetRequiredService<ICacheProvider>();
+                    var (hits, misses) = cacheProvider.GetCacheStats();
+                    Console.WriteLine($"Cache stats - Hits: {hits}, Misses: {misses}, Hit Rate: {(hits + misses == 0 ? 0 : hits * 100.0 / (hits + misses)):F1}%");
                 }
 
                 if (options.InteractiveMode)
