@@ -213,16 +213,18 @@ file class Program
                 }
 
                 var serviceProvider = ConfigureServices(options);
-                var anthropicClient = serviceProvider.GetRequiredService<IAnthropicClient>();
+                var llmFactory = serviceProvider.GetRequiredService<LLMProviderFactory>();
+                var provider = llmFactory.CreateProvider(options.Provider);
 
-                if (!await anthropicClient.ValidateApiConnection())
+                if (provider is IAnthropicClient anthropicClient && !await anthropicClient.ValidateApiConnection())
                 {
                     throw new Exception(
-                        "Failed to validate Anthropic API connection. Please check your API token and connection.");
+                        "Failed to validate LLM provider connection. Please check your API token and connection.");
                 }
 
                 if (options.VerbosityLevel >= 1)
                 {
+                    Console.WriteLine($"Using LLM Provider: {provider.ProviderName} with model: {provider.ModelName}");
                     Console.WriteLine("Configuration loaded and API connection validated successfully!");
                 }
 
@@ -234,12 +236,12 @@ file class Program
                             "Enter your questions about the code. Type 'exit' to quit, 'help' for commands.");
                     }
 
-                    await StartInteractionLoop(anthropicClient, options);
+                    await StartInteractionLoop(provider, options);
                 }
                 else
                 {
                     string codeContext = BuildCodeContext(options.CodebasePath);
-                    string response = await anthropicClient.AskQuestion(options.DirectQuestion!, codeContext);
+                    string response = await provider.GetCompletionAsync($"I have the following code:\n\n{codeContext}\n\nMy question is: {options.DirectQuestion}");
                     OutputResponse(response, options.OutputFormat);
                 }
 
@@ -283,7 +285,7 @@ file class Program
             }
         }
 
-        internal static async Task StartInteractionLoop(IAnthropicClient anthropicClient, CommandLineOptions options)
+        internal static async Task StartInteractionLoop(ILLMProvider provider, CommandLineOptions options)
         {
             while (_keepRunning)
             {
@@ -321,7 +323,7 @@ file class Program
                             try
                             {
                                 string codeContext = BuildCodeContext(options.CodebasePath);
-                                string response = await anthropicClient.AskQuestion(input, codeContext);
+                                string response = await provider.GetCompletionAsync($"I have the following code:\n\n{codeContext}\n\nMy question is: {input}");
                                 if (options.VerbosityLevel >= 1)
                                 {
                                     Console.WriteLine("\nResponse:");
