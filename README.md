@@ -46,7 +46,7 @@ dotnet run --project src/XPlain/XPlain.csproj
 ```
 
 ## Project Status
-This is an initial implementation focused on core functionality. Testing is currently out of scope.
+This is an initial implementation focused on core functionality. Testing is currently out of scope, meaning this project should not contain any tests of any kind.
 
 ## To Do
 - [x] Set up basic project structure
