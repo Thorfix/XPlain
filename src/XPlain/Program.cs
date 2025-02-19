@@ -14,8 +14,8 @@ namespace XPlain;
 
 public class Program
 {
-    private const string Version = "1.0.0";
-    private static bool _keepRunning = true;
+    public const string Version = "1.0.0";
+    public static bool _keepRunning = true;
 
     public static async Task<int> Main(string[] args)
     {
@@ -301,7 +301,7 @@ public class Program
         Console.WriteLine("Goodbye!");
     }
 
-    public static void ShowInteractiveHelp()
+    private static void ShowInteractiveHelp()
     {
         Console.WriteLine("Available commands:");
         Console.WriteLine("Help and Information:");
