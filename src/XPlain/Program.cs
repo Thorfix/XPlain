@@ -2,9 +2,9 @@ using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
 using System.ComponentModel.DataAnnotations;
-using Thorfix.Configuration;
+using XPlain.Configuration;
 
-namespace Thorfix;
+namespace XPlain;
 
 public class Program
 {
@@ -28,7 +28,7 @@ public class Program
                 }
                 if (args[0] == "--version" || args[0] == "-v")
                 {
-                    Console.WriteLine($"Thorfix version {Version}");
+                    Console.WriteLine($"XPlain version {Version}");
                     return;
                 }
             }
@@ -99,7 +99,7 @@ public class Program
                     break;
 
                 case "version":
-                    Console.WriteLine($"Thorfix version {Version}");
+                    Console.WriteLine($"XPlain version {Version}");
                     break;
 
                 default:
@@ -115,8 +115,8 @@ public class Program
 
     private static void ShowHelp()
     {
-        Console.WriteLine("Thorfix - Code Analysis Tool");
-        Console.WriteLine("Usage: thorfix [directory] [options]");
+        Console.WriteLine("XPlain - Code Analysis Tool");
+        Console.WriteLine("Usage: XPlain [directory] [options]");
         Console.WriteLine();
         Console.WriteLine("Arguments:");
         Console.WriteLine("  directory     Path to the code directory to analyze");
@@ -143,10 +143,10 @@ public class Program
         var configuration = new ConfigurationBuilder()
             .SetBasePath(Directory.GetCurrentDirectory())
             .AddJsonFile("appsettings.json", optional: false)
-            .AddEnvironmentVariables("THORFIX_")
+            .AddEnvironmentVariables("XPlain_")
             .Build();
 
-        var services = new ServiceCollection();
+        IServiceCollection services = new ServiceCollection();
 
         services.AddOptions<AnthropicSettings>()
             .Bind(configuration.GetSection("Anthropic"))

@@ -2,7 +2,7 @@ Microsoft Visual Studio Solution File, Format Version 12.00
 # Visual Studio Version 17
 VisualStudioVersion = 17.0.31903.59
 MinimumVisualStudioVersion = 10.0.40219.1
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Thorfix", "src\Thorfix\Thorfix.csproj", "{D95E0FA6-3E4E-4A44-B659-8A23F705C804}"
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "XPlain", "src\XPlain\XPlain.csproj", "{D95E0FA6-3E4E-4A44-B659-8A23F705C804}"
 EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution

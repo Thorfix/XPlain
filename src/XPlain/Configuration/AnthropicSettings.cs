@@ -1,6 +1,6 @@
 using System.ComponentModel.DataAnnotations;
 
-namespace Thorfix.Configuration;
+namespace XPlain.Configuration;
 
 public class AnthropicSettings
 {
