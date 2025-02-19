@@ -518,29 +518,90 @@ public class Program
 
     private static void ShowExamples()
     {
-        Console.WriteLine("XPlain Usage Examples:");
-        Console.WriteLine("\nRequired Arguments:");
-        Console.WriteLine("  xplain ./my-project");
-        Console.WriteLine("  # Starts interactive mode for the specified codebase");
-        
-        Console.WriteLine("\nExecution Mode Options:");
-        Console.WriteLine("  xplain ./my-project -q \"What does the Program.cs file do?\"");
-        Console.WriteLine("  # Gets immediate answer for a specific question");
-        
-        Console.WriteLine("\nOutput Configuration:");
-        Console.WriteLine("  xplain ./my-project -f markdown --verbosity 2");
-        Console.WriteLine("  # Gets response in markdown format with detailed logging");
-        Console.WriteLine("  xplain ./my-project -f json -q \"List all classes\"");
-        Console.WriteLine("  # Gets response in JSON format");
-        
-        Console.WriteLine("\nModel Configuration:");
-        Console.WriteLine("  xplain ./my-project -c custom-settings.json -m claude-3-opus-20240229");
-        Console.WriteLine("  # Uses custom configuration and specific model version");
-        
-        Console.WriteLine("\nCombined Examples:");
-        Console.WriteLine("  xplain ./my-project -f markdown --verbosity 2 -m claude-3-opus-20240229 \\");
-        Console.WriteLine("    -q \"Analyze the architecture and provide a detailed breakdown\"");
-        Console.WriteLine("  # Combines multiple options for detailed analysis");
+        Console.WriteLine("""
+            XPlain Usage Examples
+            ===================
+
+            Basic Usage
+            ----------
+            # Start interactive mode (recommended for exploration)
+            xplain ./my-project
+
+            # Simple code analysis
+            xplain ./my-project -q "What does this code do?"
+
+            Common Tasks
+            -----------
+            # Generate code documentation
+            xplain ./my-project -f markdown -q "Document the public API and main classes"
+
+            # Architecture analysis
+            xplain ./my-project -q "Explain the architecture and design patterns"
+
+            # Code review
+            xplain ./my-project -f markdown -q "Review the code for best practices"
+
+            # Find specific information
+            xplain ./my-project -q "List all interfaces and their implementations"
+
+            Output Formats
+            -------------
+            # Markdown for documentation
+            xplain ./my-project -f markdown -q "Generate API documentation"
+
+            # JSON for programmatic use
+            xplain ./my-project -f json -q "List all public methods"
+
+            # Plain text (default)
+            xplain ./my-project -q "Explain the error handling"
+
+            Verbosity Levels
+            ---------------
+            # Quiet mode (minimal output)
+            xplain ./my-project --verbosity 0 -q "Quick analysis"
+
+            # Normal mode (default)
+            xplain ./my-project -q "Standard analysis"
+
+            # Verbose mode (detailed output)
+            xplain ./my-project --verbosity 2 -q "Detailed analysis"
+
+            Advanced Usage
+            -------------
+            # Custom configuration with specific model
+            xplain ./my-project \
+              -c custom-settings.json \
+              -m claude-3-opus-20240229 \
+              -f markdown \
+              --verbosity 2 \
+              -q "Provide a comprehensive codebase analysis"
+
+            # Interactive mode with custom settings
+            xplain ./my-project \
+              -c review-config.json \
+              --verbosity 2 \
+              -m claude-3-opus-20240229
+
+            Interactive Mode Commands
+            ----------------------
+            When in interactive mode, you can use:
+            - help    : Show available commands
+            - version : Show version information
+            - exit   : Exit the application
+            - quit   : Exit the application
+
+            Best Practices
+            -------------
+            1. Start with interactive mode to explore the codebase
+            2. Use markdown format for documentation
+            3. Increase verbosity for detailed analysis
+            4. Ask specific, focused questions
+            5. Use environment variables for API configuration
+
+            For more information:
+            - Use --help for command reference
+            - Use --config-help for configuration options
+            """);
     }
 
     private static void ShowConfigHelp()
