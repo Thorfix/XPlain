@@ -300,61 +300,83 @@ public class Program
                 string? input = Console.ReadLine();
 
                 if (string.IsNullOrWhiteSpace(input))
+                {
                     continue;
+                }
 
                 try
                 {
-                    switch (input.ToLower())
+                    try
                     {
-                        case "exit":
-                        case "quit":
-                            _keepRunning = false;
-                            break;
+                        switch (input.ToLower())
+                        {
+                            case "exit":
+                            case "quit":
+                                _keepRunning = false;
+                                break;
 
-                        case "help":
-                            ShowInteractiveHelp();
-                            break;
+                            case "help":
+                                ShowInteractiveHelp();
+                                break;
 
-                        case "version":
-                            Console.WriteLine($"XPlain version {Version}");
-                            break;
+                            case "version":
+                                Console.WriteLine($"XPlain version {Version}");
+                                break;
 
-                        default:
-                            if (options.VerbosityLevel >= 1)
-                            {
-                                Console.WriteLine($"Processing question about code in {options.CodebasePath}...");
-                            }
-
-                            try
-                            {
-                                string codeContext = BuildCodeContext(options.CodebasePath);
-                                string response = await anthropicClient.AskQuestion(input, codeContext);
+                            default:
                                 if (options.VerbosityLevel >= 1)
                                 {
-                                    Console.WriteLine("\nResponse:");
+                                    Console.WriteLine($"Processing question about code in {options.CodebasePath}...");
                                 }
 
-                                OutputResponse(response, options.OutputFormat);
-                            }
-                            catch (Exception ex)
-                            {
-                                Console.WriteLine($"Error processing question: {ex.Message}");
-                            }
-                            finally
-                            {
-                                if (options.VerbosityLevel >= 2)
+                                try
                                 {
-                                    Console.WriteLine("Command processing completed.");
-                                }
-                            }
+                                    string codeContext = BuildCodeContext(options.CodebasePath);
+                                    string response = await anthropicClient.AskQuestion(input, codeContext);
+                                    if (options.VerbosityLevel >= 1)
+                                    {
+                                        Console.WriteLine("\nResponse:");
+                                    }
 
-                            break;
+                                    OutputResponse(response, options.OutputFormat);
+                                }
+                                catch (Exception ex)
+                                {
+                                    Console.WriteLine($"Error processing question: {ex.Message}");
+                                }
+                                finally
+                                {
+                                    if (options.VerbosityLevel >= 2)
+                                    {
+                                        Console.WriteLine("Question processing completed.");
+                                    }
+                                }
+                                break;
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.Error.WriteLine($"Error in command processing: {ex.Message}");
+                    }
+                    finally
+                    {
+                        if (options.VerbosityLevel >= 2)
+                        {
+                            Console.WriteLine("Command iteration completed.");
+                        }
                     }
                 }
                 catch (Exception ex)
                 {
                     Console.Error.WriteLine($"Error in interaction loop: {ex.Message}");
                     continue;
+                }
+                finally
+                {
+                    if (options.VerbosityLevel >= 2)
+                    {
+                        Console.WriteLine("Interaction loop iteration completed.");
+                    }
                 }
             }
 
