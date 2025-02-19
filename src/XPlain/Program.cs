@@ -168,7 +168,7 @@ public class Program
         return await rootCommand.InvokeAsync(args);
     }
 
-    private static async Task<int> ExecuteWithOptions(CommandLineOptions options)
+    public static async Task<int> ExecuteWithOptions(CommandLineOptions options)
     {
         try
         {
@@ -229,7 +229,7 @@ public class Program
         }
     }
 
-    private static void OutputResponse(string response, OutputFormat format)
+    public static void OutputResponse(string response, OutputFormat format)
     {
         switch (format)
         {
@@ -250,7 +250,7 @@ public class Program
         }
     }
 
-    private static async Task StartInteractionLoop(IAnthropicClient anthropicClient, CommandLineOptions options)
+    public static async Task StartInteractionLoop(IAnthropicClient anthropicClient, CommandLineOptions options)
     {
         while (_keepRunning)
         {
@@ -294,6 +294,13 @@ public class Program
                     {
                         Console.WriteLine($"Error processing question: {ex.Message}");
                     }
+                    finally
+                    {
+                        if (options.VerbosityLevel >= 2)
+                        {
+                            Console.WriteLine("Finished processing question.");
+                        }
+                    }
                     break;
             }
         }
@@ -301,7 +308,7 @@ public class Program
         Console.WriteLine("Goodbye!");
     }
 
-    private static void ShowInteractiveHelp()
+    public static void ShowInteractiveHelp()
     {
         Console.WriteLine("Available commands:");
         Console.WriteLine("Help and Information:");
