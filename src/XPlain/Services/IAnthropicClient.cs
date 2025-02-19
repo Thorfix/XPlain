@@ -1,4 +1,4 @@
-namespace Thorfix.Services;
+namespace XPlain.Services;
 
 public interface IAnthropicClient
 {

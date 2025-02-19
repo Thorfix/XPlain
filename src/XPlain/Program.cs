@@ -66,7 +66,7 @@ public class Program
             Console.WriteLine($"Analyzing code directory: {codeDirectory}");
             Console.WriteLine("Enter your questions about the code. Type 'exit' to quit, 'help' for commands.");
 
-            await StartInteractionLoop(codeDirectory);
+            await StartInteractionLoop(anthropicClient, codeDirectory);
         }
         catch (OptionsValidationException ex)
         {
@@ -84,7 +84,7 @@ public class Program
         }
     }
 
-    private static async Task StartInteractionLoop(string codeDirectory)
+    private static async Task StartInteractionLoop(IAnthropicClient anthropicClient, string codeDirectory)
     {
         while (_keepRunning)
         {

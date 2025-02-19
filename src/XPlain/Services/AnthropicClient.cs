@@ -2,9 +2,9 @@ using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Text.Json;
 using Microsoft.Extensions.Options;
-using Thorfix.Configuration;
+using XPlain.Configuration;
 
-namespace Thorfix.Services;
+namespace XPlain.Services;
 
 public class AnthropicClient : IAnthropicClient, IDisposable
 {
@@ -100,7 +100,7 @@ public class AnthropicClient : IAnthropicClient, IDisposable
     }
 }
 
-private class AnthropicResponse
+public class AnthropicResponse
 {
     public string? Completion { get; set; }
     public string? Stop { get; set; }
