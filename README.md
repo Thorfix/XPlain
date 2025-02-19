@@ -1,8 +1,15 @@
 # XPlain
-A tool to explain codebases using multiple LLM providers (currently supporting Anthropic Claude)
+An AI-powered code analysis tool supporting multiple LLM providers
 
 ## Overview
-XPlain is a local development tool designed to help developers understand codebases by allowing them to ask questions about code in a designated folder. The tool supports multiple LLM providers (currently Anthropic's Claude) to provide intelligent responses based on the codebase contents.
+XPlain is a local development tool designed to help developers understand codebases by allowing them to ask questions about code in a designated folder. The tool supports multiple LLM providers to provide intelligent responses based on the codebase contents. Currently supported providers:
+
+- **Anthropic Claude** (default)
+  - Models: claude-3-opus-20240229, claude-3-sonnet-20240229
+  - Features: High-quality code analysis, contextual understanding
+  - Configuration: API key required
+
+Additional providers can be added by implementing the `ILLMProvider` interface and following the provider integration guidelines.
 
 ## Features
 - Simple CLI interface for asking questions about your code

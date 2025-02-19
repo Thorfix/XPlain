@@ -625,6 +625,7 @@ file class Program
 
         internal static IServiceProvider ConfigureServices(CommandLineOptions options)
         {
+            // Build configuration from various sources
             var configuration = new ConfigurationBuilder()
                 .SetBasePath(Directory.GetCurrentDirectory())
                 .AddJsonFile("appsettings.json", optional: false)
@@ -635,18 +636,53 @@ file class Program
                 .AddEnvironmentVariables("XPLAIN_")
                 .Build();
 
+            // Create service collection
             IServiceCollection services = new ServiceCollection();
 
-            services.AddOptions<AnthropicSettings>()
-                .Bind(configuration.GetSection("Anthropic"))
-                .ValidateDataAnnotations();
+            // Configure settings
+            var llmSettings = new LLMSettings();
+            configuration.GetSection("LLM").Bind(llmSettings);
 
-            services.AddOptions<LLMSettings>()
-                .Bind(configuration.GetSection("LLM"))
-                .ValidateDataAnnotations();
+            // Override settings with command line options if provided
+            if (!string.IsNullOrEmpty(options.Provider))
+            {
+                llmSettings.Provider = options.Provider;
+            }
+            if (!string.IsNullOrEmpty(options.ModelName))
+            {
+                llmSettings.Model = options.ModelName;
+            }
+            if (!string.IsNullOrEmpty(options.ApiKey))
+            {
+                llmSettings.ApiKey = options.ApiKey;
+            }
 
+            // Validate and add LLM settings
+            llmSettings.Validate();
+            services.AddSingleton(Options.Create(llmSettings));
+
+            // Configure provider-specific settings based on selected provider
+            switch (llmSettings.Provider.ToLowerInvariant())
+            {
+                case "anthropic":
+                    var anthropicSettings = new AnthropicSettings
+                    {
+                        Provider = llmSettings.Provider,
+                        Model = llmSettings.Model,
+                        ApiKey = llmSettings.ApiKey,
+                        ApiToken = llmSettings.ApiKey // Map LLM API key to Anthropic token
+                    };
+                    configuration.GetSection("Anthropic").Bind(anthropicSettings);
+                    services.AddSingleton(Options.Create(anthropicSettings));
+                    services.AddSingleton<IAnthropicClient, AnthropicClient>();
+                    break;
+                    
+                default:
+                    throw new InvalidOperationException($"Unsupported provider: {llmSettings.Provider}");
+            }
+
+            // Add common services
             services.AddHttpClient();
-            services.AddSingleton<IAnthropicClient, AnthropicClient>();
             services.AddSingleton<LLMProviderFactory>();
 
             return services.BuildServiceProvider();

@@ -62,11 +62,17 @@ public class CommandLineOptions
 
     [OptionGroup(OptionGroup.Model)]
     [Description("LLM provider to use (e.g., Anthropic)")]
+    [Required(ErrorMessage = "LLM provider is required")]
     public string Provider { get; set; } = "Anthropic";
 
     [OptionGroup(OptionGroup.Model)]
     [Description("Model name to use with the selected provider")]
-    public string? ModelName { get; set; }
+    [Required(ErrorMessage = "Model name is required")]
+    public string ModelName { get; set; } = "claude-3-sonnet-20240229";
+
+    [OptionGroup(OptionGroup.Model)]
+    [Description("API key for the selected provider")]
+    public string? ApiKey { get; set; }
 
     public bool InteractiveMode => string.IsNullOrEmpty(DirectQuestion);
 

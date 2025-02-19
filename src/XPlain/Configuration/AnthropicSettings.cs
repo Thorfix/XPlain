@@ -1,7 +1,11 @@
+using System;
 using System.ComponentModel.DataAnnotations;
 
 namespace XPlain.Configuration;
 
+/// <summary>
+/// Settings specific to the Anthropic Claude provider
+/// </summary>
 public class AnthropicSettings : LLMSettings
 {
     [Required(ErrorMessage = "Anthropic API token is required")]

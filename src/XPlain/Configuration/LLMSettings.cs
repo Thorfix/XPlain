@@ -1,7 +1,16 @@
+using System;
+using System.ComponentModel.DataAnnotations;
+using System.Linq;
+
 namespace XPlain.Configuration
 {
+    /// <summary>
+    /// Base settings class for LLM providers
+    /// </summary>
     public class LLMSettings
     {
+        private static readonly string[] SupportedProviders = { "Anthropic" };
+
         /// <summary>
         /// The type of LLM provider to use
         /// </summary>
@@ -40,8 +49,7 @@ namespace XPlain.Configuration
                 throw new ValidationException("API key cannot be empty");
             }
 
-            var supportedProviders = new[] { "Anthropic" };
-            if (!supportedProviders.Contains(Provider, StringComparer.OrdinalIgnoreCase))
+            if (!SupportedProviders.Contains(Provider, StringComparer.OrdinalIgnoreCase))
             {
                 throw new ValidationException($"Unsupported provider: {Provider}. Supported providers are: {string.Join(", ", supportedProviders)}");
             }
