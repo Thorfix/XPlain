@@ -24,7 +24,7 @@ public class Program
             await ExecuteWithOptions(options);
         }
 
-        public static async Task<int> Main(string[] args)
+        static async Task<int> Main(string[] args)
         {
             var rootCommand = new RootCommand(
                 """
@@ -102,13 +102,15 @@ public class Program
             {
                 try
                 {
-                    // Handle special help options first
-                    if (parseResult.GetValueForOption(helpOption) == true ||
-                        parseResult.GetValueForOption(helpGroup.Options.First(o => o.Name == "help")) == true)
+                    try
                     {
-                        ShowHelp();
-                        return;
-                    }
+                        // Handle special help options first
+                        if (parseResult.GetValueForOption(helpOption) == true ||
+                            parseResult.GetValueForOption(helpGroup.Options.First(o => o.Name == "help")) == true)
+                        {
+                            ShowHelp();
+                            return;
+                        }
 
                     if (parseResult.GetValueForOption(versionOption) == true ||
                         parseResult.GetValueForOption(helpGroup.Options.First(o => o.Name == "version")) == true)
@@ -159,28 +161,42 @@ public class Program
                     // Validate options
                     options.Validate();
 
-                    // Process the command with validated options
-                    try
-                    {
-                        await ProcessCommand(options);
-                    }
-                    catch (ValidationException ex)
-                    {
-                        Console.Error.WriteLine("Validation error:");
-                        Console.Error.WriteLine(ex.Message);
-                        Environment.Exit(1);
+                        // Process the command with validated options
+                        try
+                        {
+                            await ProcessCommand(options);
+                        }
+                        catch (ValidationException ex)
+                        {
+                            Console.Error.WriteLine("Validation error:");
+                            Console.Error.WriteLine(ex.Message);
+                            Environment.Exit(1);
+                        }
+                        catch (Exception ex)
+                        {
+                            Console.Error.WriteLine($"Error: {ex.Message}");
+                            Environment.Exit(1);
+                        }
+                        finally
+                        {
+                            if (options.VerbosityLevel >= 2)
+                            {
+                                Console.WriteLine("Command processing completed.");
+                            }
+                        }
                     }
                     catch (Exception ex)
                     {
-                        Console.Error.WriteLine($"Error: {ex.Message}");
+                        Console.Error.WriteLine($"Error in command processing: {ex.Message}");
                         Environment.Exit(1);
                     }
-                }
-                catch (Exception ex)
-                {
-                    Console.Error.WriteLine($"Error in command processing: {ex.Message}");
-                    Environment.Exit(1);
-                }
+                    finally
+                    {
+                        if (options?.VerbosityLevel >= 2)
+                        {
+                            Console.WriteLine("Root command handler completed.");
+                        }
+                    }
             });
 
             // Override default help with our custom help
@@ -193,7 +209,7 @@ public class Program
             return await rootCommand.InvokeAsync(args);
         }
 
-        public static async Task<int> ExecuteWithOptions(CommandLineOptions options)
+        static async Task<int> ExecuteWithOptions(CommandLineOptions options)
         {
             try
             {
@@ -255,7 +271,7 @@ public class Program
             }
         }
 
-        public static void OutputResponse(string response, OutputFormat format)
+        static void OutputResponse(string response, OutputFormat format)
         {
             switch (format)
             {
@@ -276,7 +292,7 @@ public class Program
             }
         }
 
-        public static async Task StartInteractionLoop(IAnthropicClient anthropicClient, CommandLineOptions options)
+        static async Task StartInteractionLoop(IAnthropicClient anthropicClient, CommandLineOptions options)
         {
             while (_keepRunning)
             {
@@ -345,7 +361,7 @@ public class Program
             Console.WriteLine("Goodbye!");
         }
 
-        public static void ShowInteractiveHelp()
+        static void ShowInteractiveHelp()
         {
             Console.WriteLine("Available commands:");
             Console.WriteLine("Help and Information:");
@@ -359,7 +375,7 @@ public class Program
             Console.WriteLine("Type your questions about the code to analyze them.");
         }
 
-        public static void ShowHelp()
+        static void ShowHelp()
         {
             var optionGroups = typeof(OptionGroup).GetEnumValues()
                 .Cast<OptionGroup>()
@@ -428,7 +444,7 @@ public class Program
             Console.WriteLine(helpText.ToString());
         }
 
-        public static void ShowVersionInfo()
+        static void ShowVersionInfo()
         {
             Console.WriteLine($"""
                                XPlain version {Version}
@@ -441,7 +457,7 @@ public class Program
                                """);
         }
 
-        public static void ShowExamples()
+        static void ShowExamples()
         {
             Console.WriteLine("""
                               XPlain Usage Examples
@@ -529,7 +545,7 @@ public class Program
                               """);
         }
 
-        public static void ShowConfigHelp()
+        static void ShowConfigHelp()
         {
             Console.WriteLine("""
                               XPlain Configuration Guide
@@ -575,7 +591,7 @@ public class Program
         }
 
 
-        public static string BuildCodeContext(string codeDirectory)
+        static string BuildCodeContext(string codeDirectory)
         {
             var context = new System.Text.StringBuilder();
             context.AppendLine("Code files in the directory:");
@@ -594,7 +610,7 @@ public class Program
             return context.ToString();
         }
 
-        public static IServiceProvider ConfigureServices(CommandLineOptions options)
+        static IServiceProvider ConfigureServices(CommandLineOptions options)
         {
             var configuration = new ConfigurationBuilder()
                 .SetBasePath(Directory.GetCurrentDirectory())
