@@ -17,14 +17,14 @@ namespace XPlain
         private const string Version = "1.0.0";
         static bool _keepRunning = true;
 
-        static async Task ProcessCommandInternal(CommandLineOptions options)
+        internal static async Task ProcessCommandInternal(CommandLineOptions options)
         {
             if (options == null) throw new ArgumentNullException(nameof(options));
 
             await ExecuteWithOptions(options);
         }
 
-        static async Task<int> Main(string[] args)
+        internal static async Task<int> Main(string[] args)
         {
             var rootCommand = new RootCommand(
                 """
@@ -200,7 +200,7 @@ namespace XPlain
             return await rootCommand.InvokeAsync(args);
         }
 
-        static async Task<int> ExecuteWithOptions(CommandLineOptions options)
+        internal static async Task<int> ExecuteWithOptions(CommandLineOptions options)
         {
             try
             {
@@ -262,7 +262,7 @@ namespace XPlain
             }
         }
 
-        static void OutputResponse(string response, OutputFormat format)
+        internal static void OutputResponse(string response, OutputFormat format)
         {
             switch (format)
             {
@@ -283,7 +283,7 @@ namespace XPlain
             }
         }
 
-        static async Task StartInteractionLoop(IAnthropicClient anthropicClient, CommandLineOptions options)
+        internal static async Task StartInteractionLoop(IAnthropicClient anthropicClient, CommandLineOptions options)
         {
             while (_keepRunning)
             {
@@ -372,7 +372,7 @@ namespace XPlain
             Console.WriteLine("Goodbye!");
         }
 
-        static void ShowInteractiveHelp()
+        internal static void ShowInteractiveHelp()
         {
             Console.WriteLine("Available commands:");
             Console.WriteLine("Help and Information:");
@@ -386,7 +386,7 @@ namespace XPlain
             Console.WriteLine("Type your questions about the code to analyze them.");
         }
 
-        static void ShowHelp()
+        internal static void ShowHelp()
         {
             var optionGroups = typeof(OptionGroup).GetEnumValues()
                 .Cast<OptionGroup>()
@@ -455,7 +455,7 @@ namespace XPlain
             Console.WriteLine(helpText.ToString());
         }
 
-        static void ShowVersionInfo()
+        internal static void ShowVersionInfo()
         {
             Console.WriteLine($"""
                                XPlain version {Version}
@@ -468,7 +468,7 @@ namespace XPlain
                                """);
         }
 
-        static void ShowExamples()
+        internal static void ShowExamples()
         {
             Console.WriteLine("""
                               XPlain Usage Examples
@@ -556,7 +556,7 @@ namespace XPlain
                               """);
         }
 
-        static void ShowConfigHelp()
+        internal static void ShowConfigHelp()
         {
             Console.WriteLine("""
                               XPlain Configuration Guide
@@ -602,7 +602,7 @@ namespace XPlain
         }
 
 
-        static string BuildCodeContext(string codeDirectory)
+        internal static string BuildCodeContext(string codeDirectory)
         {
             var context = new System.Text.StringBuilder();
             context.AppendLine("Code files in the directory:");
@@ -621,7 +621,7 @@ namespace XPlain
             return context.ToString();
         }
 
-        static IServiceProvider ConfigureServices(CommandLineOptions options)
+        internal static IServiceProvider ConfigureServices(CommandLineOptions options)
         {
             var configuration = new ConfigurationBuilder()
                 .SetBasePath(Directory.GetCurrentDirectory())
