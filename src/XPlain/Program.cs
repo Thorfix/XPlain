@@ -12,9 +12,9 @@ using XPlain.Services;
 
 namespace XPlain;
 
-public class Program
+file class Program
     {
-        public const string Version = "1.0.0";
+        private const string Version = "1.0.0";
         static bool _keepRunning = true;
 
         static async Task ProcessCommandInternal(CommandLineOptions options)
