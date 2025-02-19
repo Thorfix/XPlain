@@ -92,39 +92,50 @@ public class Program
         {
             try
             {
-                // Check help options first
-                if (parseResult.GetValueForOption(helpOption))
+                // Handle special help options first
+                if (parseResult.GetValueForOption(helpOption) || parseResult.GetValueForOption(helpGroup.Options.First(o => o.Name == "help")))
                 {
                     ShowHelp();
                     return;
                 }
-                if (parseResult.GetValueForOption(versionOption))
+                if (parseResult.GetValueForOption(versionOption) || parseResult.GetValueForOption(helpGroup.Options.First(o => o.Name == "version")))
                 {
                     ShowVersionInfo();
                     return;
                 }
-                if (parseResult.GetValueForOption(examplesOption))
+                if (parseResult.GetValueForOption(examplesOption) || parseResult.GetValueForOption(helpGroup.Options.First(o => o.Name == "examples")))
                 {
                     ShowExamples();
                     return;
                 }
-                if (parseResult.GetValueForOption(configHelpOption))
+                if (parseResult.GetValueForOption(configHelpOption) || parseResult.GetValueForOption(helpGroup.Options.First(o => o.Name == "config-help")))
                 {
                     ShowConfigHelp();
                     return;
                 }
 
-                // Create options instance from parsed values
-                var options = new CommandLineOptions
-                {
-                    CodebasePath = parseResult.GetValueForOption(requiredGroup.Options.First(o => o.Name == "codebasepath")) ?? "",
-                    VerbosityLevel = parseResult.GetValueForOption(outputGroup.Options.First(o => o.Name == "verbosity")),
-                    DirectQuestion = parseResult.GetValueForOption(executionGroup.Options.First(o => o.Name == "question")),
-                    OutputFormat = Enum.Parse<OutputFormat>(parseResult.GetValueForOption(outputGroup.Options.First(o => o.Name == "format")) ?? "Text"),
-                    ConfigPath = parseResult.GetValueForOption(modelGroup.Options.First(o => o.Name == "config")),
-                    ModelName = parseResult.GetValueForOption(modelGroup.Options.First(o => o.Name == "model")),
-                    InteractiveMode = string.IsNullOrEmpty(parseResult.GetValueForOption(executionGroup.Options.First(o => o.Name == "question")))
-                };
+                // Parse options from groups
+                var options = new CommandLineOptions();
+
+                // Required options
+                var requiredOpts = requiredGroup.Options.ToDictionary(o => o.Name);
+                options.CodebasePath = parseResult.GetValueForOption<string>(requiredOpts["codebasepath"]) ?? "";
+
+                // Execution options
+                var execOpts = executionGroup.Options.ToDictionary(o => o.Name);
+                options.DirectQuestion = parseResult.GetValueForOption<string>(execOpts["directquestion"]);
+                options.InteractiveMode = string.IsNullOrEmpty(options.DirectQuestion);
+
+                // Output options
+                var outputOpts = outputGroup.Options.ToDictionary(o => o.Name);
+                options.VerbosityLevel = parseResult.GetValueForOption<int>(outputOpts["verbositylevel"]);
+                var formatStr = parseResult.GetValueForOption<string>(outputOpts["outputformat"]);
+                options.OutputFormat = string.IsNullOrEmpty(formatStr) ? OutputFormat.Text : Enum.Parse<OutputFormat>(formatStr);
+
+                // Model options
+                var modelOpts = modelGroup.Options.ToDictionary(o => o.Name);
+                options.ConfigPath = parseResult.GetValueForOption<string>(modelOpts["configpath"]);
+                options.ModelName = parseResult.GetValueForOption<string>(modelOpts["modelname"]);
 
                 // Validate options
                 options.Validate();
@@ -276,21 +287,42 @@ public class Program
                 return;
             }
 
-        rootCommand.SetHandler(async (DirectoryInfo path, int verbosity, string? question,
-            OutputFormat format, FileInfo? config, string? model) =>
+        // Validate options and process command
+        try
         {
-            try
+            // Handle help options first
+            if (help)
             {
-                var options = new CommandLineOptions
-                {
-                    CodebasePath = path.FullName,
-                    VerbosityLevel = verbosity,
-                    DirectQuestion = question,
-                    OutputFormat = format,
-                    ConfigPath = config?.FullName,
-                    ModelName = model,
-                    InteractiveMode = string.IsNullOrEmpty(question)
-                };
+                ShowHelp();
+                return;
+            }
+            if (version)
+            {
+                ShowVersionInfo();
+                return;
+            }
+            if (examples)
+            {
+                ShowExamples();
+                return;
+            }
+            if (configHelp)
+            {
+                ShowConfigHelp();
+                return;
+            }
+
+            // Create and validate options
+            var options = new CommandLineOptions
+            {
+                CodebasePath = path.FullName,
+                VerbosityLevel = verbosity,
+                DirectQuestion = question,
+                OutputFormat = format,
+                ConfigPath = config?.FullName,
+                ModelName = model,
+                InteractiveMode = string.IsNullOrEmpty(question)
+            };
 
                 // Validate all options before proceeding
                 options.Validate();

@@ -71,6 +71,14 @@ dotnet build
 
 XPlain provides a comprehensive command-line interface designed to be user-friendly and intuitive. The interface follows standard CLI conventions and includes detailed help and documentation.
 
+The CLI is organized into logical option groups for better organization and understanding:
+
+1. Required Options
+2. Execution Mode Options
+3. Output Configuration Options
+4. Model Configuration Options
+5. Help and Information Options
+
 #### Basic Usage
 
 ```bash
@@ -82,9 +90,17 @@ xplain ./my-project --question "What does this code do?"
 
 # Get detailed analysis in markdown format
 xplain ./my-project --format markdown --verbosity 2
+
+# Advanced usage with custom configuration
+xplain ./my-project \
+  --config custom-settings.json \
+  --model claude-3-opus-20240229 \
+  --format markdown \
+  --verbosity 2 \
+  --question "Provide a comprehensive codebase analysis"
 ```
 
-#### Help Commands
+#### Help Commands and Documentation
 
 XPlain provides several help commands to assist users:
 
@@ -289,20 +305,22 @@ This is an initial implementation focused on core functionality. Testing is curr
 
 ## To Do
 - [x] Set up basic project structure
-- [ ] Implement configuration system
-  - [ ] Add Anthropic API token configuration 
-  - [ ] Add other necessary settings
-- [ ] Create CLI interface
-  - [ ] Command line argument parsing
-  - [ ] User interaction flow
-- [ ] Implement LLM integration
-  - [ ] Anthropic API client
-  - [ ] Tool calls for code analysis
-  - [ ] Response formatting
-- [ ] Add code analysis capabilities
-  - [ ] File system navigation
-  - [ ] Code reading and parsing
-  - [ ] Context building for LLM
+- [x] Implement configuration system
+  - [x] Add Anthropic API token configuration 
+  - [x] Add other necessary settings
+- [x] Create CLI interface
+  - [x] Command line argument parsing
+  - [x] User interaction flow
+  - [x] Comprehensive help system
+  - [x] Option validation and error handling
+- [x] Implement LLM integration
+  - [x] Anthropic API client
+  - [x] Tool calls for code analysis
+  - [x] Response formatting
+- [x] Add code analysis capabilities
+  - [x] File system navigation
+  - [x] Code reading and parsing
+  - [x] Context building for LLM
 
 ## Contributing
 This is a focused tool with a specific purpose. Contributions should align with the goal of keeping the implementation as simple as possible while maintaining functionality.
