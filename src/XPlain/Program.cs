@@ -10,9 +10,9 @@ using System.Text.Json;
 using XPlain.Configuration;
 using XPlain.Services;
 
-namespace XPlain
-{
-    internal class Program
+namespace XPlain;
+
+file class Program
     {
         private const string Version = "1.0.0";
         static bool _keepRunning = true;
@@ -102,13 +102,13 @@ namespace XPlain
             {
                 try
                 {
-                        // Handle special help options first
-                        if (parseResult.GetValueForOption(helpOption) == true ||
-                            parseResult.GetValueForOption(helpGroup.Options.First(o => o.Name == "help")) == true)
-                        {
-                            ShowHelp();
-                            return;
-                        }
+                    // Handle special help options first
+                    if (parseResult.GetValueForOption(helpOption) == true ||
+                        parseResult.GetValueForOption(helpGroup.Options.First(o => o.Name == "help")) == true)
+                    {
+                        ShowHelp();
+                        return;
+                    }
 
                     if (parseResult.GetValueForOption(versionOption) == true ||
                         parseResult.GetValueForOption(helpGroup.Options.First(o => o.Name == "version")) == true)
@@ -159,29 +159,29 @@ namespace XPlain
                     // Validate options
                     options.Validate();
 
-                        // Process the command with validated options
-                        try
+                    // Process the command with validated options
+                    try
+                    {
+                        await ProcessCommand(options);
+                    }
+                    catch (ValidationException ex)
+                    {
+                        Console.Error.WriteLine("Validation error:");
+                        Console.Error.WriteLine(ex.Message);
+                        Environment.Exit(1);
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.Error.WriteLine($"Error: {ex.Message}");
+                        Environment.Exit(1);
+                    }
+                    finally
+                    {
+                        if (options?.VerbosityLevel >= 2)
                         {
-                            await ProcessCommand(options);
+                            Console.WriteLine("Command processing completed.");
                         }
-                        catch (ValidationException ex)
-                        {
-                            Console.Error.WriteLine("Validation error:");
-                            Console.Error.WriteLine(ex.Message);
-                            Environment.Exit(1);
-                        }
-                        catch (Exception ex)
-                        {
-                            Console.Error.WriteLine($"Error: {ex.Message}");
-                            Environment.Exit(1);
-                        }
-                        finally
-                        {
-                            if (options?.VerbosityLevel >= 2)
-                            {
-                                Console.WriteLine("Command processing completed.");
-                            }
-                        }
+                    }
                 }
                 catch (Exception ex)
                 {
@@ -297,51 +297,51 @@ namespace XPlain
 
                 try
                 {
-                    switch (input.ToLower())
-                        {
-                            case "exit":
-                            case "quit":
-                                _keepRunning = false;
-                                break;
+                        switch (input.ToLower())
+                    {
+                        case "exit":
+                        case "quit":
+                            _keepRunning = false;
+                            break;
 
-                            case "help":
-                                ShowInteractiveHelp();
-                                break;
+                        case "help":
+                            ShowInteractiveHelp();
+                            break;
 
-                            case "version":
-                                Console.WriteLine($"XPlain version {Version}");
-                                break;
+                        case "version":
+                            Console.WriteLine($"XPlain version {Version}");
+                            break;
 
-                            default:
+                        default:
+                            if (options.VerbosityLevel >= 1)
+                            {
+                                Console.WriteLine($"Processing question about code in {options.CodebasePath}...");
+                            }
+
+                            try
+                            {
+                                string codeContext = BuildCodeContext(options.CodebasePath);
+                                string response = await anthropicClient.AskQuestion(input, codeContext);
                                 if (options.VerbosityLevel >= 1)
                                 {
-                                    Console.WriteLine($"Processing question about code in {options.CodebasePath}...");
+                                    Console.WriteLine("\nResponse:");
                                 }
 
-                                try
+                                OutputResponse(response, options.OutputFormat);
+                            }
+                            catch (Exception ex)
+                            {
+                                Console.WriteLine($"Error processing question: {ex.Message}");
+                            }
+                            finally
+                            {
+                                if (options.VerbosityLevel >= 2)
                                 {
-                                    string codeContext = BuildCodeContext(options.CodebasePath);
-                                    string response = await anthropicClient.AskQuestion(input, codeContext);
-                                    if (options.VerbosityLevel >= 1)
-                                    {
-                                        Console.WriteLine("\nResponse:");
-                                    }
-
-                                    OutputResponse(response, options.OutputFormat);
+                                    Console.WriteLine("Question processing completed.");
                                 }
-                                catch (Exception ex)
-                                {
-                                    Console.WriteLine($"Error processing question: {ex.Message}");
-                                }
-                                finally
-                                {
-                                    if (options.VerbosityLevel >= 2)
-                                    {
-                                        Console.WriteLine("Question processing completed.");
-                                    }
-                                }
-                                break;
-                        }
+                            }
+                            break;
+                    }
                     }
                     catch (Exception ex)
                     {
