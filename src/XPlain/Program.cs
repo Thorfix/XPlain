@@ -1,4 +1,3 @@
-// Move any top-level statements here, before the namespace declaration
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
@@ -11,15 +10,14 @@ using System.Text.Json;
 using XPlain.Configuration;
 using XPlain.Services;
 
-namespace XPlain
-{
+namespace XPlain;
 
-    public class Program
+public class Program
     {
         public const string Version = "1.0.0";
-        private static bool _keepRunning = true;
+        static bool _keepRunning = true;
 
-        private static async Task ProcessCommandInternal(CommandLineOptions options)
+        static async Task ProcessCommandInternal(CommandLineOptions options)
         {
             if (options == null) throw new ArgumentNullException(nameof(options));
 
@@ -178,9 +176,10 @@ namespace XPlain
                         Environment.Exit(1);
                     }
                 }
-                catch
+                catch (Exception ex)
                 {
-                    
+                    Console.Error.WriteLine($"Error in command processing: {ex.Message}");
+                    Environment.Exit(1);
                 }
             });
 
@@ -336,9 +335,10 @@ namespace XPlain
                             break;
                     }
                 }
-                catch
+                catch (Exception ex)
                 {
-
+                    Console.Error.WriteLine($"Error in interaction loop: {ex.Message}");
+                    continue;
                 }
             }
 
