@@ -18,58 +18,100 @@ public class Program
     {
         var rootCommand = new RootCommand("XPlain - AI-powered code explanation tool");
 
-        // Help options
+        // Help Command Group
+        var helpCommand = new Command("help", "Show help information");
         var versionOption = new Option<bool>(
             aliases: new[] { "--version", "-v" },
             description: "Display version information");
-
         var examplesOption = new Option<bool>(
             aliases: new[] { "--examples" },
             description: "Show usage examples");
-
         var configHelpOption = new Option<bool>(
             aliases: new[] { "--config-help" },
             description: "Display configuration options and environment variables");
 
-        // Required path argument
+        // Required Arguments
         var pathArgument = new Argument<DirectoryInfo>(
             name: "codebase-path",
             description: "Path to the codebase directory to analyze");
+        pathArgument.AddValidator(result =>
+        {
+            if (result.GetValueOrDefault<DirectoryInfo>()?.Exists != true)
+            {
+                result.ErrorMessage = "The specified codebase directory does not exist.";
+            }
+        });
 
-        // Options
+        // Execution Mode Options Group
+        var executionModeGroup = new Command("mode", "Execution mode options");
+        var questionOption = new Option<string?>(
+            aliases: new[] { "--question", "-q" },
+            description: "Direct question to ask about the code (skips interactive mode)");
+
+        // Output Configuration Group
+        var outputGroup = new Command("output", "Output configuration options");
         var verbosityOption = new Option<int>(
             aliases: new[] { "--verbosity" },
             getDefaultValue: () => 1,
             description: "Verbosity level (0=quiet, 1=normal, 2=verbose)");
-
-        var questionOption = new Option<string?>(
-            aliases: new[] { "--question", "-q" },
-            description: "Direct question to ask about the code (skips interactive mode)");
+        verbosityOption.AddValidator(result =>
+        {
+            var value = result.GetValueOrDefault<int>();
+            if (value < 0 || value > 2)
+            {
+                result.ErrorMessage = "Verbosity level must be between 0 and 2.";
+            }
+        });
 
         var outputFormatOption = new Option<OutputFormat>(
             aliases: new[] { "--format", "-f" },
             getDefaultValue: () => OutputFormat.Text,
             description: "Output format (text, json, or markdown)");
 
+        // Model Configuration Group
+        var modelGroup = new Command("model", "Model configuration options");
         var configOption = new Option<FileInfo?>(
             aliases: new[] { "--config", "-c" },
             description: "Path to custom configuration file");
+        configOption.AddValidator(result =>
+        {
+            var file = result.GetValueOrDefault<FileInfo>();
+            if (file != null && !file.Exists)
+            {
+                result.ErrorMessage = "The specified configuration file does not exist.";
+            }
+        });
 
         var modelOption = new Option<string?>(
             aliases: new[] { "--model", "-m" },
             description: "Override the AI model to use");
+        modelOption.AddValidator(result =>
+        {
+            var model = result.GetValueOrDefault<string>();
+            if (model != null && !model.StartsWith("claude-"))
+            {
+                result.ErrorMessage = "Model name must start with 'claude-'.";
+            }
+        });
 
-        // Add options to command
+        // Add options to their respective groups
+        executionModeGroup.AddOption(questionOption);
+        
+        outputGroup.AddOption(verbosityOption);
+        outputGroup.AddOption(outputFormatOption);
+        
+        modelGroup.AddOption(configOption);
+        modelGroup.AddOption(modelOption);
+
+        // Add all components to root command
         rootCommand.AddOption(versionOption);
         rootCommand.AddOption(examplesOption);
         rootCommand.AddOption(configHelpOption);
         
         rootCommand.AddArgument(pathArgument);
-        rootCommand.AddOption(verbosityOption);
-        rootCommand.AddOption(questionOption);
-        rootCommand.AddOption(outputFormatOption);
-        rootCommand.AddOption(configOption);
-        rootCommand.AddOption(modelOption);
+        rootCommand.AddCommand(executionModeGroup);
+        rootCommand.AddCommand(outputGroup);
+        rootCommand.AddCommand(modelGroup);
 
         // Special handlers for help commands
         rootCommand.SetHandler(async (bool version, bool examples, bool configHelp, DirectoryInfo path,
@@ -106,6 +148,9 @@ public class Program
                     ModelName = model,
                     InteractiveMode = string.IsNullOrEmpty(question)
                 };
+
+                // Validate all options before proceeding
+                options.Validate();
 
                 if (verbosity >= 1)
                 {
@@ -236,8 +281,11 @@ public class Program
     private static void ShowInteractiveHelp()
     {
         Console.WriteLine("Available commands:");
+        Console.WriteLine("Help and Information:");
         Console.WriteLine("  help     - Show this help message");
         Console.WriteLine("  version  - Show version information");
+        Console.WriteLine();
+        Console.WriteLine("Navigation:");
         Console.WriteLine("  exit     - Exit the application");
         Console.WriteLine("  quit     - Exit the application");
         Console.WriteLine();
@@ -255,24 +303,28 @@ public class Program
     private static void ShowExamples()
     {
         Console.WriteLine("XPlain Usage Examples:");
-        Console.WriteLine("\nBasic Usage:");
+        Console.WriteLine("\nRequired Arguments:");
         Console.WriteLine("  xplain ./my-project");
         Console.WriteLine("  # Starts interactive mode for the specified codebase");
-        Console.WriteLine("\nDirect Questions:");
+        
+        Console.WriteLine("\nExecution Mode Options:");
         Console.WriteLine("  xplain ./my-project -q \"What does the Program.cs file do?\"");
         Console.WriteLine("  # Gets immediate answer for a specific question");
-        Console.WriteLine("\nCustom Output Format:");
-        Console.WriteLine("  xplain ./my-project -f markdown -q \"Explain the main architecture\"");
-        Console.WriteLine("  # Gets response in markdown format");
-        Console.WriteLine("\nVerbosity Control:");
-        Console.WriteLine("  xplain ./my-project --verbosity 2");
-        Console.WriteLine("  # Runs with detailed logging");
-        Console.WriteLine("\nCustom Configuration:");
-        Console.WriteLine("  xplain ./my-project -c custom-settings.json");
-        Console.WriteLine("  # Uses custom configuration file");
-        Console.WriteLine("\nSpecific Model:");
-        Console.WriteLine("  xplain ./my-project -m claude-3-opus-20240229");
-        Console.WriteLine("  # Uses a specific model version");
+        
+        Console.WriteLine("\nOutput Configuration:");
+        Console.WriteLine("  xplain ./my-project -f markdown --verbosity 2");
+        Console.WriteLine("  # Gets response in markdown format with detailed logging");
+        Console.WriteLine("  xplain ./my-project -f json -q \"List all classes\"");
+        Console.WriteLine("  # Gets response in JSON format");
+        
+        Console.WriteLine("\nModel Configuration:");
+        Console.WriteLine("  xplain ./my-project -c custom-settings.json -m claude-3-opus-20240229");
+        Console.WriteLine("  # Uses custom configuration and specific model version");
+        
+        Console.WriteLine("\nCombined Examples:");
+        Console.WriteLine("  xplain ./my-project -f markdown --verbosity 2 -m claude-3-opus-20240229 \\");
+        Console.WriteLine("    -q \"Analyze the architecture and provide a detailed breakdown\"");
+        Console.WriteLine("  # Combines multiple options for detailed analysis");
     }
 
     private static void ShowConfigHelp()
