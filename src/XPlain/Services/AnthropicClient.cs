@@ -104,12 +104,12 @@ public class CircuitBreaker
     }
 }
 
-public class AnthropicClient : IAnthropicClient, ILLMProvider, IDisposable
+public class AnthropicClient : BaseLLMProvider, IAnthropicClient, IDisposable
 {
     private readonly HttpClient _httpClient;
     private readonly AnthropicSettings _settings;
-    public string ProviderName => "Anthropic";
-    public string ModelName => _settings.DefaultModel;
+    public override string ProviderName => "Anthropic";
+    public override string ModelName => _settings.DefaultModel;
     private readonly SemaphoreSlim _rateLimiter;
     private readonly CircuitBreaker _circuitBreaker;
     private readonly Random _random = new();
@@ -126,7 +126,8 @@ public class AnthropicClient : IAnthropicClient, ILLMProvider, IDisposable
         HttpStatusCode.RequestTimeout // 408
     };
 
-    public AnthropicClient(IOptions<AnthropicSettings> settings)
+    public AnthropicClient(IOptions<AnthropicSettings> settings, ICacheProvider cacheProvider)
+        : base(cacheProvider)
     {
         _settings = settings.Value;
         _httpClient = new HttpClient
@@ -185,7 +186,7 @@ public class AnthropicClient : IAnthropicClient, ILLMProvider, IDisposable
         }
     }
 
-    public async Task<string> GetCompletionAsync(string prompt)
+    protected override async Task<string> GetCompletionInternalAsync(string prompt)
     {
         await _rateLimiter.WaitAsync();
         try

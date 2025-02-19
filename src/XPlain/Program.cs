@@ -639,6 +639,12 @@ file class Program
             // Create service collection
             IServiceCollection services = new ServiceCollection();
 
+            // Configure cache settings
+            var cacheSettings = new CacheSettings();
+            configuration.GetSection("Cache").Bind(cacheSettings);
+            services.AddSingleton(Options.Create(cacheSettings));
+            services.AddSingleton<ICacheProvider, FileBasedCacheProvider>();
+
             // Configure settings
             var llmSettings = new LLMSettings();
             configuration.GetSection("LLM").Bind(llmSettings);
