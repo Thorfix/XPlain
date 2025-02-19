@@ -105,29 +105,29 @@ namespace XPlain
                 try
                 {
                     // Handle special help options first
-                    if (parseResult.GetValueForOption(helpOption) ||
-                        parseResult.GetValueForOption(helpGroup.Options.First(o => o.Name == "help")))
+                    if (parseResult.GetValueForOption(helpOption) == true ||
+                        parseResult.GetValueForOption(helpGroup.Options.First(o => o.Name == "help")) == true)
                     {
                         ShowHelp();
                         return;
                     }
 
-                    if (parseResult.GetValueForOption(versionOption) ||
-                        parseResult.GetValueForOption(helpGroup.Options.First(o => o.Name == "version")))
+                    if (parseResult.GetValueForOption(versionOption) == true ||
+                        parseResult.GetValueForOption(helpGroup.Options.First(o => o.Name == "version")) == true)
                     {
                         ShowVersionInfo();
                         return;
                     }
 
-                    if (parseResult.GetValueForOption(examplesOption) ||
-                        parseResult.GetValueForOption(helpGroup.Options.First(o => o.Name == "examples")))
+                    if (parseResult.GetValueForOption(examplesOption) == true ||
+                        parseResult.GetValueForOption(helpGroup.Options.First(o => o.Name == "examples")) == true)
                     {
                         ShowExamples();
                         return;
                     }
 
-                    if (parseResult.GetValueForOption(configHelpOption) ||
-                        parseResult.GetValueForOption(helpGroup.Options.First(o => o.Name == "config-help")))
+                    if (parseResult.GetValueForOption(configHelpOption) == true ||
+                        parseResult.GetValueForOption(helpGroup.Options.First(o => o.Name == "config-help")) == true)
                     {
                         ShowConfigHelp();
                         return;
