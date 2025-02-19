@@ -1,3 +1,4 @@
+// Move any top-level statements here, before the namespace declaration
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
@@ -10,12 +11,35 @@ using System.Text.Json;
 using XPlain.Configuration;
 using XPlain.Services;
 
-namespace XPlain;
+// Top-level statements (if any) would go here
+
+// All top-level statements must come before namespace declarations
+using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Options;
+using System.CommandLine;
+using System.CommandLine.Parsing;
+using System.ComponentModel;
+using System.ComponentModel.DataAnnotations;
+using System.Reflection;
+using System.Text.Json;
+using XPlain.Configuration;
+using XPlain.Services;
+
+namespace XPlain
+{
 
 public class Program
 {
     public const string Version = "1.0.0";
-    public static bool _keepRunning = true;
+    private static bool _keepRunning = true;
+
+    private static async Task ProcessCommandInternal(CommandLineOptions options)
+    {
+        if (options == null) throw new ArgumentNullException(nameof(options));
+        
+        await ExecuteWithOptions(options);
+    }
 
     public static async Task<int> Main(string[] args)
     {
@@ -91,7 +115,7 @@ public class Program
         rootCommand.AddCommand(modelGroup);
 
         // Root command handler
-        rootCommand.SetHandler(async (ParseResult parseResult) =>
+        rootCommand.SetHandler(async (ParseResult parseResult) => 
         {
             try
             {
@@ -144,18 +168,21 @@ public class Program
                 options.Validate();
 
                 // Process the command with validated options
-                await ProcessCommand(options);
-            }
-            catch (ValidationException ex)
-            {
-                Console.Error.WriteLine("Validation error:");
-                Console.Error.WriteLine(ex.Message);
-                Environment.Exit(1);
-            }
-            catch (Exception ex)
-            {
-                Console.Error.WriteLine($"Error: {ex.Message}");
-                Environment.Exit(1);
+                try
+                {
+                    await ProcessCommand(options);
+                }
+                catch (ValidationException ex)
+                {
+                    Console.Error.WriteLine("Validation error:");
+                    Console.Error.WriteLine(ex.Message);
+                    Environment.Exit(1);
+                }
+                catch (Exception ex)
+                {
+                    Console.Error.WriteLine($"Error: {ex.Message}");
+                    Environment.Exit(1);
+                }
             }
         });
         
@@ -260,7 +287,9 @@ public class Program
             if (string.IsNullOrWhiteSpace(input))
                 continue;
 
-            switch (input.ToLower())
+            try
+            {
+                switch (input.ToLower())
             {
                 case "exit":
                 case "quit":
@@ -293,6 +322,13 @@ public class Program
                     catch (Exception ex)
                     {
                         Console.WriteLine($"Error processing question: {ex.Message}");
+                    }
+                    finally
+                    {
+                        if (options.VerbosityLevel >= 2)
+                        {
+                            Console.WriteLine("Command processing completed.");
+                        }
                     }
                     finally
                     {
