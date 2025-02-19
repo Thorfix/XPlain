@@ -24,6 +24,77 @@ public class Program
             Run with --help for detailed usage information.
             """);
 
+        // Create option groups
+        var requiredGroup = new Command("required", "Required options");
+        var executionGroup = new Command("execution", "Execution mode options");
+        var outputGroup = new Command("output", "Output configuration options");
+        var modelGroup = new Command("model", "Model configuration options");
+        var helpGroup = new Command("help", "Help and information options");
+
+        // Add options to their respective groups based on OptionGroupAttribute
+        var options = typeof(CommandLineOptions).GetProperties()
+            .Where(p => p.GetCustomAttributes(typeof(OptionGroupAttribute), false).Any())
+            .ToList();
+
+        foreach (var option in options)
+        {
+            var groupAttr = option.GetCustomAttribute<OptionGroupAttribute>();
+            var descAttr = option.GetCustomAttribute<DescriptionAttribute>();
+            var name = option.Name.ToLower();
+            var desc = descAttr?.Description ?? name;
+
+            Option opt = option.PropertyType switch
+            {
+                Type t when t == typeof(int) => new Option<int>($"--{name}", desc),
+                Type t when t == typeof(bool) => new Option<bool>($"--{name}", desc),
+                Type t when t == typeof(string) => new Option<string>($"--{name}", desc),
+                Type t when t.IsEnum => new Option<string>($"--{name}", desc),
+                _ => throw new NotSupportedException($"Unsupported option type: {option.PropertyType}")
+            };
+
+            switch (groupAttr?.Group)
+            {
+                case OptionGroup.Required:
+                    requiredGroup.AddOption(opt);
+                    break;
+                case OptionGroup.ExecutionMode:
+                    executionGroup.AddOption(opt);
+                    break;
+                case OptionGroup.Output:
+                    outputGroup.AddOption(opt);
+                    break;
+                case OptionGroup.Model:
+                    modelGroup.AddOption(opt);
+                    break;
+            }
+        }
+
+        // Add help options
+        var helpOption = new Option<bool>(new[] { "--help", "-h" }, "Show this help message");
+        var versionOption = new Option<bool>(new[] { "--version", "-v" }, "Display version information");
+        var examplesOption = new Option<bool>("--examples", "Show usage examples");
+        var configHelpOption = new Option<bool>("--config-help", "Display configuration options");
+
+        helpGroup.AddOption(helpOption);
+        helpGroup.AddOption(versionOption);
+        helpGroup.AddOption(examplesOption);
+        helpGroup.AddOption(configHelpOption);
+
+        // Add all groups to root command
+        rootCommand.AddCommand(helpGroup);
+        rootCommand.AddCommand(requiredGroup);
+        rootCommand.AddCommand(executionGroup);
+        rootCommand.AddCommand(outputGroup);
+        rootCommand.AddCommand(modelGroup);
+
+        rootCommand.SetHandler(RootCommandHandler);
+        
+        // Override default help with our custom help
+        rootCommand.HelpOption.SetHandler(() => {
+            ShowHelp();
+            Environment.Exit(0);
+        });
+
         // Help Options Group
         var helpOption = new Option<bool>(
             aliases: new[] { "--help", "-h" },
@@ -310,42 +381,70 @@ public class Program
 
     private static void ShowHelp()
     {
-        Console.WriteLine("""
-            XPlain - AI-powered code explanation tool
+        var optionGroups = typeof(OptionGroup).GetEnumValues()
+            .Cast<OptionGroup>()
+            .ToDictionary(
+                g => g,
+                g => typeof(CommandLineOptions).GetProperties()
+                    .Where(p => p.GetCustomAttribute<OptionGroupAttribute>()?.Group == g)
+                    .Select(p => (
+                        Name: p.Name.ToLower(),
+                        Desc: p.GetCustomAttribute<DescriptionAttribute>()?.Description,
+                        Validation: p.GetCustomAttribute<ValidationAttribute>()?.ErrorMessage
+                    ))
+                    .ToList()
+            );
 
-            USAGE:
-              xplain <codebase-path> [options]
+        var helpText = new System.Text.StringBuilder();
+        helpText.AppendLine("XPlain - AI-powered code explanation tool");
+        helpText.AppendLine();
+        helpText.AppendLine("USAGE:");
+        helpText.AppendLine("  xplain <codebase-path> [options]");
+        helpText.AppendLine();
+        
+        // Help and Information
+        helpText.AppendLine("HELP AND INFORMATION:");
+        helpText.AppendLine("  -h, --help       Show this help message");
+        helpText.AppendLine("  -v, --version    Display version information");
+        helpText.AppendLine("  --examples       Show usage examples");
+        helpText.AppendLine("  --config-help    Display configuration options");
+        helpText.AppendLine();
 
-            ARGUMENTS:
-              codebase-path    Path to the codebase directory to analyze (required)
+        // Other option groups
+        foreach (var group in optionGroups)
+        {
+            var groupName = group.Key.ToString().ToUpper();
+            var groupDesc = typeof(OptionGroup)
+                .GetField(group.Key.ToString())
+                ?.GetCustomAttribute<DescriptionAttribute>()
+                ?.Description;
 
-            HELP AND INFORMATION:
-              -h, --help       Show this help message
-              -v, --version    Display version information
-              --examples       Show usage examples
-              --config-help    Display configuration options
+            helpText.AppendLine($"{groupName} OPTIONS: {groupDesc}");
+            
+            foreach (var option in group.Value)
+            {
+                helpText.AppendLine($"  --{option.Name,-12} {option.Desc}");
+                if (option.Validation != null)
+                {
+                    helpText.AppendLine($"                   Validation: {option.Validation}");
+                }
+            }
+            helpText.AppendLine();
+        }
 
-            EXECUTION MODE OPTIONS:
-              -q, --question   Direct question to ask about the code (skips interactive mode)
+        // Additional Information
+        helpText.AppendLine("For more information:");
+        helpText.AppendLine("  Use --examples to see usage examples");
+        helpText.AppendLine("  Use --config-help to see configuration options");
+        helpText.AppendLine("  Use --version to see version information");
+        helpText.AppendLine();
+        
+        helpText.AppendLine("Examples:");
+        helpText.AppendLine("  xplain ./my-project");
+        helpText.AppendLine("  xplain ./my-project -q \"What does Program.cs do?\"");
+        helpText.AppendLine("  xplain ./my-project -f markdown --verbosity 2");
 
-            OUTPUT CONFIGURATION:
-              --verbosity <n>  Verbosity level (0=quiet, 1=normal, 2=verbose)
-              -f, --format     Output format (text, json, or markdown)
-
-            MODEL CONFIGURATION:
-              -c, --config     Path to custom configuration file
-              -m, --model      Override the AI model to use (must start with 'claude-')
-
-            For more information:
-              Use --examples to see usage examples
-              Use --config-help to see configuration options
-              Use --version to see version information
-
-            Examples:
-              xplain ./my-project
-              xplain ./my-project -q "What does Program.cs do?"
-              xplain ./my-project -f markdown --verbosity 2
-            """);
+        Console.WriteLine(helpText.ToString());
     }
 
     private static void ShowVersionInfo()

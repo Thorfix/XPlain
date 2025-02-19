@@ -1,41 +1,86 @@
 using System.ComponentModel;
 
+using System.ComponentModel;
 using System.ComponentModel.DataAnnotations;
 
 namespace XPlain.Configuration;
+
+/// <summary>
+/// Attribute to specify which option group a property belongs to
+/// </summary>
+[AttributeUsage(AttributeTargets.Property)]
+public class OptionGroupAttribute : Attribute
+{
+    public OptionGroup Group { get; }
+
+    public OptionGroupAttribute(OptionGroup group)
+    {
+        Group = group;
+    }
+}
+
+/// <summary>
+/// Groups for command-line options
+/// </summary>
+public enum OptionGroup
+{
+    [Description("Required options that must be specified")]
+    Required,
+
+    [Description("Options controlling how the tool executes")]
+    ExecutionMode,
+
+    [Description("Options controlling output and verbosity")]
+    Output,
+
+    [Description("Options for configuring the AI model")]
+    Model
+}
 
 /// <summary>
 /// Represents the command-line options for XPlain
 /// </summary>
 public class CommandLineOptions
 {
-    // Required Options Group
+    #region Required Options Group
     [Required(ErrorMessage = "Codebase path is required. Please specify the directory containing your code.")]
     [Description("Path to the codebase directory to analyze")]
+    [OptionGroup(OptionGroup.Required)]
     public required string CodebasePath { get; set; }
+    #endregion
 
-    // Execution Mode Group
+    #region Execution Mode Options
     [Description("Direct question to ask about the code (skips interactive mode)")]
+    [OptionGroup(OptionGroup.ExecutionMode)]
     public string? DirectQuestion { get; set; }
 
     [Description("Whether to run in interactive mode (false when direct question is provided)")]
+    [OptionGroup(OptionGroup.ExecutionMode)]
     public bool InteractiveMode { get; set; } = true;
+    #endregion
 
-    // Output Configuration Group
+    #region Output Options
     [Description("Verbosity level (0=quiet, 1=normal, 2=verbose)")]
     [Range(0, 2, ErrorMessage = "Verbosity level must be between 0 and 2")]
+    [OptionGroup(OptionGroup.Output)]
     public int VerbosityLevel { get; set; } = 1;
 
     [Description("Output format for responses (Text, Json, or Markdown)")]
+    [OptionGroup(OptionGroup.Output)]
     public OutputFormat OutputFormat { get; set; } = OutputFormat.Text;
+    #endregion
 
-    // Model Configuration Group
+    #region Model Configuration Options
     [Description("Path to custom configuration file")]
+    [OptionGroup(OptionGroup.Model)]
     public string? ConfigPath { get; set; }
 
     [Description("Override the AI model to use")]
-    [RegularExpression(@"^claude-[a-zA-Z0-9\-\.]+$", ErrorMessage = "Invalid model name format. Must start with 'claude-' followed by version.")]
+    [RegularExpression(@"^claude-[a-zA-Z0-9\-\.]+$", 
+        ErrorMessage = "Invalid model name format. Must start with 'claude-' followed by version.")]
+    [OptionGroup(OptionGroup.Model)]
     public string? ModelName { get; set; }
+    #endregion
 
     public string Version => "1.0.0";
 
