@@ -162,203 +162,54 @@ public class Program
             Environment.Exit(0);
         });
 
-        // Help Options Group
-        var helpOption = new Option<bool>(
-            aliases: new[] { "--help", "-h" },
-            description: "Show this help message");
-        
-        var versionOption = new Option<bool>(
-            aliases: new[] { "--version", "-v" },
-            description: "Display version information");
-        
-        var examplesOption = new Option<bool>(
-            aliases: new[] { "--examples" },
-            description: "Show usage examples");
-        
-        var configHelpOption = new Option<bool>(
-            aliases: new[] { "--config-help" },
-            description: "Display configuration options and environment variables");
 
-        // Required Arguments
-        var pathArgument = new Argument<DirectoryInfo>(
-            name: "codebase-path",
-            description: "Path to the codebase directory to analyze");
-        pathArgument.AddValidator(result =>
-        {
-            if (result.GetValueOrDefault<DirectoryInfo>()?.Exists != true)
-            {
-                result.ErrorMessage = "The specified codebase directory does not exist.";
-            }
-        });
-
-        // Execution Mode Options Group
-        var executionModeGroup = new Command("mode", "Execution mode options");
-        var questionOption = new Option<string?>(
-            aliases: new[] { "--question", "-q" },
-            description: "Direct question to ask about the code (skips interactive mode)");
-
-        // Output Configuration Group
-        var outputGroup = new Command("output", "Output configuration options");
-        var verbosityOption = new Option<int>(
-            aliases: new[] { "--verbosity" },
-            getDefaultValue: () => 1,
-            description: "Verbosity level (0=quiet, 1=normal, 2=verbose)");
-        verbosityOption.AddValidator(result =>
-        {
-            var value = result.GetValueOrDefault<int>();
-            if (value < 0 || value > 2)
-            {
-                result.ErrorMessage = "Verbosity level must be between 0 and 2.";
-            }
-        });
-
-        var outputFormatOption = new Option<OutputFormat>(
-            aliases: new[] { "--format", "-f" },
-            getDefaultValue: () => OutputFormat.Text,
-            description: "Output format (text, json, or markdown)");
-
-        // Model Configuration Group
-        var modelGroup = new Command("model", "Model configuration options");
-        var configOption = new Option<FileInfo?>(
-            aliases: new[] { "--config", "-c" },
-            description: "Path to custom configuration file");
-        configOption.AddValidator(result =>
-        {
-            var file = result.GetValueOrDefault<FileInfo>();
-            if (file != null && !file.Exists)
-            {
-                result.ErrorMessage = "The specified configuration file does not exist.";
-            }
-        });
-
-        var modelOption = new Option<string?>(
-            aliases: new[] { "--model", "-m" },
-            description: "Override the AI model to use");
-        modelOption.AddValidator(result =>
-        {
-            var model = result.GetValueOrDefault<string>();
-            if (model != null && !model.StartsWith("claude-"))
-            {
-                result.ErrorMessage = "Model name must start with 'claude-'.";
-            }
-        });
-
-        // Add options to their respective groups
-        executionModeGroup.AddOption(questionOption);
-        
-        outputGroup.AddOption(verbosityOption);
-        outputGroup.AddOption(outputFormatOption);
-        
-        modelGroup.AddOption(configOption);
-        modelGroup.AddOption(modelOption);
-
-        // Add all components to root command
-        rootCommand.AddOption(versionOption);
-        rootCommand.AddOption(examplesOption);
-        rootCommand.AddOption(configHelpOption);
-        
-        rootCommand.AddArgument(pathArgument);
-        rootCommand.AddCommand(executionModeGroup);
-        rootCommand.AddCommand(outputGroup);
-        rootCommand.AddCommand(modelGroup);
-
-        // Special handlers for help commands
-        rootCommand.SetHandler(async (bool help, bool version, bool examples, bool configHelp, DirectoryInfo path,
-            int verbosity, string? question, OutputFormat format, FileInfo? config, string? model) =>
-        {
-            if (help)
-            {
-                ShowHelp();
-                return;
-            }
-            else if (version)
-            {
-                ShowVersionInfo();
-                return;
-            }
-            else if (examples)
-            {
-                ShowExamples();
-                return;
-            }
-            else if (configHelp)
-            {
-                ShowConfigHelp();
-                return;
-            }
-
-        // Validate options and process command
-        try
-        {
-            // Handle help options first
-            if (help)
-            {
-                ShowHelp();
-                return;
-            }
-            if (version)
-            {
-                ShowVersionInfo();
-                return;
-            }
-            if (examples)
-            {
-                ShowExamples();
-                return;
-            }
-            if (configHelp)
-            {
-                ShowConfigHelp();
-                return;
-            }
 
             // Create and validate options
-            var options = new CommandLineOptions
+            var options = new CommandLineOptions();
+            var execResult = await ExecuteWithOptions(options);
+            return execResult;
+    private static async Task<int> ExecuteWithOptions(CommandLineOptions options)
+    {
+        try
+        {
+            // Validate all options before proceeding
+            options.Validate();
+
+            if (options.VerbosityLevel >= 1)
             {
-                CodebasePath = path.FullName,
-                VerbosityLevel = verbosity,
-                DirectQuestion = question,
-                OutputFormat = format,
-                ConfigPath = config?.FullName,
-                ModelName = model,
-                InteractiveMode = string.IsNullOrEmpty(question)
-            };
+                Console.WriteLine($"Analyzing code directory: {options.CodebasePath}");
+            }
 
-                // Validate all options before proceeding
-                options.Validate();
+            var serviceProvider = ConfigureServices(options);
+            var anthropicClient = serviceProvider.GetRequiredService<IAnthropicClient>();
 
-                if (verbosity >= 1)
+            if (!await anthropicClient.ValidateApiConnection())
+            {
+                throw new Exception("Failed to validate Anthropic API connection. Please check your API token and connection.");
+            }
+
+            if (options.VerbosityLevel >= 1)
+            {
+                Console.WriteLine("Configuration loaded and API connection validated successfully!");
+            }
+
+            if (options.InteractiveMode)
+            {
+                if (options.VerbosityLevel >= 1)
                 {
-                    Console.WriteLine($"Analyzing code directory: {options.CodebasePath}");
+                    Console.WriteLine("Enter your questions about the code. Type 'exit' to quit, 'help' for commands.");
                 }
+                await StartInteractionLoop(anthropicClient, options);
+            }
+            else
+            {
+                string codeContext = BuildCodeContext(options.CodebasePath);
+                string response = await anthropicClient.AskQuestion(options.DirectQuestion!, codeContext);
+                OutputResponse(response, options.OutputFormat);
+            }
 
-                var serviceProvider = ConfigureServices(options);
-                var anthropicClient = serviceProvider.GetRequiredService<IAnthropicClient>();
-
-                if (!await anthropicClient.ValidateApiConnection())
-                {
-                    throw new Exception("Failed to validate Anthropic API connection. Please check your API token and connection.");
-                }
-
-                if (verbosity >= 1)
-                {
-                    Console.WriteLine("Configuration loaded and API connection validated successfully!");
-                }
-
-                if (options.InteractiveMode)
-                {
-                    if (verbosity >= 1)
-                    {
-                        Console.WriteLine("Enter your questions about the code. Type 'exit' to quit, 'help' for commands.");
-                    }
-                    await StartInteractionLoop(anthropicClient, options);
-                }
-                else
-                {
-                    string codeContext = BuildCodeContext(options.CodebasePath);
-                    string response = await anthropicClient.AskQuestion(options.DirectQuestion!, codeContext);
-                    OutputResponse(response, options.OutputFormat);
-                }
+            return 0;
+        }
         }
         catch (OptionsValidationException ex)
         {
@@ -367,12 +218,12 @@ public class Program
             {
                 Console.Error.WriteLine($"- {failure}");
             }
-            Environment.Exit(1);
+            return 1;
         }
         catch (Exception ex)
         {
             Console.Error.WriteLine($"Error initializing application: {ex.Message}");
-            Environment.Exit(1);
+            return 1;
         }
     }
 
