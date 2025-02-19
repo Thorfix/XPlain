@@ -28,10 +28,38 @@ XPlain is a local development tool designed to help developers understand codeba
 - Anthropic API token
 
 ## Getting Started
-1. Configure your Anthropic API token in the configuration file
-2. Run the tool from the command line
-3. Point to your code directory
-4. Ask questions about your codebase
+1. Configure your Anthropic API token using one of these methods:
+   - Set it in `appsettings.json`:
+     ```json
+     {
+       "Anthropic": {
+         "ApiToken": "your-api-token-here"
+       }
+     }
+     ```
+   - Set the environment variable: `THORFIX_ANTHROPIC__APITOKEN`
+2. Other settings can be configured in `appsettings.json` or via environment variables:
+   - `ApiEndpoint`: The Anthropic API endpoint (default: https://api.anthropic.com/v1)
+   - `MaxTokenLimit`: Maximum token limit for requests (default: 2000)
+   - `DefaultModel`: The model to use (default: claude-2)
+3. Run the tool from the command line
+4. Point to your code directory
+5. Ask questions about your codebase
+
+### Configuration
+The application uses a flexible configuration system that supports:
+- JSON configuration via `appsettings.json`
+- Environment variables (prefixed with `THORFIX_`)
+- Validation for required settings
+- Secure handling of sensitive data
+
+Environment variables use double underscore to represent nested settings:
+```
+THORFIX_ANTHROPIC__APITOKEN=your-token-here
+THORFIX_ANTHROPIC__APIENDPOINT=https://custom-endpoint
+THORFIX_ANTHROPIC__MAXTOKENLIMIT=4000
+THORFIX_ANTHROPIC__DEFAULTMODEL=claude-2
+```
 
 ### Building the Project
 
