@@ -2,7 +2,10 @@ using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
 using System.CommandLine;
+using System.CommandLine.Parsing;
+using System.ComponentModel;
 using System.ComponentModel.DataAnnotations;
+using System.Reflection;
 using System.Text.Json;
 using XPlain.Configuration;
 using XPlain.Services;
@@ -162,10 +165,6 @@ public class Program
             Environment.Exit(0);
         });
 
-
-
-        });
-
         return await rootCommand.InvokeAsync(args);
     }
 
@@ -186,7 +185,8 @@ public class Program
 
             if (!await anthropicClient.ValidateApiConnection())
             {
-                throw new Exception("Failed to validate Anthropic API connection. Please check your API token and connection.");
+                throw new Exception(
+                    "Failed to validate Anthropic API connection. Please check your API token and connection.");
             }
 
             if (options.VerbosityLevel >= 1)
@@ -200,6 +200,7 @@ public class Program
                 {
                     Console.WriteLine("Enter your questions about the code. Type 'exit' to quit, 'help' for commands.");
                 }
+
                 await StartInteractionLoop(anthropicClient, options);
             }
             else
@@ -210,6 +211,7 @@ public class Program
             }
 
             return 0;
+        }
         catch (OptionsValidationException ex)
         {
             Console.Error.WriteLine("Configuration validation failed:");
@@ -217,6 +219,7 @@ public class Program
             {
                 Console.Error.WriteLine($"- {failure}");
             }
+
             return 1;
         }
         catch (Exception ex)
@@ -224,8 +227,6 @@ public class Program
             Console.Error.WriteLine($"Error initializing application: {ex.Message}");
             return 1;
         }
-    }
-
     }
 
     private static void OutputResponse(string response, OutputFormat format)
