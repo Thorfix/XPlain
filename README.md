@@ -9,11 +9,16 @@ XPlain is a local development tool designed to help developers understand codeba
   - Features: High-quality code analysis, contextual understanding
   - Configuration: API key required
 
+- **OpenAI**
+  - Models: gpt-4-turbo-preview, gpt-3.5-turbo
+  - Features: Fast responses, broad knowledge base
+  - Configuration: API key required
+
 Additional providers can be added by implementing the `ILLMProvider` interface and following the provider integration guidelines.
 
 ## Features
 - Simple CLI interface for asking questions about your code
-- Support for multiple LLM providers (currently Anthropic Claude)
+- Support for multiple LLM providers (Anthropic Claude and OpenAI)
 - Configuration system for API tokens and settings
 - Tool-assisted code analysis capabilities
 - Windows-focused development (though may work on other platforms)
@@ -32,7 +37,7 @@ Additional providers can be added by implementing the `ILLMProvider` interface a
 
 ## Requirements
 - .NET 8 SDK
-- Anthropic API token
+- Anthropic API token or OpenAI API key
 
 ## Getting Started
 1. Configure your LLM provider and API token using one of these methods:
@@ -40,16 +45,21 @@ Additional providers can be added by implementing the `ILLMProvider` interface a
      ```json
      {
        "LLM": {
-         "Provider": "Anthropic",
-         "Model": "claude-3-5-sonnet-latest",
+         "Provider": "Anthropic",  // or "OpenAI"
+         "Model": "claude-3-sonnet-20240229",  // or "gpt-4-turbo-preview"
          "ApiKey": "your-api-key-here"
        },
        "Anthropic": {
          "ApiToken": "your-api-token-here"
+       },
+       "OpenAI": {
+         "ApiToken": "your-openai-key-here"
        }
      }
      ```
-   - Set the environment variable: `THORFIX_ANTHROPIC__APITOKEN`
+   - Set the environment variable: 
+     - For Anthropic: `THORFIX_ANTHROPIC__APITOKEN`
+     - For OpenAI: `THORFIX_OPENAI__APITOKEN`
 2. Other settings can be configured in `appsettings.json` or via environment variables:
    - `ApiEndpoint`: The Anthropic API endpoint (default: https://api.anthropic.com/v1)
    - `MaxTokenLimit`: Maximum token limit for requests (default: 2000)
