@@ -11,6 +11,18 @@ XPlain is a local development tool designed to help developers understand codeba
 - Tool-assisted code analysis capabilities
 - Windows-focused development (though may work on other platforms)
 
+## Project Structure
+
+```
+├── src/
+│   └── XPlain/           # Main project directory
+│       ├── Program.cs    # Entry point
+│       └── XPlain.csproj # Project file
+├── .gitignore           # Git ignore file
+├── README.md            # This file
+└── XPlain.sln          # Solution file
+```
+
 ## Requirements
 - .NET 8 SDK
 - Anthropic API token
@@ -21,11 +33,23 @@ XPlain is a local development tool designed to help developers understand codeba
 3. Point to your code directory
 4. Ask questions about your codebase
 
+### Building the Project
+
+```bash
+dotnet build
+```
+
+### Running the Project
+
+```bash
+dotnet run --project src/XPlain/XPlain.csproj
+```
+
 ## Project Status
 This is an initial implementation focused on core functionality. Testing is currently out of scope.
 
 ## To Do
-- [ ] Set up basic project structure
+- [x] Set up basic project structure
 - [ ] Implement configuration system
   - [ ] Add Anthropic API token configuration 
   - [ ] Add other necessary settings
