@@ -75,39 +75,97 @@ dotnet run --project src/XPlain/XPlain.csproj
 
 ### Command-Line Interface
 
-XPlain provides a comprehensive command-line interface with the following options:
+XPlain provides a comprehensive command-line interface with grouped options for better organization and usability.
 
 ```
 USAGE:
   xplain <codebase-path> [options]
 
 ARGUMENTS:
-  codebase-path  Path to the codebase directory to analyze
+  codebase-path    Path to the codebase directory to analyze (required)
 
-OPTIONS:
-  -h, --help        Show help message and exit
-  -v, --version     Display version information
-  --examples        Show usage examples
-  --config-help     Display configuration options and environment variables
-  --verbosity <n>   Verbosity level (0=quiet, 1=normal, 2=verbose)
-  -q, --question    Direct question to ask about the code (skips interactive mode)
-  -f, --format      Output format (text, json, or markdown)
-  -c, --config      Path to custom configuration file
-  -m, --model       Override the AI model to use
+HELP AND INFORMATION:
+  -h, --help       Show help message and exit
+  -v, --version    Display version information
+  --examples       Show usage examples
+  --config-help    Display configuration options and environment variables
 
-EXAMPLES:
-  # Start interactive mode
-  xplain ./my-project
+EXECUTION MODE OPTIONS:
+  -q, --question   Direct question to ask about the code (skips interactive mode)
 
-  # Ask a direct question
-  xplain ./my-project -q "What does Program.cs do?"
+OUTPUT CONFIGURATION:
+  --verbosity <n>  Verbosity level (0=quiet, 1=normal, 2=verbose)
+  -f, --format     Output format (text, json, or markdown)
 
-  # Get markdown output
-  xplain ./my-project -f markdown -q "Explain the architecture"
+MODEL CONFIGURATION:
+  -c, --config     Path to custom configuration file
+  -m, --model      Override the AI model to use (must start with 'claude-')
+
+VALIDATION:
+- Codebase path must exist
+- Verbosity level must be between 0 and 2
+- Configuration file must exist if specified
+- Model name must start with 'claude-' if specified
 ```
 
-For more detailed examples, use the `--examples` command.
-For configuration help, use the `--config-help` command.
+#### Help Commands
+
+1. General Help (`--help` or `-h`):
+   - Shows overall usage information
+   - Lists all available options with descriptions
+   - Displays argument requirements
+
+2. Version Information (`--version` or `-v`):
+   - Shows current version of XPlain
+   - Displays build information
+
+3. Usage Examples (`--examples`):
+   ```bash
+   # Basic Interactive Mode
+   xplain ./my-project
+
+   # Direct Question with Markdown Output
+   xplain ./my-project -f markdown -q "What does Program.cs do?"
+
+   # Detailed Analysis with Custom Model
+   xplain ./my-project --verbosity 2 -m claude-3-opus-20240229 \
+     -q "Analyze the architecture"
+
+   # Custom Configuration with JSON Output
+   xplain ./my-project -c custom-settings.json -f json \
+     -q "List all classes"
+   ```
+
+4. Configuration Help (`--config-help`):
+   ```bash
+   # Environment Variables
+   XPLAIN_ANTHROPIC__APITOKEN=your-token-here
+   XPLAIN_ANTHROPIC__APIENDPOINT=https://api.anthropic.com/v1
+   XPLAIN_ANTHROPIC__MAXTOKENLIMIT=4000
+   XPLAIN_ANTHROPIC__DEFAULTMODEL=claude-2
+
+   # Configuration File (appsettings.json)
+   {
+     "Anthropic": {
+       "ApiToken": "your-api-token-here",
+       "ApiEndpoint": "https://api.anthropic.com/v1",
+       "MaxTokenLimit": 2000,
+       "DefaultModel": "claude-2"
+     }
+   }
+   ```
+
+#### Interactive Mode Commands
+
+When running in interactive mode, the following commands are available:
+```
+help     - Show interactive mode help
+version  - Show version information
+exit     - Exit the application
+quit     - Exit the application
+```
+
+Type your questions directly at the prompt to analyze the codebase.
 
 ## Project Status
 This is an initial implementation focused on core functionality. Testing is currently out of scope, meaning this project should not contain any tests of any kind.

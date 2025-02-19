@@ -16,16 +16,27 @@ public class Program
 
     public static async Task<int> Main(string[] args)
     {
-        var rootCommand = new RootCommand("XPlain - AI-powered code explanation tool");
+        var rootCommand = new RootCommand(
+            """
+            XPlain - AI-powered code explanation tool
 
-        // Help Command Group
-        var helpCommand = new Command("help", "Show help information");
+            Analyzes code and answers questions about your codebase using AI.
+            Run with --help for detailed usage information.
+            """);
+
+        // Help Options Group
+        var helpOption = new Option<bool>(
+            aliases: new[] { "--help", "-h" },
+            description: "Show this help message");
+        
         var versionOption = new Option<bool>(
             aliases: new[] { "--version", "-v" },
             description: "Display version information");
+        
         var examplesOption = new Option<bool>(
             aliases: new[] { "--examples" },
             description: "Show usage examples");
+        
         var configHelpOption = new Option<bool>(
             aliases: new[] { "--config-help" },
             description: "Display configuration options and environment variables");
@@ -114,20 +125,25 @@ public class Program
         rootCommand.AddCommand(modelGroup);
 
         // Special handlers for help commands
-        rootCommand.SetHandler(async (bool version, bool examples, bool configHelp, DirectoryInfo path,
+        rootCommand.SetHandler(async (bool help, bool version, bool examples, bool configHelp, DirectoryInfo path,
             int verbosity, string? question, OutputFormat format, FileInfo? config, string? model) =>
         {
-            if (version)
+            if (help)
+            {
+                ShowHelp();
+                return;
+            }
+            else if (version)
             {
                 ShowVersionInfo();
                 return;
             }
-            if (examples)
+            else if (examples)
             {
                 ShowExamples();
                 return;
             }
-            if (configHelp)
+            else if (configHelp)
             {
                 ShowConfigHelp();
                 return;
@@ -292,12 +308,57 @@ public class Program
         Console.WriteLine("Type your questions about the code to analyze them.");
     }
 
+    private static void ShowHelp()
+    {
+        Console.WriteLine("""
+            XPlain - AI-powered code explanation tool
+
+            USAGE:
+              xplain <codebase-path> [options]
+
+            ARGUMENTS:
+              codebase-path    Path to the codebase directory to analyze (required)
+
+            HELP AND INFORMATION:
+              -h, --help       Show this help message
+              -v, --version    Display version information
+              --examples       Show usage examples
+              --config-help    Display configuration options
+
+            EXECUTION MODE OPTIONS:
+              -q, --question   Direct question to ask about the code (skips interactive mode)
+
+            OUTPUT CONFIGURATION:
+              --verbosity <n>  Verbosity level (0=quiet, 1=normal, 2=verbose)
+              -f, --format     Output format (text, json, or markdown)
+
+            MODEL CONFIGURATION:
+              -c, --config     Path to custom configuration file
+              -m, --model      Override the AI model to use (must start with 'claude-')
+
+            For more information:
+              Use --examples to see usage examples
+              Use --config-help to see configuration options
+              Use --version to see version information
+
+            Examples:
+              xplain ./my-project
+              xplain ./my-project -q "What does Program.cs do?"
+              xplain ./my-project -f markdown --verbosity 2
+            """);
+    }
+
     private static void ShowVersionInfo()
     {
-        Console.WriteLine($"XPlain version {Version}");
-        Console.WriteLine("AI-powered code explanation tool");
-        Console.WriteLine("Copyright (c) 2024");
-        Console.WriteLine("https://github.com/yourusername/xplain");
+        Console.WriteLine($"""
+            XPlain version {Version}
+            AI-powered code explanation tool
+            Copyright (c) 2024
+            https://github.com/yourusername/xplain
+            
+            Using System.CommandLine for CLI parsing
+            Powered by Anthropic's Claude AI
+            """);
     }
 
     private static void ShowExamples()
@@ -329,24 +390,47 @@ public class Program
 
     private static void ShowConfigHelp()
     {
-        Console.WriteLine("XPlain Configuration Guide:");
-        Console.WriteLine("\nConfiguration File (appsettings.json):");
-        Console.WriteLine("{\n  \"Anthropic\": {");
-        Console.WriteLine("    \"ApiToken\": \"your-api-token-here\",");
-        Console.WriteLine("    \"ApiEndpoint\": \"https://api.anthropic.com/v1\",");
-        Console.WriteLine("    \"MaxTokenLimit\": 2000,");
-        Console.WriteLine("    \"DefaultModel\": \"claude-2\"");
-        Console.WriteLine("  }\n}");
-        Console.WriteLine("\nEnvironment Variables:");
-        Console.WriteLine("  XPLAIN_ANTHROPIC__APITOKEN=your-token-here");
-        Console.WriteLine("  XPLAIN_ANTHROPIC__APIENDPOINT=https://custom-endpoint");
-        Console.WriteLine("  XPLAIN_ANTHROPIC__MAXTOKENLIMIT=4000");
-        Console.WriteLine("  XPLAIN_ANTHROPIC__DEFAULTMODEL=claude-2");
-        Console.WriteLine("\nConfiguration Priority:");
-        Console.WriteLine("1. Command-line arguments");
-        Console.WriteLine("2. Environment variables");
-        Console.WriteLine("3. Custom config file (if specified)");
-        Console.WriteLine("4. Default appsettings.json");
+        Console.WriteLine("""
+            XPlain Configuration Guide
+            ========================
+
+            Configuration Methods (in order of priority):
+            1. Command-line arguments (highest priority)
+            2. Environment variables
+            3. Custom config file (if specified)
+            4. Default appsettings.json (lowest priority)
+
+            Configuration File (appsettings.json):
+            ------------------------------------
+            {
+              "Anthropic": {
+                "ApiToken": "your-api-token-here",      # Required: API token for Claude
+                "ApiEndpoint": "https://api.anthropic.com/v1",
+                "MaxTokenLimit": 2000,                  # Maximum tokens per request
+                "DefaultModel": "claude-2"              # Default AI model to use
+              }
+            }
+
+            Environment Variables:
+            -------------------
+            XPLAIN_ANTHROPIC__APITOKEN=your-token-here
+            XPLAIN_ANTHROPIC__APIENDPOINT=https://api.anthropic.com/v1
+            XPLAIN_ANTHROPIC__MAXTOKENLIMIT=4000
+            XPLAIN_ANTHROPIC__DEFAULTMODEL=claude-2
+
+            Configuration Options:
+            -------------------
+            ApiToken:      (Required) Your Anthropic API token
+            ApiEndpoint:   (Optional) Custom API endpoint
+            MaxTokenLimit: (Optional) Maximum tokens per request (default: 2000)
+            DefaultModel:  (Optional) Default AI model (default: claude-2)
+
+            Notes:
+            - Environment variables override appsettings.json
+            - Command-line options override both
+            - Use -c/--config to specify a custom config file
+            - API token is required and must be set in config or environment
+            """);
     }
 
 
