@@ -213,16 +213,18 @@ file class Program
                 }
 
                 var serviceProvider = ConfigureServices(options);
-                var anthropicClient = serviceProvider.GetRequiredService<IAnthropicClient>();
+                var llmFactory = serviceProvider.GetRequiredService<LLMProviderFactory>();
+                var provider = llmFactory.CreateProvider(options.Provider);
 
-                if (!await anthropicClient.ValidateApiConnection())
+                if (provider is IAnthropicClient anthropicClient && !await anthropicClient.ValidateApiConnection())
                 {
                     throw new Exception(
-                        "Failed to validate Anthropic API connection. Please check your API token and connection.");
+                        "Failed to validate LLM provider connection. Please check your API token and connection.");
                 }
 
                 if (options.VerbosityLevel >= 1)
                 {
+                    Console.WriteLine($"Using LLM Provider: {provider.ProviderName} with model: {provider.ModelName}");
                     Console.WriteLine("Configuration loaded and API connection validated successfully!");
                 }
 
@@ -234,12 +236,12 @@ file class Program
                             "Enter your questions about the code. Type 'exit' to quit, 'help' for commands.");
                     }
 
-                    await StartInteractionLoop(anthropicClient, options);
+                    await StartInteractionLoop(provider, options);
                 }
                 else
                 {
                     string codeContext = BuildCodeContext(options.CodebasePath);
-                    string response = await anthropicClient.AskQuestion(options.DirectQuestion!, codeContext);
+                    string response = await provider.GetCompletionAsync($"I have the following code:\n\n{codeContext}\n\nMy question is: {options.DirectQuestion}");
                     OutputResponse(response, options.OutputFormat);
                 }
 
@@ -283,7 +285,7 @@ file class Program
             }
         }
 
-        internal static async Task StartInteractionLoop(IAnthropicClient anthropicClient, CommandLineOptions options)
+        internal static async Task StartInteractionLoop(ILLMProvider provider, CommandLineOptions options)
         {
             while (_keepRunning)
             {
@@ -321,7 +323,7 @@ file class Program
                             try
                             {
                                 string codeContext = BuildCodeContext(options.CodebasePath);
-                                string response = await anthropicClient.AskQuestion(input, codeContext);
+                                string response = await provider.GetCompletionAsync($"I have the following code:\n\n{codeContext}\n\nMy question is: {input}");
                                 if (options.VerbosityLevel >= 1)
                                 {
                                     Console.WriteLine("\nResponse:");
@@ -623,6 +625,7 @@ file class Program
 
         internal static IServiceProvider ConfigureServices(CommandLineOptions options)
         {
+            // Build configuration from various sources
             var configuration = new ConfigurationBuilder()
                 .SetBasePath(Directory.GetCurrentDirectory())
                 .AddJsonFile("appsettings.json", optional: false)
@@ -633,14 +636,54 @@ file class Program
                 .AddEnvironmentVariables("XPLAIN_")
                 .Build();
 
+            // Create service collection
             IServiceCollection services = new ServiceCollection();
 
-            services.AddOptions<AnthropicSettings>()
-                .Bind(configuration.GetSection("Anthropic"))
-                .ValidateDataAnnotations();
+            // Configure settings
+            var llmSettings = new LLMSettings();
+            configuration.GetSection("LLM").Bind(llmSettings);
 
+            // Override settings with command line options if provided
+            if (!string.IsNullOrEmpty(options.Provider))
+            {
+                llmSettings.Provider = options.Provider;
+            }
+            if (!string.IsNullOrEmpty(options.ModelName))
+            {
+                llmSettings.Model = options.ModelName;
+            }
+            if (!string.IsNullOrEmpty(options.ApiKey))
+            {
+                llmSettings.ApiKey = options.ApiKey;
+            }
+
+            // Validate and add LLM settings
+            llmSettings.Validate();
+            services.AddSingleton(Options.Create(llmSettings));
+
+            // Configure provider-specific settings based on selected provider
+            switch (llmSettings.Provider.ToLowerInvariant())
+            {
+                case "anthropic":
+                    var anthropicSettings = new AnthropicSettings
+                    {
+                        Provider = llmSettings.Provider,
+                        Model = llmSettings.Model,
+                        ApiKey = llmSettings.ApiKey,
+                        ApiToken = llmSettings.ApiKey // Map LLM API key to Anthropic token
+                    };
+                    configuration.GetSection("Anthropic").Bind(anthropicSettings);
+                    services.AddSingleton(Options.Create(anthropicSettings));
+                    services.AddSingleton<IAnthropicClient, AnthropicClient>();
+                    break;
+                    
+                default:
+                    throw new InvalidOperationException($"Unsupported provider: {llmSettings.Provider}");
+            }
+
+            // Add common services
             services.AddHttpClient();
-            services.AddSingleton<IAnthropicClient, AnthropicClient>();
+            services.AddSingleton<LLMProviderFactory>();
 
             return services.BuildServiceProvider();
         }

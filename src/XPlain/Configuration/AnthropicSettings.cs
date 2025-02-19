@@ -1,11 +1,19 @@
+using System;
 using System.ComponentModel.DataAnnotations;
 
 namespace XPlain.Configuration;
 
-public class AnthropicSettings
+/// <summary>
+/// Settings specific to the Anthropic Claude provider
+/// </summary>
+public class AnthropicSettings : LLMSettings
 {
     [Required(ErrorMessage = "Anthropic API token is required")]
-    public string ApiToken { get; set; } = string.Empty;
+    public string ApiToken
+    {
+        get => ApiKey;
+        set => ApiKey = value;
+    }
 
     [Required(ErrorMessage = "API endpoint URL is required")]
     [Url(ErrorMessage = "Invalid API endpoint URL format")]
@@ -15,7 +23,11 @@ public class AnthropicSettings
     public int MaxTokenLimit { get; set; } = 2000;
 
     [Required(ErrorMessage = "Default model version is required")]
-    public string DefaultModel { get; set; } = "claude-2";
+    public string DefaultModel
+    {
+        get => Model;
+        set => Model = value;
+    }
 
     [Range(1, 10, ErrorMessage = "Maximum retry attempts must be between 1 and 10")]
     public int MaxRetryAttempts { get; set; } = 3;
