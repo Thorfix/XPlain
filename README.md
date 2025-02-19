@@ -1,12 +1,12 @@
 # XPlain
-A tool to explain codebases using LLM (Anthropic's Claude Sonnet 3.5)
+A tool to explain codebases using multiple LLM providers (currently supporting Anthropic Claude)
 
 ## Overview
-XPlain is a local development tool designed to help developers understand codebases by allowing them to ask questions about code in a designated folder. The tool uses Anthropic's Claude Sonnet 3.5 to provide intelligent responses based on the codebase contents.
+XPlain is a local development tool designed to help developers understand codebases by allowing them to ask questions about code in a designated folder. The tool supports multiple LLM providers (currently Anthropic's Claude) to provide intelligent responses based on the codebase contents.
 
 ## Features
 - Simple CLI interface for asking questions about your code
-- Integration with Anthropic's Claude Sonnet 3.5
+- Support for multiple LLM providers (currently Anthropic Claude)
 - Configuration system for API tokens and settings
 - Tool-assisted code analysis capabilities
 - Windows-focused development (though may work on other platforms)
@@ -28,10 +28,15 @@ XPlain is a local development tool designed to help developers understand codeba
 - Anthropic API token
 
 ## Getting Started
-1. Configure your Anthropic API token using one of these methods:
+1. Configure your LLM provider and API token using one of these methods:
    - Set it in `appsettings.json`:
      ```json
      {
+       "LLM": {
+         "Provider": "Anthropic",
+         "Model": "claude-3-5-sonnet-latest",
+         "ApiKey": "your-api-key-here"
+       },
        "Anthropic": {
          "ApiToken": "your-api-token-here"
        }

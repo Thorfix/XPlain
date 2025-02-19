@@ -2,7 +2,7 @@ using System.ComponentModel.DataAnnotations;
 
 namespace XPlain.Configuration;
 
-public class AnthropicSettings
+public class AnthropicSettings : LLMSettings
 {
     [Required(ErrorMessage = "Anthropic API token is required")]
     public string ApiToken { get; set; } = string.Empty;

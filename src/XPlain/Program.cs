@@ -639,8 +639,13 @@ file class Program
                 .Bind(configuration.GetSection("Anthropic"))
                 .ValidateDataAnnotations();
 
+            services.AddOptions<LLMSettings>()
+                .Bind(configuration.GetSection("LLM"))
+                .ValidateDataAnnotations();
+
             services.AddHttpClient();
             services.AddSingleton<IAnthropicClient, AnthropicClient>();
+            services.AddSingleton<LLMProviderFactory>();
 
             return services.BuildServiceProvider();
         }

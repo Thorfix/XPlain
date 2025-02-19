@@ -104,10 +104,12 @@ public class CircuitBreaker
     }
 }
 
-public class AnthropicClient : IAnthropicClient, IDisposable
+public class AnthropicClient : IAnthropicClient, ILLMProvider, IDisposable
 {
     private readonly HttpClient _httpClient;
     private readonly AnthropicSettings _settings;
+    public string ProviderName => "Anthropic";
+    public string ModelName => _settings.DefaultModel;
     private readonly SemaphoreSlim _rateLimiter;
     private readonly CircuitBreaker _circuitBreaker;
     private readonly Random _random = new();
@@ -180,6 +182,46 @@ public class AnthropicClient : IAnthropicClient, IDisposable
                 _circuitBreaker.RecordFailure();
                 throw new AnthropicApiException("Failed to communicate with Anthropic API", ex);
             }
+        }
+    }
+
+    public async Task<string> GetCompletionAsync(string prompt)
+    {
+        await _rateLimiter.WaitAsync();
+        try
+        {
+            return await ExecuteWithRetryAsync(async () =>
+            {
+                var timeSinceLastRequest = DateTime.UtcNow - _lastRequestTime;
+                if (timeSinceLastRequest.TotalMilliseconds < MinRequestInterval)
+                {
+                    await Task.Delay(MinRequestInterval - (int)timeSinceLastRequest.TotalMilliseconds);
+                }
+
+                AnthropicRequest requestBody = new AnthropicRequest
+                {
+                    Model = _settings.DefaultModel,
+                    Messages =
+                    [
+                        new AnthropicMessage
+                            {Role = "user", Content = [new AnthropicMessageContent {Type = "text", Text = prompt}]}
+                    ],
+                    MaxTokens = _settings.MaxTokenLimit,
+                    Temperature = 0.7,
+                };
+
+                HttpResponseMessage response = await _httpClient.PostAsJsonAsync("/v1/messages", requestBody);
+                response.EnsureSuccessStatusCode();
+
+                var result = await response.Content.ReadFromJsonAsync<AnthropicResponse>();
+                _lastRequestTime = DateTime.UtcNow;
+
+                return result?.Content.FirstOrDefault()?.Text.Trim() ?? "No response received from the API.";
+            });
+        }
+        finally
+        {
+            _rateLimiter.Release();
         }
     }
 

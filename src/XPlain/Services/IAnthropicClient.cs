@@ -1,6 +1,6 @@
 namespace XPlain.Services;
 
-public interface IAnthropicClient
+public interface IAnthropicClient : ILLMProvider
 {
     /// <summary>
     /// Asks a question about the code using the Anthropic API
