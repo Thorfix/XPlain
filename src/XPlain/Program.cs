@@ -18,6 +18,19 @@ public class Program
     {
         var rootCommand = new RootCommand("XPlain - AI-powered code explanation tool");
 
+        // Help options
+        var versionOption = new Option<bool>(
+            aliases: new[] { "--version", "-v" },
+            description: "Display version information");
+
+        var examplesOption = new Option<bool>(
+            aliases: new[] { "--examples" },
+            description: "Show usage examples");
+
+        var configHelpOption = new Option<bool>(
+            aliases: new[] { "--config-help" },
+            description: "Display configuration options and environment variables");
+
         // Required path argument
         var pathArgument = new Argument<DirectoryInfo>(
             name: "codebase-path",
@@ -25,7 +38,7 @@ public class Program
 
         // Options
         var verbosityOption = new Option<int>(
-            aliases: new[] { "--verbosity", "-v" },
+            aliases: new[] { "--verbosity" },
             getDefaultValue: () => 1,
             description: "Verbosity level (0=quiet, 1=normal, 2=verbose)");
 
@@ -47,12 +60,36 @@ public class Program
             description: "Override the AI model to use");
 
         // Add options to command
+        rootCommand.AddOption(versionOption);
+        rootCommand.AddOption(examplesOption);
+        rootCommand.AddOption(configHelpOption);
+        
         rootCommand.AddArgument(pathArgument);
         rootCommand.AddOption(verbosityOption);
         rootCommand.AddOption(questionOption);
         rootCommand.AddOption(outputFormatOption);
         rootCommand.AddOption(configOption);
         rootCommand.AddOption(modelOption);
+
+        // Special handlers for help commands
+        rootCommand.SetHandler(async (bool version, bool examples, bool configHelp, DirectoryInfo path,
+            int verbosity, string? question, OutputFormat format, FileInfo? config, string? model) =>
+        {
+            if (version)
+            {
+                ShowVersionInfo();
+                return;
+            }
+            if (examples)
+            {
+                ShowExamples();
+                return;
+            }
+            if (configHelp)
+            {
+                ShowConfigHelp();
+                return;
+            }
 
         rootCommand.SetHandler(async (DirectoryInfo path, int verbosity, string? question,
             OutputFormat format, FileInfo? config, string? model) =>
@@ -205,6 +242,59 @@ public class Program
         Console.WriteLine("  quit     - Exit the application");
         Console.WriteLine();
         Console.WriteLine("Type your questions about the code to analyze them.");
+    }
+
+    private static void ShowVersionInfo()
+    {
+        Console.WriteLine($"XPlain version {Version}");
+        Console.WriteLine("AI-powered code explanation tool");
+        Console.WriteLine("Copyright (c) 2024");
+        Console.WriteLine("https://github.com/yourusername/xplain");
+    }
+
+    private static void ShowExamples()
+    {
+        Console.WriteLine("XPlain Usage Examples:");
+        Console.WriteLine("\nBasic Usage:");
+        Console.WriteLine("  xplain ./my-project");
+        Console.WriteLine("  # Starts interactive mode for the specified codebase");
+        Console.WriteLine("\nDirect Questions:");
+        Console.WriteLine("  xplain ./my-project -q \"What does the Program.cs file do?\"");
+        Console.WriteLine("  # Gets immediate answer for a specific question");
+        Console.WriteLine("\nCustom Output Format:");
+        Console.WriteLine("  xplain ./my-project -f markdown -q \"Explain the main architecture\"");
+        Console.WriteLine("  # Gets response in markdown format");
+        Console.WriteLine("\nVerbosity Control:");
+        Console.WriteLine("  xplain ./my-project --verbosity 2");
+        Console.WriteLine("  # Runs with detailed logging");
+        Console.WriteLine("\nCustom Configuration:");
+        Console.WriteLine("  xplain ./my-project -c custom-settings.json");
+        Console.WriteLine("  # Uses custom configuration file");
+        Console.WriteLine("\nSpecific Model:");
+        Console.WriteLine("  xplain ./my-project -m claude-3-opus-20240229");
+        Console.WriteLine("  # Uses a specific model version");
+    }
+
+    private static void ShowConfigHelp()
+    {
+        Console.WriteLine("XPlain Configuration Guide:");
+        Console.WriteLine("\nConfiguration File (appsettings.json):");
+        Console.WriteLine("{\n  \"Anthropic\": {");
+        Console.WriteLine("    \"ApiToken\": \"your-api-token-here\",");
+        Console.WriteLine("    \"ApiEndpoint\": \"https://api.anthropic.com/v1\",");
+        Console.WriteLine("    \"MaxTokenLimit\": 2000,");
+        Console.WriteLine("    \"DefaultModel\": \"claude-2\"");
+        Console.WriteLine("  }\n}");
+        Console.WriteLine("\nEnvironment Variables:");
+        Console.WriteLine("  XPLAIN_ANTHROPIC__APITOKEN=your-token-here");
+        Console.WriteLine("  XPLAIN_ANTHROPIC__APIENDPOINT=https://custom-endpoint");
+        Console.WriteLine("  XPLAIN_ANTHROPIC__MAXTOKENLIMIT=4000");
+        Console.WriteLine("  XPLAIN_ANTHROPIC__DEFAULTMODEL=claude-2");
+        Console.WriteLine("\nConfiguration Priority:");
+        Console.WriteLine("1. Command-line arguments");
+        Console.WriteLine("2. Environment variables");
+        Console.WriteLine("3. Custom config file (if specified)");
+        Console.WriteLine("4. Default appsettings.json");
     }
 
 

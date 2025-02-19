@@ -73,6 +73,42 @@ dotnet build
 dotnet run --project src/XPlain/XPlain.csproj
 ```
 
+### Command-Line Interface
+
+XPlain provides a comprehensive command-line interface with the following options:
+
+```
+USAGE:
+  xplain <codebase-path> [options]
+
+ARGUMENTS:
+  codebase-path  Path to the codebase directory to analyze
+
+OPTIONS:
+  -h, --help        Show help message and exit
+  -v, --version     Display version information
+  --examples        Show usage examples
+  --config-help     Display configuration options and environment variables
+  --verbosity <n>   Verbosity level (0=quiet, 1=normal, 2=verbose)
+  -q, --question    Direct question to ask about the code (skips interactive mode)
+  -f, --format      Output format (text, json, or markdown)
+  -c, --config      Path to custom configuration file
+  -m, --model       Override the AI model to use
+
+EXAMPLES:
+  # Start interactive mode
+  xplain ./my-project
+
+  # Ask a direct question
+  xplain ./my-project -q "What does Program.cs do?"
+
+  # Get markdown output
+  xplain ./my-project -f markdown -q "Explain the architecture"
+```
+
+For more detailed examples, use the `--examples` command.
+For configuration help, use the `--config-help` command.
+
 ## Project Status
 This is an initial implementation focused on core functionality. Testing is currently out of scope, meaning this project should not contain any tests of any kind.
 
