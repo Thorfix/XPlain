@@ -87,7 +87,63 @@ public class Program
         rootCommand.AddCommand(outputGroup);
         rootCommand.AddCommand(modelGroup);
 
-        rootCommand.SetHandler(RootCommandHandler);
+        // Root command handler
+        rootCommand.SetHandler(async (ParseResult parseResult) =>
+        {
+            try
+            {
+                // Check help options first
+                if (parseResult.GetValueForOption(helpOption))
+                {
+                    ShowHelp();
+                    return;
+                }
+                if (parseResult.GetValueForOption(versionOption))
+                {
+                    ShowVersionInfo();
+                    return;
+                }
+                if (parseResult.GetValueForOption(examplesOption))
+                {
+                    ShowExamples();
+                    return;
+                }
+                if (parseResult.GetValueForOption(configHelpOption))
+                {
+                    ShowConfigHelp();
+                    return;
+                }
+
+                // Create options instance from parsed values
+                var options = new CommandLineOptions
+                {
+                    CodebasePath = parseResult.GetValueForOption(requiredGroup.Options.First(o => o.Name == "codebasepath")) ?? "",
+                    VerbosityLevel = parseResult.GetValueForOption(outputGroup.Options.First(o => o.Name == "verbosity")),
+                    DirectQuestion = parseResult.GetValueForOption(executionGroup.Options.First(o => o.Name == "question")),
+                    OutputFormat = Enum.Parse<OutputFormat>(parseResult.GetValueForOption(outputGroup.Options.First(o => o.Name == "format")) ?? "Text"),
+                    ConfigPath = parseResult.GetValueForOption(modelGroup.Options.First(o => o.Name == "config")),
+                    ModelName = parseResult.GetValueForOption(modelGroup.Options.First(o => o.Name == "model")),
+                    InteractiveMode = string.IsNullOrEmpty(parseResult.GetValueForOption(executionGroup.Options.First(o => o.Name == "question")))
+                };
+
+                // Validate options
+                options.Validate();
+
+                // Process the command with validated options
+                await ProcessCommand(options);
+            }
+            catch (ValidationException ex)
+            {
+                Console.Error.WriteLine("Validation error:");
+                Console.Error.WriteLine(ex.Message);
+                Environment.Exit(1);
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"Error: {ex.Message}");
+                Environment.Exit(1);
+            }
+        });
         
         // Override default help with our custom help
         rootCommand.HelpOption.SetHandler(() => {

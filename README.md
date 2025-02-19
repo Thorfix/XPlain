@@ -67,46 +67,163 @@ THORFIX_ANTHROPIC__DEFAULTMODEL=claude-2
 dotnet build
 ```
 
-### Running the Project
-
-```bash
-dotnet run --project src/XPlain/XPlain.csproj
-```
-
 ### Command-Line Interface
 
-XPlain provides a comprehensive command-line interface with grouped options for better organization and usability.
+XPlain provides a comprehensive command-line interface designed to be user-friendly and intuitive. The interface follows standard CLI conventions and includes detailed help and documentation.
 
+#### Basic Usage
+
+```bash
+# Start interactive mode (basic usage)
+xplain ./my-project
+
+# Ask a direct question
+xplain ./my-project --question "What does this code do?"
+
+# Get detailed analysis in markdown format
+xplain ./my-project --format markdown --verbosity 2
 ```
-USAGE:
-  xplain <codebase-path> [options]
 
-ARGUMENTS:
-  codebase-path    Path to the codebase directory to analyze (required)
+#### Help Commands
 
-HELP AND INFORMATION:
-  -h, --help       Show help message and exit
-  -v, --version    Display version information
-  --examples       Show usage examples
-  --config-help    Display configuration options and environment variables
+XPlain provides several help commands to assist users:
 
-EXECUTION MODE OPTIONS:
-  -q, --question   Direct question to ask about the code (skips interactive mode)
+1. **General Help** (`--help` or `-h`)
+   ```bash
+   xplain --help
+   ```
+   Shows complete usage information, available options, and basic examples.
 
-OUTPUT CONFIGURATION:
-  --verbosity <n>  Verbosity level (0=quiet, 1=normal, 2=verbose)
-  -f, --format     Output format (text, json, or markdown)
+2. **Version Information** (`--version` or `-v`)
+   ```bash
+   xplain --version
+   ```
+   Displays version number and build information.
 
-MODEL CONFIGURATION:
-  -c, --config     Path to custom configuration file
-  -m, --model      Override the AI model to use (must start with 'claude-')
+3. **Usage Examples** (`--examples`)
+   ```bash
+   xplain --examples
+   ```
+   Shows comprehensive examples covering common use cases.
 
-VALIDATION:
-- Codebase path must exist
-- Verbosity level must be between 0 and 2
-- Configuration file must exist if specified
-- Model name must start with 'claude-' if specified
+4. **Configuration Help** (`--config-help`)
+   ```bash
+   xplain --config-help
+   ```
+   Explains configuration options and environment variables.
+
+#### Command-Line Options
+
+Options are organized into logical groups for better understanding:
+
+1. **Required Options**
+   - `<codebase-path>`
+     - Path to the code directory to analyze
+     - Must be a valid directory
+     - Example: `xplain ./my-project`
+
+2. **Execution Mode Options**
+   - `--question, -q <question>`
+     - Direct question about the code
+     - Must be at least 10 characters
+     - Example: `--question "What does Program.cs do?"`
+
+3. **Output Configuration**
+   - `--verbosity <level>`
+     - `0`: Quiet (minimal output)
+     - `1`: Normal (default)
+     - `2`: Verbose (detailed output)
+     - Example: `--verbosity 2`
+   
+   - `--format, -f <format>`
+     - Output format options:
+       - `text`: Plain text (default)
+       - `json`: JSON format
+       - `markdown`: Markdown format
+     - Example: `--format markdown`
+
+4. **Model Configuration**
+   - `--config, -c <path>`
+     - Path to custom JSON configuration
+     - Example: `--config custom-settings.json`
+   
+   - `--model, -m <model>`
+     - Override AI model version
+     - Must start with 'claude-'
+     - Example: `--model claude-3-opus-20240229`
+
+#### Validation Rules
+
+The CLI includes helpful validation to prevent errors:
+
+1. **Codebase Path**
+   - Must be specified
+   - Directory must exist
+   - Error: "Codebase path is required. Please specify the directory containing your code"
+
+2. **Question Format**
+   - Minimum 10 characters
+   - Error includes example of proper format
+
+3. **Verbosity Level**
+   - Must be between 0 and 2
+   - Error shows valid range and example
+
+4. **Output Format**
+   - Must be one of: Text, Json, Markdown
+   - Case-insensitive
+   - Error shows valid options
+
+5. **Configuration File**
+   - Must be a .json file
+   - Must exist if specified
+   - Error includes example path
+
+6. **Model Name**
+   - Must start with 'claude-'
+   - Error shows correct format
+
+#### Environment Variables
+
+Configure XPlain using environment variables:
+```bash
+# Required
+XPLAIN_ANTHROPIC__APITOKEN=your-token-here
+
+# Optional
+XPLAIN_ANTHROPIC__APIENDPOINT=https://api.anthropic.com/v1
+XPLAIN_ANTHROPIC__MAXTOKENLIMIT=4000
+XPLAIN_ANTHROPIC__DEFAULTMODEL=claude-2
 ```
+
+#### Examples of Common Use Cases
+
+1. **Basic Analysis**
+   ```bash
+   xplain ./my-project
+   ```
+
+2. **Quick Question**
+   ```bash
+   xplain ./my-project -q "What are the main classes?" -f text
+   ```
+
+3. **Detailed Documentation**
+   ```bash
+   xplain ./my-project --verbosity 2 -f markdown \
+     -q "Provide a detailed analysis of the architecture"
+   ```
+
+4. **Custom Configuration**
+   ```bash
+   xplain ./my-project -c custom-config.json \
+     -m claude-3-opus-20240229 --format json
+   ```
+
+5. **Quiet Mode**
+   ```bash
+   xplain ./my-project --verbosity 0 -q "List all public methods"
+   ```
 
 #### Help Commands
 

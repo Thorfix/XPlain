@@ -43,7 +43,7 @@ public enum OptionGroup
 public class CommandLineOptions
 {
     #region Required Options Group
-    [Required(ErrorMessage = "Codebase path is required. Please specify the directory containing your code.")]
+    [Required(ErrorMessage = "Codebase path is required. Please specify the directory containing your code using: xplain <path-to-code>")]
     [Description("Path to the codebase directory to analyze")]
     [OptionGroup(OptionGroup.Required)]
     public required string CodebasePath { get; set; }
@@ -51,6 +51,7 @@ public class CommandLineOptions
 
     #region Execution Mode Options
     [Description("Direct question to ask about the code (skips interactive mode)")]
+    [RegularExpression(@".{10,}", ErrorMessage = "Question must be at least 10 characters long to be meaningful. Example: --question \"What does the Program.cs file do?\"")]
     [OptionGroup(OptionGroup.ExecutionMode)]
     public string? DirectQuestion { get; set; }
 
@@ -61,23 +62,25 @@ public class CommandLineOptions
 
     #region Output Options
     [Description("Verbosity level (0=quiet, 1=normal, 2=verbose)")]
-    [Range(0, 2, ErrorMessage = "Verbosity level must be between 0 and 2")]
+    [Range(0, 2, ErrorMessage = "Verbosity level must be between 0 and 2. Example: --verbosity 2 for detailed output")]
     [OptionGroup(OptionGroup.Output)]
     public int VerbosityLevel { get; set; } = 1;
 
     [Description("Output format for responses (Text, Json, or Markdown)")]
+    [EnumDataType(typeof(OutputFormat), ErrorMessage = "Output format must be one of: Text, Json, Markdown. Example: --format markdown")]
     [OptionGroup(OptionGroup.Output)]
     public OutputFormat OutputFormat { get; set; } = OutputFormat.Text;
     #endregion
 
     #region Model Configuration Options
     [Description("Path to custom configuration file")]
+    [FileExtensions(Extensions = "json", ErrorMessage = "Configuration file must be a .json file. Example: --config custom-settings.json")]
     [OptionGroup(OptionGroup.Model)]
     public string? ConfigPath { get; set; }
 
     [Description("Override the AI model to use")]
     [RegularExpression(@"^claude-[a-zA-Z0-9\-\.]+$", 
-        ErrorMessage = "Invalid model name format. Must start with 'claude-' followed by version.")]
+        ErrorMessage = "Invalid model name format. Must start with 'claude-' followed by version. Example: --model claude-3-opus-20240229")]
     [OptionGroup(OptionGroup.Model)]
     public string? ModelName { get; set; }
     #endregion
