@@ -36,8 +36,9 @@ namespace XPlain.Services
             ILLMProvider provider = providerName.ToLowerInvariant() switch
             {
                 "anthropic" => CreateAnthropicProvider(),
+                "openai" => CreateOpenAIProvider(),
                 _ => throw new ArgumentException($"Unsupported LLM provider: {providerName}. " +
-                    $"Supported providers are: Anthropic")
+                    $"Supported providers are: Anthropic, OpenAI")
             };
 
             ValidateProvider(provider);
@@ -58,6 +59,23 @@ namespace XPlain.Services
             catch (Exception ex) when (ex is not InvalidOperationException)
             {
                 throw new InvalidOperationException("Failed to initialize Anthropic provider", ex);
+            }
+        }
+
+        private ILLMProvider CreateOpenAIProvider()
+        {
+            try
+            {
+                var client = _serviceProvider.GetRequiredService<OpenAIClient>();
+                if (client == null)
+                {
+                    throw new InvalidOperationException("Failed to create OpenAI client");
+                }
+                return client;
+            }
+            catch (Exception ex) when (ex is not InvalidOperationException)
+            {
+                throw new InvalidOperationException("Failed to initialize OpenAI provider", ex);
             }
         }
 
