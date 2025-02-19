@@ -215,6 +215,18 @@ file class Program
                 var serviceProvider = ConfigureServices(options);
                 var llmFactory = serviceProvider.GetRequiredService<LLMProviderFactory>();
                 var provider = llmFactory.CreateProvider(options.Provider);
+                var cacheProvider = serviceProvider.GetRequiredService<ICacheProvider>();
+
+                // Initialize cache with code hash and warm up
+                var codeHash = await CalculateCodeHashAsync(options.CodebasePath);
+                await cacheProvider.InvalidateOnCodeChangeAsync(codeHash);
+                
+                var cacheSettings = serviceProvider.GetRequiredService<IOptions<CacheSettings>>().Value;
+                if (cacheSettings.FrequentQuestions.Length > 0)
+                {
+                    var codeContext = BuildCodeContext(options.CodebasePath);
+                    await cacheProvider.WarmupCacheAsync(cacheSettings.FrequentQuestions, codeContext);
+                }
 
                 if (provider is IAnthropicClient anthropicClient && !await anthropicClient.ValidateApiConnection())
                 {
