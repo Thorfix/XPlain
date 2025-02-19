@@ -1,7 +1,9 @@
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
+using System.CommandLine;
 using System.ComponentModel.DataAnnotations;
+using System.Text.Json;
 using XPlain.Configuration;
 using XPlain.Services;
 
@@ -12,61 +14,94 @@ public class Program
     private const string Version = "1.0.0";
     private static bool _keepRunning = true;
 
-    public static async Task Main(string[] args)
+    public static async Task<int> Main(string[] args)
     {
-        try
+        var rootCommand = new RootCommand("XPlain - AI-powered code explanation tool");
+
+        // Required path argument
+        var pathArgument = new Argument<DirectoryInfo>(
+            name: "codebase-path",
+            description: "Path to the codebase directory to analyze");
+
+        // Options
+        var verbosityOption = new Option<int>(
+            aliases: new[] { "--verbosity", "-v" },
+            getDefaultValue: () => 1,
+            description: "Verbosity level (0=quiet, 1=normal, 2=verbose)");
+
+        var questionOption = new Option<string?>(
+            aliases: new[] { "--question", "-q" },
+            description: "Direct question to ask about the code (skips interactive mode)");
+
+        var outputFormatOption = new Option<OutputFormat>(
+            aliases: new[] { "--format", "-f" },
+            getDefaultValue: () => OutputFormat.Text,
+            description: "Output format (text, json, or markdown)");
+
+        var configOption = new Option<FileInfo?>(
+            aliases: new[] { "--config", "-c" },
+            description: "Path to custom configuration file");
+
+        var modelOption = new Option<string?>(
+            aliases: new[] { "--model", "-m" },
+            description: "Override the AI model to use");
+
+        // Add options to command
+        rootCommand.AddArgument(pathArgument);
+        rootCommand.AddOption(verbosityOption);
+        rootCommand.AddOption(questionOption);
+        rootCommand.AddOption(outputFormatOption);
+        rootCommand.AddOption(configOption);
+        rootCommand.AddOption(modelOption);
+
+        rootCommand.SetHandler(async (DirectoryInfo path, int verbosity, string? question,
+            OutputFormat format, FileInfo? config, string? model) =>
         {
-            var serviceProvider = ConfigureServices();
-            var anthropicClient = serviceProvider.GetRequiredService<IAnthropicClient>();
-
-            if (!await anthropicClient.ValidateApiConnection())
+            try
             {
-                throw new Exception("Failed to validate Anthropic API connection. Please check your API token and connection.");
-            }
-
-            Console.WriteLine("Configuration loaded and API connection validated successfully!");
-
-            if (args.Length > 0)
-            {
-                if (args[0] == "--help" || args[0] == "-h")
+                var options = new CommandLineOptions
                 {
-                    ShowHelp();
-                    return;
-                }
-                if (args[0] == "--version" || args[0] == "-v")
+                    CodebasePath = path.FullName,
+                    VerbosityLevel = verbosity,
+                    DirectQuestion = question,
+                    OutputFormat = format,
+                    ConfigPath = config?.FullName,
+                    ModelName = model,
+                    InteractiveMode = string.IsNullOrEmpty(question)
+                };
+
+                if (verbosity >= 1)
                 {
-                    Console.WriteLine($"XPlain version {Version}");
-                    return;
+                    Console.WriteLine($"Analyzing code directory: {options.CodebasePath}");
                 }
-            }
 
-            string? codeDirectory = null;
-            if (args.Length > 0 && Directory.Exists(args[0]))
-            {
-                codeDirectory = args[0];
-            }
+                var serviceProvider = ConfigureServices(options);
+                var anthropicClient = serviceProvider.GetRequiredService<IAnthropicClient>();
 
-            while (codeDirectory == null)
-            {
-                Console.Write("Enter the path to your code directory: ");
-                string? input = Console.ReadLine();
-                if (string.IsNullOrWhiteSpace(input))
+                if (!await anthropicClient.ValidateApiConnection())
                 {
-                    Console.WriteLine("Directory path cannot be empty.");
-                    continue;
+                    throw new Exception("Failed to validate Anthropic API connection. Please check your API token and connection.");
                 }
-                if (!Directory.Exists(input))
+
+                if (verbosity >= 1)
                 {
-                    Console.WriteLine("Directory does not exist. Please enter a valid path.");
-                    continue;
+                    Console.WriteLine("Configuration loaded and API connection validated successfully!");
                 }
-                codeDirectory = input;
-            }
 
-            Console.WriteLine($"Analyzing code directory: {codeDirectory}");
-            Console.WriteLine("Enter your questions about the code. Type 'exit' to quit, 'help' for commands.");
-
-            await StartInteractionLoop(anthropicClient, codeDirectory);
+                if (options.InteractiveMode)
+                {
+                    if (verbosity >= 1)
+                    {
+                        Console.WriteLine("Enter your questions about the code. Type 'exit' to quit, 'help' for commands.");
+                    }
+                    await StartInteractionLoop(anthropicClient, options);
+                }
+                else
+                {
+                    string codeContext = BuildCodeContext(options.CodebasePath);
+                    string response = await anthropicClient.AskQuestion(options.DirectQuestion!, codeContext);
+                    OutputResponse(response, options.OutputFormat);
+                }
         }
         catch (OptionsValidationException ex)
         {
@@ -84,7 +119,33 @@ public class Program
         }
     }
 
-    private static async Task StartInteractionLoop(IAnthropicClient anthropicClient, string codeDirectory)
+        });
+
+        return await rootCommand.InvokeAsync(args);
+    }
+
+    private static void OutputResponse(string response, OutputFormat format)
+    {
+        switch (format)
+        {
+            case OutputFormat.Json:
+                var jsonObject = new { response = response };
+                var jsonOptions = new JsonSerializerOptions { WriteIndented = true };
+                Console.WriteLine(JsonSerializer.Serialize(jsonObject, jsonOptions));
+                break;
+            case OutputFormat.Markdown:
+                Console.WriteLine("```markdown");
+                Console.WriteLine(response);
+                Console.WriteLine("```");
+                break;
+            case OutputFormat.Text:
+            default:
+                Console.WriteLine(response);
+                break;
+        }
+    }
+
+    private static async Task StartInteractionLoop(IAnthropicClient anthropicClient, CommandLineOptions options)
     {
         while (_keepRunning)
         {
@@ -110,13 +171,19 @@ public class Program
                     break;
 
                 default:
-                    Console.WriteLine($"Processing question about code in {codeDirectory}...");
+                    if (options.VerbosityLevel >= 1)
+                    {
+                        Console.WriteLine($"Processing question about code in {options.CodebasePath}...");
+                    }
                     try
                     {
-                        string codeContext = BuildCodeContext(codeDirectory);
+                        string codeContext = BuildCodeContext(options.CodebasePath);
                         string response = await anthropicClient.AskQuestion(input, codeContext);
-                        Console.WriteLine("\nResponse:");
-                        Console.WriteLine(response);
+                        if (options.VerbosityLevel >= 1)
+                        {
+                            Console.WriteLine("\nResponse:");
+                        }
+                        OutputResponse(response, options.OutputFormat);
                     }
                     catch (Exception ex)
                     {
@@ -127,19 +194,6 @@ public class Program
         }
 
         Console.WriteLine("Goodbye!");
-    }
-
-    private static void ShowHelp()
-    {
-        Console.WriteLine("XPlain - Code Analysis Tool");
-        Console.WriteLine("Usage: XPlain [directory] [options]");
-        Console.WriteLine();
-        Console.WriteLine("Arguments:");
-        Console.WriteLine("  directory     Path to the code directory to analyze");
-        Console.WriteLine();
-        Console.WriteLine("Options:");
-        Console.WriteLine("  -h, --help     Show this help message");
-        Console.WriteLine("  -v, --version  Show version information");
     }
 
     private static void ShowInteractiveHelp()
@@ -172,11 +226,12 @@ public class Program
         return context.ToString();
     }
 
-    private static IServiceProvider ConfigureServices()
+    private static IServiceProvider ConfigureServices(CommandLineOptions options)
     {
         var configuration = new ConfigurationBuilder()
             .SetBasePath(Directory.GetCurrentDirectory())
             .AddJsonFile("appsettings.json", optional: false)
+            .AddJsonFile(options.ConfigPath ?? "appsettings.override.json", optional: true)
             .AddJsonFile($"appsettings.{Environment.GetEnvironmentVariable("DOTNET_ENVIRONMENT") ?? "Production"}.json", optional: true)
             .AddEnvironmentVariables("XPLAIN_")
             .Build();
