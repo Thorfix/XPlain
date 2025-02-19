@@ -164,10 +164,11 @@ public class Program
 
 
 
-            // Create and validate options
-            var options = new CommandLineOptions();
-            var execResult = await ExecuteWithOptions(options);
-            return execResult;
+        });
+
+        return await rootCommand.InvokeAsync(args);
+    }
+
     private static async Task<int> ExecuteWithOptions(CommandLineOptions options)
     {
         try
@@ -209,8 +210,6 @@ public class Program
             }
 
             return 0;
-        }
-        }
         catch (OptionsValidationException ex)
         {
             Console.Error.WriteLine("Configuration validation failed:");
@@ -227,9 +226,6 @@ public class Program
         }
     }
 
-        });
-
-        return await rootCommand.InvokeAsync(args);
     }
 
     private static void OutputResponse(string response, OutputFormat format)
@@ -304,7 +300,7 @@ public class Program
         Console.WriteLine("Goodbye!");
     }
 
-    private static void ShowInteractiveHelp()
+    public static void ShowInteractiveHelp()
     {
         Console.WriteLine("Available commands:");
         Console.WriteLine("Help and Information:");
@@ -318,7 +314,7 @@ public class Program
         Console.WriteLine("Type your questions about the code to analyze them.");
     }
 
-    private static void ShowHelp()
+    public static void ShowHelp()
     {
         var optionGroups = typeof(OptionGroup).GetEnumValues()
             .Cast<OptionGroup>()
@@ -386,7 +382,7 @@ public class Program
         Console.WriteLine(helpText.ToString());
     }
 
-    private static void ShowVersionInfo()
+    public static void ShowVersionInfo()
     {
         Console.WriteLine($"""
             XPlain version {Version}
@@ -399,7 +395,7 @@ public class Program
             """);
     }
 
-    private static void ShowExamples()
+    public static void ShowExamples()
     {
         Console.WriteLine("""
             XPlain Usage Examples
@@ -487,7 +483,7 @@ public class Program
             """);
     }
 
-    private static void ShowConfigHelp()
+    public static void ShowConfigHelp()
     {
         Console.WriteLine("""
             XPlain Configuration Guide
@@ -533,7 +529,7 @@ public class Program
     }
 
 
-    private static string BuildCodeContext(string codeDirectory)
+    public static string BuildCodeContext(string codeDirectory)
     {
         var context = new System.Text.StringBuilder();
         context.AppendLine("Code files in the directory:");
@@ -551,7 +547,7 @@ public class Program
         return context.ToString();
     }
 
-    private static IServiceProvider ConfigureServices(CommandLineOptions options)
+    public static IServiceProvider ConfigureServices(CommandLineOptions options)
     {
         var configuration = new ConfigurationBuilder()
             .SetBasePath(Directory.GetCurrentDirectory())
