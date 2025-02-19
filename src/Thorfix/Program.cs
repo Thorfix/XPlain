@@ -3,6 +3,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
 using System.ComponentModel.DataAnnotations;
 using Thorfix.Configuration;
+using Thorfix.Services;
 
 namespace Thorfix;
 
@@ -11,13 +12,19 @@ public class Program
     private const string Version = "1.0.0";
     private static bool _keepRunning = true;
 
-    public static void Main(string[] args)
+    public static async Task Main(string[] args)
     {
         try
         {
-            var services = ConfigureServices();
-            var anthropicSettings = services.GetRequiredService<IOptions<AnthropicSettings>>().Value;
-            Console.WriteLine("Configuration loaded successfully!");
+            var serviceProvider = ConfigureServices();
+            var anthropicClient = serviceProvider.GetRequiredService<IAnthropicClient>();
+
+            if (!await anthropicClient.ValidateApiConnection())
+            {
+                throw new Exception("Failed to validate Anthropic API connection. Please check your API token and connection.");
+            }
+
+            Console.WriteLine("Configuration loaded and API connection validated successfully!");
 
             if (args.Length > 0)
             {
@@ -59,7 +66,7 @@ public class Program
             Console.WriteLine($"Analyzing code directory: {codeDirectory}");
             Console.WriteLine("Enter your questions about the code. Type 'exit' to quit, 'help' for commands.");
 
-            StartInteractionLoop(codeDirectory);
+            await StartInteractionLoop(codeDirectory);
         }
         catch (OptionsValidationException ex)
         {
@@ -77,7 +84,7 @@ public class Program
         }
     }
 
-    private static void StartInteractionLoop(string codeDirectory)
+    private static async Task StartInteractionLoop(string codeDirectory)
     {
         while (_keepRunning)
         {
@@ -103,9 +110,18 @@ public class Program
                     break;
 
                 default:
-                    // TODO: Process the question through LLM integration
                     Console.WriteLine($"Processing question about code in {codeDirectory}...");
-                    Console.WriteLine("LLM integration pending implementation.");
+                    try
+                    {
+                        string codeContext = BuildCodeContext(codeDirectory);
+                        string response = await anthropicClient.AskQuestion(input, codeContext);
+                        Console.WriteLine("\nResponse:");
+                        Console.WriteLine(response);
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.WriteLine($"Error processing question: {ex.Message}");
+                    }
                     break;
             }
         }
@@ -138,6 +154,24 @@ public class Program
     }
 
 
+    private static string BuildCodeContext(string codeDirectory)
+    {
+        var context = new System.Text.StringBuilder();
+        context.AppendLine("Code files in the directory:");
+
+        var files = Directory.GetFiles(codeDirectory, "*.*", SearchOption.AllDirectories)
+            .Where(f => Path.GetExtension(f) is ".cs" or ".fs" or ".vb" or ".js" or ".ts" or ".py" or ".java" or ".cpp" or ".h");
+
+        foreach (var file in files)
+        {
+            var relativePath = Path.GetRelativePath(codeDirectory, file);
+            context.AppendLine($"\nFile: {relativePath}");
+            context.AppendLine(File.ReadAllText(file));
+        }
+
+        return context.ToString();
+    }
+
     private static IServiceProvider ConfigureServices()
     {
         var configuration = new ConfigurationBuilder()
@@ -151,6 +185,9 @@ public class Program
         services.AddOptions<AnthropicSettings>()
             .Bind(configuration.GetSection("Anthropic"))
             .ValidateDataAnnotations();
+
+        services.AddHttpClient();
+        services.AddSingleton<IAnthropicClient, AnthropicClient>();
 
         return services.BuildServiceProvider();
     }
