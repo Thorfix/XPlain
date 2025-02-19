@@ -10,9 +10,9 @@ using System.Text.Json;
 using XPlain.Configuration;
 using XPlain.Services;
 
-namespace XPlain;
-
-file class Program
+namespace XPlain
+{
+    internal class Program
     {
         private const string Version = "1.0.0";
         static bool _keepRunning = true;
@@ -102,8 +102,6 @@ file class Program
             {
                 try
                 {
-                    try
-                    {
                         // Handle special help options first
                         if (parseResult.GetValueForOption(helpOption) == true ||
                             parseResult.GetValueForOption(helpGroup.Options.First(o => o.Name == "help")) == true)
@@ -179,24 +177,17 @@ file class Program
                         }
                         finally
                         {
-                            if (options.VerbosityLevel >= 2)
+                            if (options?.VerbosityLevel >= 2)
                             {
                                 Console.WriteLine("Command processing completed.");
                             }
                         }
-                    }
-                    catch (Exception ex)
-                    {
-                        Console.Error.WriteLine($"Error in command processing: {ex.Message}");
-                        Environment.Exit(1);
-                    }
-                    finally
-                    {
-                        if (options?.VerbosityLevel >= 2)
-                        {
-                            Console.WriteLine("Root command handler completed.");
-                        }
-                    }
+                }
+                catch (Exception ex)
+                {
+                    Console.Error.WriteLine($"Error in command processing: {ex.Message}");
+                    Environment.Exit(1);
+                }
             });
 
             // Override default help with our custom help
@@ -306,9 +297,7 @@ file class Program
 
                 try
                 {
-                    try
-                    {
-                        switch (input.ToLower())
+                    switch (input.ToLower())
                         {
                             case "exit":
                             case "quit":
