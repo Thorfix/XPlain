@@ -1,129 +1,204 @@
-// Cache Monitoring Dashboard
-const connection = new signalR.HubConnectionBuilder()
-    .withUrl("/cacheHub")
-    .build();
+let currentMetrics = {};
+let metricsCharts = {};
+let updateInterval;
 
-let healthChart = null;
-let metricsChart = null;
-
-async function initializeDashboard() {
-    await Promise.all([
-        loadHealthStatus(),
-        loadMetrics(),
-        loadAlerts(),
-        loadAnalytics(),
-        loadCircuitBreakerStatus(),
-        loadEvictionStats(),
-        loadEncryptionStatus(),
-        loadMaintenanceLogs()
-    ]);
-    setupRefreshIntervals();
+function initializeDashboard() {
+    setupChartContainers();
+    fetchMetrics();
+    fetchAlerts();
+    fetchPredictions();
+    startRealTimeUpdates();
 }
 
-async function loadHealthStatus() {
-    const response = await fetch('/api/cache/health');
-    const health = await response.json();
+async function fetchMetrics() {
+    try {
+        const response = await fetch('/api/cache/metrics');
+        const metrics = await response.json();
+        currentMetrics = metrics;
+        updateMetricsDisplay(metrics);
+    } catch (error) {
+        console.error('Error fetching metrics:', error);
+    }
+}
+
+async function fetchPredictions() {
+    try {
+        const [predictions, predictedAlerts, trends] = await Promise.all([
+            fetch('/api/cache/predictions').then(r => r.json()),
+            fetch('/api/cache/alerts/predicted').then(r => r.json()),
+            fetch('/api/cache/metrics/trends').then(r => r.json())
+        ]);
+
+        updatePredictionCharts(predictions);
+        updatePredictedAlerts(predictedAlerts);
+        updateTrendAnalysis(trends);
+    } catch (error) {
+        console.error('Error fetching predictions:', error);
+    }
+}
+
+async function fetchAlerts() {
+    try {
+        const response = await fetch('/api/cache/alerts');
+        const alerts = await response.json();
+        updateAlertsDisplay(alerts);
+    } catch (error) {
+        console.error('Error fetching alerts:', error);
+    }
+}
+
+function setupChartContainers() {
+    const metrics = ['CacheHitRate', 'MemoryUsage', 'AverageResponseTime'];
+    const container = document.getElementById('metrics-container');
     
-    const ctx = document.getElementById('healthChart').getContext('2d');
-    healthChart = new Chart(ctx, {
-        type: 'gauge',
-        data: {
-            datasets: [{
-                value: health.hitRatio * 100,
-                data: [20, 40, 60, 80, 100],
-                backgroundColor: ['red', 'orange', 'yellow', 'lightgreen', 'green']
-            }]
-        },
-        options: {
-            title: {
-                display: true,
-                text: 'Cache Health'
-            }
-        }
+    metrics.forEach(metric => {
+        // Current metrics chart
+        const chartDiv = document.createElement('div');
+        chartDiv.className = 'chart-container';
+        chartDiv.innerHTML = `
+            <h3>${formatMetricName(metric)}</h3>
+            <canvas id="${metric}-chart"></canvas>
+        `;
+        container.appendChild(chartDiv);
+
+        // Prediction chart
+        const predictionDiv = document.createElement('div');
+        predictionDiv.className = 'chart-container';
+        predictionDiv.innerHTML = `
+            <h3>${formatMetricName(metric)} Prediction</h3>
+            <canvas id="${metric}-prediction-chart"></canvas>
+        `;
+        container.appendChild(predictionDiv);
+
+        initializeChart(metric);
     });
-
-    updateHealthIndicators(health);
 }
 
-async function loadMetrics() {
-    const response = await fetch('/api/cache/metrics');
-    const metrics = await response.json();
-    
-    const ctx = document.getElementById('metricsChart').getContext('2d');
-    metricsChart = new Chart(ctx, {
+function initializeChart(metric) {
+    const ctx = document.getElementById(`${metric}-chart`).getContext('2d');
+    metricsCharts[metric] = new Chart(ctx, {
         type: 'line',
         data: {
-            labels: metrics.timestamps,
+            labels: [],
             datasets: [{
-                label: 'Response Time (ms)',
-                data: metrics.responseTimes
-            }, {
-                label: 'Memory Usage (MB)',
-                data: metrics.memoryUsage
+                label: formatMetricName(metric),
+                data: [],
+                borderColor: getMetricColor(metric),
+                tension: 0.1
             }]
         },
         options: {
             responsive: true,
-            maintainAspectRatio: false
-        }
-    });
-}
-
-async function loadAlerts() {
-    const response = await fetch('/api/cache/alerts');
-    const alerts = await response.json();
-    
-    const alertsContainer = document.getElementById('alertsList');
-    alertsContainer.innerHTML = '';
-    
-    alerts.forEach(alert => {
-        const alertElement = document.createElement('div');
-        alertElement.className = `alert alert-${getSeverityClass(alert.severity)}`;
-        alertElement.innerHTML = `
-            <strong>${alert.type}</strong>
-            <p>${alert.message}</p>
-            <small>${new Date(alert.timestamp).toLocaleString()}</small>
-        `;
-        alertsContainer.appendChild(alertElement);
-    });
-}
-
-async function loadAnalytics() {
-    const response = await fetch('/api/cache/analytics/7'); // Last 7 days
-    const analytics = await response.json();
-    
-    const ctx = document.getElementById('analyticsChart').getContext('2d');
-    new Chart(ctx, {
-        type: 'bar',
-        data: {
-            labels: analytics.map(a => new Date(a.timestamp).toLocaleDateString()),
-            datasets: [{
-                label: 'Hit Rate',
-                data: analytics.map(a => a.hitRate * 100)
-            }]
-        },
-        options: {
-            responsive: true,
-            maintainAspectRatio: false,
             scales: {
                 y: {
-                    beginAtZero: true,
-                    max: 100
+                    beginAtZero: true
                 }
             }
         }
     });
 }
 
-function updateHealthIndicators(health) {
-    document.getElementById('hitRatio').textContent = `${(health.hitRatio * 100).toFixed(1)}%`;
-    document.getElementById('memoryUsage').textContent = `${health.memoryUsageMB.toFixed(1)} MB`;
-    document.getElementById('responseTime').textContent = `${health.averageResponseTimeMs.toFixed(1)} ms`;
-    document.getElementById('itemCount').textContent = health.cachedItemCount;
-    document.getElementById('lastUpdate').textContent = new Date(health.lastUpdate).toLocaleString();
+function updateMetricsDisplay(metrics) {
+    Object.entries(metrics).forEach(([metric, value]) => {
+        if (metricsCharts[metric]) {
+            const chart = metricsCharts[metric];
+            chart.data.labels.push(new Date().toLocaleTimeString());
+            chart.data.datasets[0].data.push(value);
+            
+            if (chart.data.labels.length > 20) {
+                chart.data.labels.shift();
+                chart.data.datasets[0].data.shift();
+            }
+            
+            chart.update();
+        }
+    });
 }
 
-function getSeverityClass(severity) {
+function updatePredictionCharts(predictions) {
+    Object.entries(predictions).forEach(([metric, prediction]) => {
+        const chartElement = document.getElementById(`${metric}-prediction-chart`);
+        if (!chartElement) return;
+
+        const data = {
+            labels: ['Current', 'Predicted'],
+            datasets: [{
+                label: metric,
+                data: [currentMetrics[metric], prediction.value],
+                backgroundColor: ['rgba(75, 192, 192, 0.2)', 'rgba(255, 159, 64, 0.2)'],
+                borderColor: ['rgba(75, 192, 192, 1)', 'rgba(255, 159, 64, 1)'],
+                borderWidth: 1
+            }]
+        };
+
+        new Chart(chartElement, {
+            type: 'bar',
+            data: data,
+            options: {
+                plugins: {
+                    title: {
+                        display: true,
+                        text: `${metric} Prediction (Confidence: ${(prediction.confidence * 100).toFixed(1)}%)`
+                    }
+                },
+                scales: {
+                    y: {
+                        beginAtZero: true
+                    }
+                }
+            }
+        });
+    });
+}
+
+function updatePredictedAlerts(alerts) {
+    const alertsContainer = document.getElementById('predicted-alerts');
+    if (!alertsContainer) return;
+
+    alertsContainer.innerHTML = alerts.map(alert => `
+        <div class="alert alert-${getAlertClass(alert.severity)}">
+            <strong>${alert.metric}:</strong> Predicted to reach ${alert.predictedValue.toFixed(2)} 
+            in ${formatTimeSpan(alert.timeToImpact)}
+            (Confidence: ${(alert.confidence * 100).toFixed(1)}%)
+        </div>
+    `).join('');
+}
+
+function updateTrendAnalysis(trends) {
+    const trendsContainer = document.getElementById('trend-analysis');
+    if (!trendsContainer) return;
+
+    trendsContainer.innerHTML = Object.entries(trends).map(([metric, analysis]) => `
+        <div class="trend-card">
+            <h4>${metric}</h4>
+            <p>Trend: ${analysis.trend}</p>
+            <p>Seasonality: ${(analysis.seasonality * 100).toFixed(1)}%</p>
+            <p>Volatility: ${analysis.volatility.toFixed(3)}</p>
+        </div>
+    `).join('');
+}
+
+function updateAlertsDisplay(alerts) {
+    const alertsContainer = document.getElementById('alerts-container');
+    if (!alertsContainer) return;
+
+    alertsContainer.innerHTML = alerts.map(alert => `
+        <div class="alert alert-${getAlertClass(alert.severity)}">
+            <strong>${alert.type}:</strong> ${alert.message}
+        </div>
+    `).join('');
+}
+
+function getMetricColor(metric) {
+    const colors = {
+        CacheHitRate: 'rgb(75, 192, 192)',
+        MemoryUsage: 'rgb(255, 99, 132)',
+        AverageResponseTime: 'rgb(255, 159, 64)'
+    };
+    return colors[metric] || 'rgb(201, 203, 207)';
+}
+
+function getAlertClass(severity) {
     switch (severity.toLowerCase()) {
         case 'critical': return 'danger';
         case 'warning': return 'warning';
@@ -132,175 +207,28 @@ function getSeverityClass(severity) {
     }
 }
 
-async function loadCircuitBreakerStatus() {
-    const response = await fetch('/api/cache/circuit-breaker');
-    const status = await response.json();
-    
-    document.getElementById('cbState').textContent = status.status;
-    document.getElementById('cbFailures').textContent = status.failureCount;
-    document.getElementById('cbLastChange').textContent = new Date(status.lastStateChange).toLocaleString();
-    document.getElementById('cbNextRetry').textContent = status.nextRetryTime 
-        ? new Date(status.nextRetryTime).toLocaleString() 
-        : 'N/A';
-    
-    const eventsContainer = document.getElementById('cbEvents');
-    eventsContainer.innerHTML = '';
-    status.recentEvents.forEach(event => {
-        const eventEl = document.createElement('div');
-        eventEl.className = 'p-2 border-l-4 border-blue-500';
-        eventEl.innerHTML = `
-            <p class="text-sm">
-                <span class="font-semibold">${new Date(event.timestamp).toLocaleString()}</span><br>
-                ${event.fromState} → ${event.toState}<br>
-                <span class="text-gray-600">${event.reason}</span>
-            </p>
-        `;
-        eventsContainer.appendChild(eventEl);
-    });
+function formatMetricName(metric) {
+    return metric.replace(/([A-Z])/g, ' $1').trim();
 }
 
-async function loadEvictionStats() {
-    const response = await fetch('/api/cache/stats/evictions');
-    const stats = await response.json();
-    
-    const ctx = document.getElementById('evictionChart').getContext('2d');
-    new Chart(ctx, {
-        type: 'line',
-        data: {
-            labels: stats.timestamps,
-            datasets: [{
-                label: 'Evictions/min',
-                data: stats.evictionRates
-            }]
-        },
-        options: {
-            responsive: true,
-            maintainAspectRatio: false
-        }
-    });
-    
-    const statsContainer = document.getElementById('evictionStats');
-    statsContainer.innerHTML = `
-        <p>Total Evictions: ${stats.totalEvictions}</p>
-        <p>Avg. Eviction Rate: ${stats.averageEvictionRate}/min</p>
-        <p>Peak Eviction Rate: ${stats.peakEvictionRate}/min</p>
-    `;
-}
-
-async function loadEncryptionStatus() {
-    const response = await fetch('/api/cache/encryption');
-    const status = await response.json();
-    
-    document.getElementById('encEnabled').textContent = status.isEnabled ? 'Enabled' : 'Disabled';
-    document.getElementById('encCurrentKey').textContent = status.currentKeyId;
-    document.getElementById('encKeyCount').textContent = status.keysInRotation;
-    document.getElementById('encAutoRotation').textContent = status.autoRotationEnabled ? 'Enabled' : 'Disabled';
-    
-    const scheduleResponse = await fetch('/api/cache/encryption/rotation');
-    const schedule = await scheduleResponse.json();
-    
-    const scheduleContainer = document.getElementById('keySchedule');
-    scheduleContainer.innerHTML = '';
-    Object.entries(schedule).forEach(([keyId, rotationTime]) => {
-        const scheduleEl = document.createElement('div');
-        scheduleEl.className = 'flex justify-between items-center';
-        scheduleEl.innerHTML = `
-            <span class="font-mono">${keyId}</span>
-            <span>${new Date(rotationTime).toLocaleString()}</span>
-        `;
-        scheduleContainer.appendChild(scheduleEl);
-    });
-}
-
-async function loadMaintenanceLogs() {
-    const response = await fetch('/api/cache/maintenance/logs');
-    const logs = await response.json();
-    
-    const logsContainer = document.getElementById('maintenanceLogs');
-    logsContainer.innerHTML = '';
-    
-    logs.forEach(log => {
-        const row = document.createElement('tr');
-        row.className = log.status.toLowerCase() === 'error' ? 'bg-red-50' : '';
-        row.innerHTML = `
-            <td class="px-4 py-2">${new Date(log.timestamp).toLocaleString()}</td>
-            <td class="px-4 py-2">${log.operation}</td>
-            <td class="px-4 py-2">
-                <span class="px-2 py-1 rounded ${getStatusClass(log.status)}">
-                    ${log.status}
-                </span>
-            </td>
-            <td class="px-4 py-2">${log.duration}ms</td>
-            <td class="px-4 py-2">
-                <button class="text-blue-600 hover:text-blue-800" 
-                        onclick='showLogDetails(${JSON.stringify(log.metadata)})'>
-                    Details
-                </button>
-            </td>
-        `;
-        logsContainer.appendChild(row);
-    });
-}
-
-function getStatusClass(status) {
-    switch (status.toLowerCase()) {
-        case 'success': return 'bg-green-100 text-green-800';
-        case 'warning': return 'bg-yellow-100 text-yellow-800';
-        case 'error': return 'bg-red-100 text-red-800';
-        default: return 'bg-gray-100 text-gray-800';
+function formatTimeSpan(timeSpan) {
+    const minutes = Math.floor(timeSpan / 60000);
+    const hours = Math.floor(minutes / 60);
+    if (hours > 0) {
+        return `${hours}h ${minutes % 60}m`;
     }
+    return `${minutes}m`;
 }
 
-function showLogDetails(metadata) {
-    // Implementation of log details modal
-    alert(JSON.stringify(metadata, null, 2));
-}
-
-function setupRefreshIntervals() {
-    // Refresh health status every minute
-    setInterval(loadHealthStatus, 60000);
-    
-    // Refresh metrics every 5 minutes
-    setInterval(loadMetrics, 300000);
-    
-    // Refresh alerts every 30 seconds
-    setInterval(loadAlerts, 30000);
-    
-    // Refresh analytics every hour
-    setInterval(loadAnalytics, 3600000);
-    
-    // Refresh circuit breaker status every 10 seconds
-    setInterval(loadCircuitBreakerStatus, 10000);
-    
-    // Refresh eviction stats every minute
-    setInterval(loadEvictionStats, 60000);
-    
-    // Refresh encryption status every minute
-    setInterval(loadEncryptionStatus, 60000);
-    
-    // Refresh maintenance logs every 30 seconds
-    setInterval(loadMaintenanceLogs, 30000);
-}
-
-// SignalR real-time updates
-connection.on("HealthUpdate", (health) => {
-    updateHealthIndicators(health);
-    if (healthChart) {
-        healthChart.data.datasets[0].value = health.hitRatio * 100;
-        healthChart.update();
+function startRealTimeUpdates() {
+    if (updateInterval) {
+        clearInterval(updateInterval);
     }
-});
+    updateInterval = setInterval(() => {
+        fetchMetrics();
+        fetchAlerts();
+        fetchPredictions();
+    }, 5000);
+}
 
-connection.on("MetricsUpdate", (metrics) => {
-    if (metricsChart) {
-        metricsChart.data.labels = metrics.timestamps;
-        metricsChart.data.datasets[0].data = metrics.responseTimes;
-        metricsChart.data.datasets[1].data = metrics.memoryUsage;
-        metricsChart.update();
-    }
-});
-
-connection.start().then(() => {
-    console.log("Connected to SignalR hub");
-    initializeDashboard();
-}).catch(err => console.error(err));
+window.addEventListener('load', initializeDashboard);

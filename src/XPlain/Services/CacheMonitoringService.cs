@@ -12,14 +12,31 @@ namespace XPlain.Services
         private readonly MonitoringThresholds _thresholds;
         private readonly Dictionary<string, List<PolicySwitchEvent>> _policySwitchHistory;
         private readonly Dictionary<string, Dictionary<string, double>> _policyPerformanceHistory;
+        private readonly MLPredictionService _predictionService;
 
-        public CacheMonitoringService(ICacheProvider cacheProvider)
+        public CacheMonitoringService(ICacheProvider cacheProvider, MLPredictionService predictionService)
         {
             _cacheProvider = cacheProvider;
             _activeAlerts = new List<CacheAlert>();
             _thresholds = new MonitoringThresholds();
             _policySwitchHistory = new Dictionary<string, List<PolicySwitchEvent>>();
             _policyPerformanceHistory = new Dictionary<string, Dictionary<string, double>>();
+            _predictionService = predictionService;
+        }
+
+        public async Task<Dictionary<string, PredictionResult>> GetPerformancePredictionsAsync()
+        {
+            return await _predictionService.PredictPerformanceMetrics();
+        }
+
+        public async Task<List<PredictedAlert>> GetPredictedAlertsAsync()
+        {
+            return await _predictionService.GetPredictedAlerts();
+        }
+
+        public async Task<Dictionary<string, TrendAnalysis>> GetMetricTrendsAsync()
+        {
+            return await _predictionService.AnalyzeTrends();
         }
 
         public async Task<CircuitBreakerStatus> GetCircuitBreakerStatusAsync()
@@ -33,6 +50,7 @@ namespace XPlain.Services
             var hitRatio = await GetCurrentHitRatioAsync();
             var memoryUsage = await GetMemoryUsageAsync();
             var metrics = await GetPerformanceMetricsAsync();
+            var predictions = await _predictionService.PredictPerformanceMetrics();
 
             return new CacheHealthStatus
             {
@@ -42,7 +60,8 @@ namespace XPlain.Services
                 AverageResponseTimeMs = metrics.GetValueOrDefault("AverageResponseTime", 0),
                 ActiveAlerts = _activeAlerts.Count,
                 LastUpdate = DateTime.UtcNow,
-                PerformanceMetrics = metrics
+                PerformanceMetrics = metrics,
+                Predictions = predictions
             };
         }
 

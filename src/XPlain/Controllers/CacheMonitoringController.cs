@@ -9,11 +9,37 @@ namespace XPlain.Controllers
     {
         private readonly ICacheMonitoringService _monitoringService;
         private readonly ICacheProvider _cacheProvider;
+        private readonly MLPredictionService _predictionService;
 
-        public CacheMonitoringController(ICacheMonitoringService monitoringService, ICacheProvider cacheProvider)
+        public CacheMonitoringController(
+            ICacheMonitoringService monitoringService, 
+            ICacheProvider cacheProvider,
+            MLPredictionService predictionService)
         {
             _monitoringService = monitoringService;
             _cacheProvider = cacheProvider;
+            _predictionService = predictionService;
+        }
+
+        [HttpGet("predictions")]
+        public async Task<IActionResult> GetPredictions()
+        {
+            var predictions = await _predictionService.PredictPerformanceMetrics();
+            return Ok(predictions);
+        }
+
+        [HttpGet("alerts/predicted")]
+        public async Task<IActionResult> GetPredictedAlerts()
+        {
+            var alerts = await _predictionService.GetPredictedAlerts();
+            return Ok(alerts);
+        }
+
+        [HttpGet("metrics/trends")]
+        public async Task<IActionResult> GetMetricTrends()
+        {
+            var trends = await _predictionService.AnalyzeTrends();
+            return Ok(trends);
         }
 
         [HttpGet("health")]
