@@ -1022,6 +1022,10 @@ file class Program
             services.AddSingleton<ICacheMonitoringService, CacheMonitoringService>();
             services.AddSingleton<ICacheProvider, FileBasedCacheProvider>();
 
+            // Configure ML model settings
+            services.AddSingleton<IMLModelTrainingService, MLModelTrainingService>();
+            services.AddSingleton<MLPredictionService>();
+            
             // Configure settings
             var llmSettings = new LLMSettings();
             configuration.GetSection("LLM").Bind(llmSettings);

@@ -8,6 +8,7 @@ namespace XPlain.Services
     public class MLPredictionService
     {
         private readonly ICacheMonitoringService _monitoringService;
+        private readonly IMLModelTrainingService _modelTrainingService;
         private readonly Dictionary<string, List<double>> _metricHistory;
         private readonly Dictionary<string, List<Pattern>> _degradationPatterns;
         private readonly Dictionary<string, List<PrecursorPattern>> _precursorPatterns;
@@ -15,13 +16,20 @@ namespace XPlain.Services
         private readonly double _confidenceThreshold = 0.85;
         private readonly int _patternWindow = 10;   // Window size for pattern detection
         private readonly int _precursorWindow = 20; // Window size for precursor detection
+        private readonly Dictionary<string, MLModel> _activeModels;
+        private DateTime _lastModelTraining = DateTime.MinValue;
+        private readonly TimeSpan _modelTrainingInterval = TimeSpan.FromHours(6);
 
-        public MLPredictionService(ICacheMonitoringService monitoringService)
+        public MLPredictionService(
+            ICacheMonitoringService monitoringService,
+            IMLModelTrainingService modelTrainingService)
         {
             _monitoringService = monitoringService;
+            _modelTrainingService = modelTrainingService;
             _metricHistory = new Dictionary<string, List<double>>();
             _degradationPatterns = new Dictionary<string, List<Pattern>>();
             _precursorPatterns = new Dictionary<string, List<PrecursorPattern>>();
+            _activeModels = new Dictionary<string, MLModel>();
         }
 
         private class PrecursorPattern
@@ -411,6 +419,68 @@ namespace XPlain.Services
             };
         }
 
+        private double CalculateStatisticalConfidence(List<double> actual, List<double> x, double slope, double intercept)
+        {
+            var predicted = x.Select(xi => slope * xi + intercept);
+            var errors = actual.Zip(predicted, (a, p) => Math.Pow(a - p, 2));
+            var mse = errors.Average();
+            return Math.Exp(-mse); // Transform MSE to confidence score between 0 and 1
+        }
+
+        private async Task UpdateModelsIfNeeded()
+        {
+            if (DateTime.UtcNow - _lastModelTraining > _modelTrainingInterval)
+            {
+                await _modelTrainingService.TrainModels();
+                foreach (var metricType in new[] { "CacheHitRate", "MemoryUsage", "AverageResponseTime" })
+                {
+                    var model = await _modelTrainingService.GetLatestModel(metricType);
+                    if (model != null && await _modelTrainingService.ValidateModel(model, metricType))
+                    {
+                        _activeModels[metricType] = model;
+                    }
+                }
+                _lastModelTraining = DateTime.UtcNow;
+            }
+        }
+
+        private float[] ExtractPredictionFeatures(List<double> history)
+        {
+            var features = new List<float>();
+            
+            // Historical values
+            features.AddRange(history.TakeLast(10).Select(x => (float)x));
+            
+            // Rate of change
+            for (int i = 1; i < history.Count; i++)
+            {
+                features.Add((float)(history[i] - history[i-1]));
+            }
+            
+            // Statistical features
+            features.Add((float)history.Average());
+            features.Add((float)history.StdDev());
+            features.Add((float)history.Min());
+            features.Add((float)history.Max());
+            
+            return features.ToArray();
+        }
+
+        private PredictionResult PredictUsingModel(MLModel model, float[] features)
+        {
+            var mlContext = new MLContext(seed: 1);
+            var predictionEngine = mlContext.Model.CreatePredictionEngine<MetricDataPoint, MetricPrediction>(
+                model.Transformer);
+            
+            var prediction = predictionEngine.Predict(new MetricDataPoint { Features = features });
+            
+            return new PredictionResult
+            {
+                Value = prediction.PredictedValue,
+                Confidence = prediction.Confidence
+            };
+        }
+
         public async Task<Dictionary<string, PredictionResult>> PredictPerformanceMetrics()
         {
             var currentMetrics = await _monitoringService.GetPerformanceMetricsAsync();
@@ -428,7 +498,7 @@ namespace XPlain.Services
                 if (_metricHistory.ContainsKey(metric))
                 {
                     var history = _metricHistory[metric];
-                    var prediction = CalculatePrediction(history);
+                    var prediction = await CalculatePrediction(history, metric);
                     predictions[metric] = prediction;
                 }
             }
@@ -497,19 +567,79 @@ namespace XPlain.Services
             }
         }
 
-        private PredictionResult CalculatePrediction(List<double> history)
+        private async Task<PredictionResult> CalculatePrediction(List<double> history, string metric)
         {
-            var metric = _metricHistory.FirstOrDefault(x => x.Value == history).Key;
+            await UpdateModelsIfNeeded();
+
             var recentPattern = history.Skip(history.Count - _patternWindow).ToList();
             var normalizedRecent = NormalizeSequence(recentPattern);
 
             // Check for matching degradation patterns
-            var matchingPattern = metric != null && _degradationPatterns.ContainsKey(metric)
+            var matchingPattern = _degradationPatterns.ContainsKey(metric)
                 ? _degradationPatterns[metric]
                     .FirstOrDefault(p => IsSimilarPattern(p.Sequence, normalizedRecent))
                 : null;
 
-            // Combine pattern-based and regression-based predictions
+            double mlPrediction = 0;
+            double mlConfidence = 0;
+            
+            // Get ML model prediction if available
+            if (_activeModels.TryGetValue(metric, out var mlModel))
+            {
+                var features = ExtractPredictionFeatures(history);
+                var prediction = PredictUsingModel(mlModel, features);
+                mlPrediction = prediction.Value;
+                mlConfidence = prediction.Confidence;
+            }
+
+            // Fallback to statistical prediction if no ML model
+            var statisticalPrediction = CalculateStatisticalPrediction(history);
+
+            // If we have both ML and pattern predictions, blend them
+            if (matchingPattern != null && mlConfidence > 0)
+            {
+                var patternConfidence = Math.Min(1.0, matchingPattern.OccurrenceCount / 10.0);
+                var timeToImpact = matchingPattern.TimeToIssue;
+                
+                // Blend all predictions based on their confidence
+                var totalConfidence = mlConfidence + patternConfidence;
+                var blendedPrediction = (mlPrediction * mlConfidence + 
+                    GetPatternBasedPrediction(history.Last(), matchingPattern) * patternConfidence) / totalConfidence;
+                
+                var blendedConfidence = Math.Max(mlConfidence, patternConfidence);
+
+                return new PredictionResult
+                {
+                    Value = blendedPrediction,
+                    Confidence = blendedConfidence,
+                    TimeToImpact = timeToImpact,
+                    DetectedPattern = new PredictionPattern
+                    {
+                        Type = matchingPattern.IssueType,
+                        Severity = matchingPattern.Severity,
+                        Confidence = patternConfidence,
+                        TimeToIssue = timeToImpact
+                    }
+                };
+            }
+            
+            // If we have ML prediction with good confidence, use it
+            if (mlConfidence > 0.7)
+            {
+                return new PredictionResult
+                {
+                    Value = mlPrediction,
+                    Confidence = mlConfidence,
+                    TimeToImpact = EstimateTimeToImpact(0, history.Last(), mlPrediction)
+                };
+            }
+
+            // Fallback to statistical prediction
+            return statisticalPrediction;
+        }
+
+        private PredictionResult CalculateStatisticalPrediction(List<double> history)
+        {
             var n = history.Count;
             var x = Enumerable.Range(0, n).ToList();
             var y = history;
@@ -524,52 +654,15 @@ namespace XPlain.Services
             var intercept = meanY - slope * meanX;
 
             var regressionPrediction = slope * (n + 5) + intercept;
-            var confidence = CalculateConfidence(history, x, slope, intercept);
+            var confidence = CalculateStatisticalConfidence(history, x, slope, intercept);
+            var timeToImpact = EstimateTimeToImpact(slope, history.Last(), regressionPrediction);
 
-            // If we have a matching pattern, adjust the prediction
-            if (matchingPattern != null)
-            {
-                var patternConfidence = Math.Min(1.0, matchingPattern.OccurrenceCount / 10.0);
-                var timeToImpact = matchingPattern.TimeToIssue;
-                
-                // Blend predictions based on pattern confidence
-                var blendedPrediction = (regressionPrediction * (1 - patternConfidence)) +
-                                      (GetPatternBasedPrediction(history.Last(), matchingPattern) * patternConfidence);
-                
-                // Increase confidence if pattern matches
-                confidence = (confidence + patternConfidence) / 2;
-
-                return new PredictionResult
-                {
-                    Value = blendedPrediction,
-                    Confidence = confidence,
-                    TimeToImpact = timeToImpact,
-                    DetectedPattern = new PredictionPattern
-                    {
-                        Type = matchingPattern.IssueType,
-                        Severity = matchingPattern.Severity,
-                        Confidence = patternConfidence,
-                        TimeToIssue = timeToImpact
-                    }
-                };
-            }
-
-            var regressionTimeToImpact = EstimateTimeToImpact(slope, history.Last(), regressionPrediction);
-            
             return new PredictionResult
             {
                 Value = regressionPrediction,
                 Confidence = confidence,
-                TimeToImpact = regressionTimeToImpact
+                TimeToImpact = timeToImpact
             };
-        }
-
-        private double CalculateConfidence(List<double> actual, List<double> x, double slope, double intercept)
-        {
-            var predicted = x.Select(xi => slope * xi + intercept);
-            var errors = actual.Zip(predicted, (a, p) => Math.Pow(a - p, 2));
-            var mse = errors.Average();
-            return Math.Exp(-mse); // Transform MSE to confidence score between 0 and 1
         }
 
         private TimeSpan EstimateTimeToImpact(double slope, double current, double predicted)
