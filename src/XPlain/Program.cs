@@ -200,9 +200,12 @@ file class Program
             return await rootCommand.InvokeAsync(args);
         }
 
-        internal static void ShowCacheStats(ICacheProvider cacheProvider, OutputFormat format)
+        internal static async Task ShowCacheStats(ICacheProvider cacheProvider, OutputFormat format)
         {
             var stats = cacheProvider.GetCacheStats();
+            var chart = await cacheProvider.GeneratePerformanceChartAsync(format);
+            var recommendations = await cacheProvider.GetCacheWarmingRecommendationsAsync();
+            
             var output = new
             {
                 HitRatio = $"{stats.HitRatio:P2}",
@@ -212,11 +215,18 @@ file class Program
                 StorageUsage = $"{stats.StorageUsageBytes / 1024.0 / 1024.0:F2} MB",
                 TopQueries = stats.TopQueries,
                 QueryTypes = stats.QueryTypeStats,
-                AverageResponseTimes = stats.AverageResponseTimes.ToDictionary(
+                PerformanceByQueryType = stats.PerformanceByQueryType.ToDictionary(
                     kvp => kvp.Key,
-                    kvp => $"{kvp.Value:F2}ms"
+                    kvp => $"{kvp.Value.PerformanceGain:F1}% faster (cached: {kvp.Value.CachedResponseTime:F2}ms, non-cached: {kvp.Value.NonCachedResponseTime:F2}ms)"
                 ),
-                LastUpdate = stats.LastStatsUpdate
+                InvalidationStats = new
+                {
+                    TotalInvalidations = stats.InvalidationCount,
+                    RecentInvalidations = stats.InvalidationHistory.TakeLast(5).ToList()
+                },
+                Recommendations = recommendations,
+                LastUpdate = stats.LastStatsUpdate,
+                PerformanceCharts = chart
             };
 
             switch (format)
@@ -481,7 +491,10 @@ file class Program
             Console.WriteLine("Help and Information:");
             Console.WriteLine("  help     - Show this help message");
             Console.WriteLine("  version  - Show version information");
-            Console.WriteLine("  stats    - Show cache statistics");
+            Console.WriteLine("  stats    - Show current cache statistics");
+            Console.WriteLine("  history  - Show cache performance history");
+            Console.WriteLine("  trends   - Show cache usage trends and recommendations");
+            Console.WriteLine("  chart    - Display performance comparison charts");
             Console.WriteLine();
             Console.WriteLine("Navigation:");
             Console.WriteLine("  exit     - Exit the application");
