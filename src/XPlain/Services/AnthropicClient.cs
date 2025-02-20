@@ -145,32 +145,7 @@ public class DualTokenBucket
         }
     }
 
-    public async Task<bool> ConsumeTokenAsync(CancellationToken cancellationToken = default)
-    {
-        while (!cancellationToken.IsCancellationRequested)
-        {
-            lock (_lock)
-            {
-                RefillTokens();
-                if (_tokens >= 1)
-                {
-                    _tokens--;
-                    return true;
-                }
-            }
-            await Task.Delay(50, cancellationToken);
-        }
-        return false;
-    }
 
-    private void RefillTokens()
-    {
-        var now = DateTime.UtcNow;
-        var timePassed = (now - _lastRefillTime).TotalSeconds;
-        var tokensToAdd = timePassed * _refillRate;
-        _tokens = Math.Min(_capacity, _tokens + tokensToAdd);
-        _lastRefillTime = now;
-    }
 }
 
 public class RequestBatcher
@@ -323,8 +298,17 @@ public class RequestQueue
     private readonly object _coalescenceLock = new();
 
     // LRU cache for recent requests to help with coalescence
-    private readonly LinkedList<(string Key, string Content, DateTime Time)> _recentRequests = new();
+    private readonly LinkedList<(string Key, string Content, DateTime Time, int TokenCount)> _recentRequests = new();
     private const int MaxRecentRequests = 100;
+    
+    private static readonly Dictionary<string, double> _modelTokenRatios = new()
+    {
+        { "claude-2", 1.0 },
+        { "claude-instant-1", 0.5 },
+        { "claude-3-opus-20240229", 1.2 },
+        { "claude-3-sonnet-20240229", 1.0 },
+        { "claude-3-haiku-20240229", 0.8 }
+    };
 
     private double CalculateSimilarity(string text1, string text2)
     {
@@ -639,6 +623,13 @@ public class AnthropicClient : BaseLLMProvider, IAnthropicClient, IDisposable
         HttpStatusCode.RequestTimeout // 408
     };
 
+    private static readonly TimeSpan MinBatchAge = TimeSpan.FromMilliseconds(100);
+    private static readonly TimeSpan MaxBatchAge = TimeSpan.FromMilliseconds(500);
+    private static readonly int MinBatchSize = 2;
+    private static readonly int MaxBatchSize = 10;
+    private static readonly double SimilarityThresholdStrict = 0.95;
+    private static readonly double SimilarityThresholdRelaxed = 0.85;
+
     public AnthropicClient(IOptions<AnthropicSettings> settings, ICacheProvider cacheProvider)
         : base(cacheProvider)
     {
@@ -768,13 +759,43 @@ public class AnthropicClient : BaseLLMProvider, IAnthropicClient, IDisposable
     {
         try
         {
-            // Calculate batch priority based on age of oldest request
+            // Dynamic batch sizing based on model and rate limits
+            var modelRatio = _modelTokenRatios.GetValueOrDefault(key.Model, 1.0);
+            var currentBatchSize = Math.Min(
+                MaxBatchSize,
+                Math.Max(MinBatchSize, (int)(requests.Count * modelRatio))
+            );
+
+            // Calculate batch priority based on age and size
             var oldestRequest = requests.Min(r => r.Timestamp);
             var waitTime = DateTime.UtcNow - oldestRequest;
-            var priority = Math.Max(0, 5 - (int)waitTime.TotalSeconds); // Higher priority for older requests
+            var agePriority = Math.Max(0, 5 - (int)waitTime.TotalSeconds);
+            var sizePriority = Math.Min(3, requests.Count / 2);
+            var priority = Math.Max(0, agePriority + sizePriority);
 
             var response = await ExecuteWithRetryAsync(async (ct) =>
             {
+                // Get current rate limits before making request
+                var rateLimits = _tokenBucket.GetCurrentRateLimits();
+                
+                // Adaptive batch delay based on rate limits
+                if (rateLimits.RemainingPerSecond < currentBatchSize * 2 || 
+                    rateLimits.RemainingPerMinute < currentBatchSize * 10)
+                {
+                    var secDelay = 1000.0 * currentBatchSize / Math.Max(1, rateLimits.RemainingPerSecond);
+                    var minDelay = 60000.0 * currentBatchSize / Math.Max(1, rateLimits.RemainingPerMinute);
+                    var adaptiveDelay = Math.Max(secDelay, minDelay);
+                    
+                    // Add jitter to prevent thundering herd
+                    var jitter = _random.NextDouble() * 0.2 * adaptiveDelay;
+                    await Task.Delay((int)(adaptiveDelay + jitter), ct);
+                    
+                    // Reduce batch size if we're near limits
+                    currentBatchSize = Math.Max(MinBatchSize, currentBatchSize / 2);
+                }
+
+                // Process the batch with the current size
+                var batchRequests = requests.Take(currentBatchSize).ToList();
                 AnthropicRequest requestBody = new AnthropicRequest
                 {
                     Model = key.Model,
@@ -790,21 +811,25 @@ public class AnthropicClient : BaseLLMProvider, IAnthropicClient, IDisposable
                     Temperature = 0.7,
                 };
 
-                // Get current rate limits before making request
-                var rateLimits = _tokenBucket.GetCurrentRateLimits();
-                if (rateLimits.RemainingPerSecond < 2 || rateLimits.RemainingPerMinute < 10)
-                {
-                    // Add adaptive delay when close to limits
-                    var delay = Math.Max(
-                        1000 / Math.Max(1, rateLimits.RemainingPerSecond),
-                        60000 / Math.Max(1, rateLimits.RemainingPerMinute));
-                    await Task.Delay((int)delay, ct);
-                }
-
                 HttpResponseMessage response = await _httpClient.PostAsJsonAsync("/v1/messages", requestBody, ct);
                 
-                // Update rate limits from response headers
+                // Update rate limits and adjust future batch sizes
                 _tokenBucket.UpdateRateLimits(response.Headers);
+                if (response.Headers.TryGetValue("x-ratelimit-remaining-tokens", out var tokensRemaining))
+                {
+                    if (int.TryParse(tokensRemaining.FirstOrDefault(), out var remaining))
+                    {
+                        var remainingRatio = remaining / (double)rateLimits.RemainingPerMinute;
+                        if (remainingRatio < 0.2)
+                        {
+                            currentBatchSize = Math.Max(MinBatchSize, currentBatchSize - 1);
+                        }
+                        else if (remainingRatio > 0.8)
+                        {
+                            currentBatchSize = Math.Min(MaxBatchSize, currentBatchSize + 1);
+                        }
+                    }
+                }
                 
                 response.EnsureSuccessStatusCode();
 
@@ -812,21 +837,34 @@ public class AnthropicClient : BaseLLMProvider, IAnthropicClient, IDisposable
                 return result?.Content.FirstOrDefault()?.Text.Trim() ?? "No response received from the API.";
             }, priority, cancellationToken);
 
-            // Set the result for all non-cancelled requests in the batch
-            foreach (var request in requests.Where(r => !r.CancellationToken.IsCancellationRequested))
+            // Set the result for successful batch requests
+            var processedRequests = requests.Take(currentBatchSize)
+                .Where(r => !r.CancellationToken.IsCancellationRequested)
+                .ToList();
+                
+            foreach (var request in processedRequests)
             {
                 request.TaskCompletion.TrySetResult(response);
             }
 
-            // Log batch processing success
-            Debug.WriteLine($"Successfully processed batch of {requests.Count} requests with model {key.Model}");
+            // Remaining requests will be processed in the next batch
+            var remainingRequests = requests.Skip(currentBatchSize).ToList();
+            if (remainingRequests.Any())
+            {
+                await ProcessBatchAsync(key, remainingRequests, cancellationToken);
+            }
+
+            Debug.WriteLine($"Successfully processed batch of {processedRequests.Count} requests with model {key.Model}");
         }
         catch (Exception ex)
         {
             Debug.WriteLine($"Batch processing failed: {ex.Message}");
             foreach (var request in requests)
             {
-                request.TaskCompletion.TrySetException(ex);
+                if (!request.TaskCompletion.Task.IsCompleted)
+                {
+                    request.TaskCompletion.TrySetException(ex);
+                }
             }
         }
     }
@@ -842,8 +880,9 @@ public class AnthropicClient : BaseLLMProvider, IAnthropicClient, IDisposable
         {
             var attempts = 0;
             var delay = _settings.InitialRetryDelayMs;
+            Exception lastException = null;
 
-            while (true)
+            while (attempts < _settings.MaxRetryAttempts)
             {
                 try
                 {
@@ -852,44 +891,104 @@ public class AnthropicClient : BaseLLMProvider, IAnthropicClient, IDisposable
                     _circuitBreaker.RecordSuccess();
                     return result;
                 }
-                catch (HttpRequestException ex) when (
-                    ex.StatusCode.HasValue && 
-                    RetryableStatusCodes.Contains(ex.StatusCode.Value) && 
-                    attempts < _settings.MaxRetryAttempts)
+                catch (HttpRequestException ex) when (ex.StatusCode.HasValue && RetryableStatusCodes.Contains(ex.StatusCode.Value))
                 {
+                    lastException = ex;
                     _circuitBreaker.RecordFailure();
 
                     if (ex.StatusCode == HttpStatusCode.TooManyRequests)
                     {
-                        // Parse rate limit headers if available
+                        // Enhanced rate limit handling
                         if (ex.Headers != null)
                         {
-                            if (ex.Headers.TryGetValue("x-ratelimit-reset", out var resetValue) && 
-                                int.TryParse(resetValue.FirstOrDefault(), out var resetSeconds))
+                            var resetDelay = CalculateRateLimitDelay(ex.Headers);
+                            if (resetDelay.HasValue)
                             {
-                                delay = resetSeconds * 1000; // Convert to milliseconds
+                                delay = Math.Max(delay, resetDelay.Value);
                             }
                         }
+                        
+                        // Notify token bucket of rate limit hit
+                        _tokenBucket.UpdateRateLimits(ex.Headers);
                     }
 
-                    // Calculate delay with jitter
-                    var jitter = _random.NextDouble() * _settings.JitterFactor * delay;
-                    var actualDelay = delay + (int)jitter;
-                    
-                    await Task.Delay(actualDelay, ct);
-                    
-                    // Exponential backoff
-                    delay = (int)(delay * _settings.BackoffMultiplier);
+                    if (attempts < _settings.MaxRetryAttempts)
+                    {
+                        // Add jitter and backoff
+                        var jitter = _random.NextDouble() * _settings.JitterFactor * delay;
+                        var actualDelay = delay + (int)jitter;
+                        
+                        Debug.WriteLine($"Retry attempt {attempts}/{_settings.MaxRetryAttempts} after {actualDelay}ms delay");
+                        await Task.Delay(actualDelay, ct);
+                        
+                        // Exponential backoff with max delay cap
+                        delay = Math.Min(
+                            (int)(delay * _settings.BackoffMultiplier),
+                            _settings.MaxRetryDelayMs
+                        );
+                    }
+                }
+                catch (OperationCanceledException) when (ct.IsCancellationRequested)
+                {
+                    throw;
                 }
                 catch (Exception ex)
                 {
+                    lastException = ex;
                     _circuitBreaker.RecordFailure();
-                    throw new AnthropicApiException("Failed to communicate with Anthropic API", ex);
+                    
+                    // Only retry on specific exceptions
+                    if (IsTransientException(ex))
+                    {
+                        if (attempts < _settings.MaxRetryAttempts)
+                        {
+                            await Task.Delay(delay, ct);
+                            delay = Math.Min(
+                                (int)(delay * _settings.BackoffMultiplier),
+                                _settings.MaxRetryDelayMs
+                            );
+                        }
+                    }
+                    else
+                    {
+                        throw new AnthropicApiException(
+                            $"Failed to communicate with Anthropic API after {attempts} attempts", 
+                            ex);
+                    }
                 }
             }
+
+            throw new AnthropicApiException(
+                $"Operation failed after {attempts} attempts. Last error: {lastException?.Message}",
+                lastException);
         }
 
         return await _requestQueue.EnqueueRequest(RetryOperation, priority, cancellationToken);
+    }
+
+    private int? CalculateRateLimitDelay(HttpResponseHeaders headers)
+    {
+        if (headers.TryGetValue("x-ratelimit-reset", out var resetValue) &&
+            int.TryParse(resetValue.FirstOrDefault(), out var resetSeconds))
+        {
+            return resetSeconds * 1000; // Convert to milliseconds
+        }
+
+        if (headers.TryGetValue("retry-after", out var retryAfter) &&
+            int.TryParse(retryAfter.FirstOrDefault(), out var retrySeconds))
+        {
+            return retrySeconds * 1000;
+        }
+
+        return null;
+    }
+
+    private bool IsTransientException(Exception ex)
+    {
+        return ex is TimeoutException ||
+               ex is HttpRequestException ||
+               ex is SocketException ||
+               ex is IOException;
     }
 
     protected override async Task<string> GetCompletionInternalAsync(string prompt)
