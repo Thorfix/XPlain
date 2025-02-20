@@ -13,5 +13,6 @@ namespace XPlain.Configuration
     {
         public string Name { get; set; }
         public int Priority { get; set; }
+        public int? RetryAttempts { get; set; }
     }
 }
