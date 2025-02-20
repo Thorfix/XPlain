@@ -1,529 +1,361 @@
 using System;
 using System.Collections.Generic;
+using System.Collections.Concurrent;
 using System.Linq;
+using System.Threading.Tasks;
 
 namespace XPlain.Services
 {
+    public class CacheEvictionEvent
+    {
+        public string Key { get; set; }
+        public DateTime Timestamp { get; set; }
+        public string Reason { get; set; }
+        public long SizeFreed { get; set; }
+        public string Strategy { get; set; }
+    }
+
+    public class PolicySwitchEvent
+    {
+        public EvictionStrategy FromStrategy { get; set; }
+        public EvictionStrategy ToStrategy { get; set; }
+        public DateTime Timestamp { get; set; }
+        public string Reason { get; set; }
+        public Dictionary<string, double> Metrics { get; set; }
+    }
+
     public class LRUEvictionPolicy : ICacheEvictionPolicy
     {
-        private readonly Dictionary<string, DateTime> _lastAccessTimes = new();
-        
-        public IEnumerable<string> SelectItemsForEviction(
-            IEnumerable<KeyValuePair<string, CacheItemStats>> items, 
-            long targetSize)
+        private readonly ConcurrentDictionary<string, DateTime> _lastAccessTimes = new();
+        private readonly ConcurrentQueue<CacheEvictionEvent> _recentEvictions = new();
+        private double _evictionThreshold = 0.9; // 90% capacity
+        private double _pressureThreshold = 0.95; // 95% capacity
+        private EvictionStrategy _currentStrategy = EvictionStrategy.LRU;
+
+        public double CurrentEvictionThreshold => _evictionThreshold;
+        public double CurrentPressureThreshold => _pressureThreshold;
+
+        public async Task UpdateEvictionThreshold(double threshold)
         {
-            var currentSize = items.Sum(i => i.Value.Size);
-            var itemList = items.OrderBy(i => i.Value.LastAccess).ToList();
-            var result = new List<string>();
-            
-            foreach (var item in itemList)
+            _evictionThreshold = Math.Clamp(threshold, 0.5, 0.95);
+        }
+
+        public async Task UpdatePressureThreshold(double threshold)
+        {
+            _pressureThreshold = Math.Clamp(threshold, 0.6, 0.99);
+        }
+
+        public async Task UpdateEvictionStrategy(EvictionStrategy strategy)
+        {
+            _currentStrategy = strategy;
+        }
+
+        public async Task ForceEviction(long bytesToFree)
+        {
+            // Implementation handled by cache provider
+        }
+
+        public void RecordAccess(string key)
+        {
+            _lastAccessTimes.AddOrUpdate(key, DateTime.UtcNow, (_, __) => DateTime.UtcNow);
+        }
+
+        public Dictionary<string, int> GetEvictionStats()
+        {
+            return new Dictionary<string, int>
             {
-                if (currentSize <= targetSize) break;
-                result.Add(item.Key);
-                currentSize -= item.Value.Size;
-            }
-            
-            return result;
-        }
-
-        public void UpdatePolicy(CacheAccessStats stats)
-        {
-            // LRU policy doesn't need to track additional statistics
-        }
-
-        public Dictionary<string, double> GetPolicyMetrics()
-        {
-            return new Dictionary<string, double>
-            {
-                ["average_item_age_hours"] = _lastAccessTimes.Any() 
-                    ? _lastAccessTimes.Values.Average(t => (DateTime.UtcNow - t).TotalHours)
-                    : 0
-            };
-        }
-    }
-
-    public class LFUEvictionPolicy : ICacheEvictionPolicy
-    {
-        private readonly Dictionary<string, int> _accessCounts = new();
-        
-        public IEnumerable<string> SelectItemsForEviction(
-            IEnumerable<KeyValuePair<string, CacheItemStats>> items, 
-            long targetSize)
-        {
-            var currentSize = items.Sum(i => i.Value.Size);
-            var itemList = items.OrderBy(i => i.Value.AccessCount).ToList();
-            var result = new List<string>();
-            
-            foreach (var item in itemList)
-            {
-                if (currentSize <= targetSize) break;
-                result.Add(item.Key);
-                currentSize -= item.Value.Size;
-            }
-            
-            return result;
-        }
-
-        public void UpdatePolicy(CacheAccessStats stats)
-        {
-            // Update access frequencies
-            foreach (var freq in stats.QueryTypeFrequency)
-            {
-                if (_accessCounts.ContainsKey(freq.Key))
-                    _accessCounts[freq.Key] += freq.Value;
-                else
-                    _accessCounts[freq.Key] = freq.Value;
-            }
-        }
-
-        public Dictionary<string, double> GetPolicyMetrics()
-        {
-            return new Dictionary<string, double>
-            {
-                ["average_access_frequency"] = _accessCounts.Any() 
-                    ? _accessCounts.Values.Average() 
-                    : 0
-            };
-        }
-    }
-
-    public class FIFOEvictionPolicy : ICacheEvictionPolicy
-    {
-        public IEnumerable<string> SelectItemsForEviction(
-            IEnumerable<KeyValuePair<string, CacheItemStats>> items, 
-            long targetSize)
-        {
-            var currentSize = items.Sum(i => i.Value.Size);
-            var itemList = items.OrderBy(i => i.Value.CreationTime).ToList();
-            var result = new List<string>();
-            
-            foreach (var item in itemList)
-            {
-                if (currentSize <= targetSize) break;
-                result.Add(item.Key);
-                currentSize -= item.Value.Size;
-            }
-            
-            return result;
-        }
-
-        public void UpdatePolicy(CacheAccessStats stats)
-        {
-            // FIFO policy doesn't need to track additional statistics
-        }
-
-        public Dictionary<string, double> GetPolicyMetrics()
-        {
-            return new Dictionary<string, double>(); // No specific metrics for FIFO
-        }
-    }
-
-    public class SizeWeightedEvictionPolicy : ICacheEvictionPolicy
-    {
-        public IEnumerable<string> SelectItemsForEviction(
-            IEnumerable<KeyValuePair<string, CacheItemStats>> items, 
-            long targetSize)
-        {
-            var currentSize = items.Sum(i => i.Value.Size);
-            // Prioritize larger items for eviction
-            var itemList = items.OrderByDescending(i => i.Value.Size).ToList();
-            var result = new List<string>();
-            
-            foreach (var item in itemList)
-            {
-                if (currentSize <= targetSize) break;
-                result.Add(item.Key);
-                currentSize -= item.Value.Size;
-            }
-            
-            return result;
-        }
-
-        public void UpdatePolicy(CacheAccessStats stats)
-        {
-            // Size-weighted policy doesn't need to track additional statistics
-        }
-
-        public Dictionary<string, double> GetPolicyMetrics()
-        {
-            return new Dictionary<string, double>(); // No specific metrics for size-weighted
-        }
-    }
-
-    public class HybridEvictionPolicy : ICacheEvictionPolicy
-    {
-        private readonly Dictionary<string, HybridStats> _itemStats = new();
-        
-        public IEnumerable<string> SelectItemsForEviction(
-            IEnumerable<KeyValuePair<string, CacheItemStats>> items, 
-            long targetSize)
-        {
-            var currentSize = items.Sum(i => i.Value.Size);
-            var itemList = items.ToList();
-            
-            // Calculate score for each item (lower is better)
-            var scores = itemList.Select(item => new
-            {
-                Key = item.Key,
-                Score = CalculateScore(item.Value),
-                Size = item.Value.Size
-            }).OrderByDescending(x => x.Score).ToList();
-            
-            var result = new List<string>();
-            foreach (var item in scores)
-            {
-                if (currentSize <= targetSize) break;
-                result.Add(item.Key);
-                currentSize -= item.Size;
-            }
-            
-            return result;
-        }
-
-        private double CalculateScore(CacheItemStats stats)
-        {
-            const double sizeWeight = 0.3;
-            const double ageWeight = 0.3;
-            const double frequencyWeight = 0.4;
-            
-            var ageHours = (DateTime.UtcNow - stats.LastAccess).TotalHours;
-            var sizeScore = stats.Size / (1024.0 * 1024.0); // Size in MB
-            var ageScore = ageHours / 24.0; // Age in days
-            var frequencyScore = stats.AccessCount;
-            
-            return (sizeScore * sizeWeight) + 
-                   (ageScore * ageWeight) - 
-                   (frequencyScore * frequencyWeight);
-        }
-
-        public void UpdatePolicy(CacheAccessStats stats)
-        {
-            foreach (var freq in stats.QueryTypeFrequency)
-            {
-                if (!_itemStats.ContainsKey(freq.Key))
-                {
-                    _itemStats[freq.Key] = new HybridStats();
-                }
-                _itemStats[freq.Key].AccessCount += freq.Value;
-                _itemStats[freq.Key].LastAccess = DateTime.UtcNow;
-            }
-        }
-
-        public Dictionary<string, double> GetPolicyMetrics()
-        {
-            var avgScore = _itemStats.Any()
-                ? _itemStats.Average(s => CalculateScore(new CacheItemStats
-                {
-                    Size = s.Value.Size,
-                    LastAccess = s.Value.LastAccess,
-                    AccessCount = s.Value.AccessCount,
-                    CreationTime = s.Value.CreationTime
-                }))
-                : 0;
-
-            return new Dictionary<string, double>
-            {
-                ["average_hybrid_score"] = avgScore
+                ["items_tracked"] = _lastAccessTimes.Count,
+                ["recent_evictions"] = _recentEvictions.Count
             };
         }
 
-        private class HybridStats
+        public IEnumerable<CacheEvictionEvent> GetRecentEvictions(int count)
         {
-            public long Size { get; set; }
-            public DateTime LastAccess { get; set; } = DateTime.UtcNow;
-            public DateTime CreationTime { get; set; } = DateTime.UtcNow;
-            public int AccessCount { get; set; }
+            return _recentEvictions.Take(count);
         }
     }
 
-    public class AdaptiveCacheEvictionPolicy : ICacheEvictionPolicy
+    public class HitRateWeightedPolicy : ICacheEvictionPolicy
     {
-        private readonly Dictionary<string, ICacheEvictionPolicy> _policies;
-        private readonly Dictionary<string, IEvictionPolicyMetrics> _policyMetrics;
-        private readonly List<PolicySwitchEvent> _switchHistory;
-        private ICacheEvictionPolicy _currentPolicy;
-        private DateTime _lastEvaluation;
+        private readonly ConcurrentDictionary<string, (int hits, int accesses)> _hitRateStats = new();
+        private readonly ConcurrentQueue<CacheEvictionEvent> _recentEvictions = new();
+        private double _evictionThreshold = 0.9;
+        private double _pressureThreshold = 0.95;
+        private EvictionStrategy _currentStrategy = EvictionStrategy.HitRateWeighted;
+        private const int MINIMUM_ACCESSES = 5;
+
+        public double CurrentEvictionThreshold => _evictionThreshold;
+        public double CurrentPressureThreshold => _pressureThreshold;
+
+        public async Task UpdateEvictionThreshold(double threshold)
+        {
+            _evictionThreshold = Math.Clamp(threshold, 0.5, 0.95);
+        }
+
+        public async Task UpdatePressureThreshold(double threshold)
+        {
+            _pressureThreshold = Math.Clamp(threshold, 0.6, 0.99);
+        }
+
+        public async Task UpdateEvictionStrategy(EvictionStrategy strategy)
+        {
+            _currentStrategy = strategy;
+        }
+
+        public async Task ForceEviction(long bytesToFree)
+        {
+            // Implementation handled by cache provider
+        }
+
+        private double CalculateHitRate(string key)
+        {
+            if (_hitRateStats.TryGetValue(key, out var stats))
+            {
+                if (stats.accesses < MINIMUM_ACCESSES) return 0.5; // Default for new items
+                return (double)stats.hits / stats.accesses;
+            }
+            return 0;
+        }
+
+        public void UpdateHitStats(string key, bool isHit)
+        {
+            _hitRateStats.AddOrUpdate(
+                key,
+                new (isHit ? 1 : 0, 1),
+                (_, old) => (old.hits + (isHit ? 1 : 0), old.accesses + 1)
+            );
+        }
+
+        public Dictionary<string, int> GetEvictionStats()
+        {
+            return new Dictionary<string, int>
+            {
+                ["total_items_tracked"] = _hitRateStats.Count,
+                ["recent_evictions"] = _recentEvictions.Count
+            };
+        }
+
+        public IEnumerable<CacheEvictionEvent> GetRecentEvictions(int count)
+        {
+            return _recentEvictions.Take(count);
+        }
+    }
+
+    public class SizeWeightedPolicy : ICacheEvictionPolicy
+    {
+        private readonly ConcurrentDictionary<string, (long size, DateTime lastAccess)> _sizeStats = new();
+        private readonly ConcurrentQueue<CacheEvictionEvent> _recentEvictions = new();
+        private double _evictionThreshold = 0.9;
+        private double _pressureThreshold = 0.95;
+        private EvictionStrategy _currentStrategy = EvictionStrategy.SizeWeighted;
+        private const long SIZE_THRESHOLD = 1024 * 1024; // 1MB
+
+        public double CurrentEvictionThreshold => _evictionThreshold;
+        public double CurrentPressureThreshold => _pressureThreshold;
+
+        public async Task UpdateEvictionThreshold(double threshold)
+        {
+            _evictionThreshold = Math.Clamp(threshold, 0.5, 0.95);
+        }
+
+        public async Task UpdatePressureThreshold(double threshold)
+        {
+            _pressureThreshold = Math.Clamp(threshold, 0.6, 0.99);
+        }
+
+        public async Task UpdateEvictionStrategy(EvictionStrategy strategy)
+        {
+            _currentStrategy = strategy;
+        }
+
+        public async Task ForceEviction(long bytesToFree)
+        {
+            // Implementation handled by cache provider
+        }
+
+        public void UpdateSizeStats(string key, long size)
+        {
+            _sizeStats.AddOrUpdate(
+                key,
+                (size, DateTime.UtcNow),
+                (_, old) => (size, DateTime.UtcNow)
+            );
+        }
+
+        private double CalculateSizeScore(string key)
+        {
+            if (_sizeStats.TryGetValue(key, out var stats))
+            {
+                // Larger items get higher scores (more likely to be evicted)
+                var sizeScore = (double)stats.size / SIZE_THRESHOLD;
+                var ageHours = (DateTime.UtcNow - stats.lastAccess).TotalHours;
+                return sizeScore * (1 + (ageHours / 24)); // Size weighted by age
+            }
+            return 0;
+        }
+
+        public Dictionary<string, int> GetEvictionStats()
+        {
+            return new Dictionary<string, int>
+            {
+                ["items_tracked"] = _sizeStats.Count,
+                ["large_items"] = _sizeStats.Count(x => x.Value.size > SIZE_THRESHOLD),
+                ["recent_evictions"] = _recentEvictions.Count
+            };
+        }
+
+        public IEnumerable<CacheEvictionEvent> GetRecentEvictions(int count)
+        {
+            return _recentEvictions.Take(count);
+        }
+    }
+
+    public class AdaptiveEvictionPolicy : ICacheEvictionPolicy
+    {
+        private readonly ConcurrentDictionary<string, PolicyState> _policyStates = new();
+        private readonly ConcurrentQueue<CacheEvictionEvent> _recentEvictions = new();
+        private readonly ConcurrentQueue<PolicySwitchEvent> _switchHistory = new();
+        private readonly ConcurrentDictionary<string, MLPredictionMetrics> _mlMetrics = new();
+        private EvictionStrategy _currentStrategy = EvictionStrategy.Adaptive;
+        private double _evictionThreshold = 0.9;
+        private double _pressureThreshold = 0.95;
+        private DateTime _lastEvaluation = DateTime.UtcNow;
         private readonly TimeSpan _evaluationInterval = TimeSpan.FromMinutes(5);
 
-        public AdaptiveCacheEvictionPolicy()
+        public double CurrentEvictionThreshold => _evictionThreshold;
+        public double CurrentPressureThreshold => _pressureThreshold;
+
+        private class PolicyState
         {
-            _policies = new Dictionary<string, ICacheEvictionPolicy>
+            public double HitRate { get; set; }
+            public double MemoryEfficiency { get; set; }
+            public double ResponseTime { get; set; }
+            public DateTime LastUsed { get; set; }
+            public int EvictionCount { get; set; }
+            public Dictionary<string, double> Metrics { get; set; } = new();
+        }
+
+        private class MLPredictionMetrics
+        {
+            public double PredictedHitRate { get; set; }
+            public double PredictedMemoryUsage { get; set; }
+            public double PredictedLatency { get; set; }
+            public DateTime PredictionTime { get; set; }
+        }
+
+        public async Task UpdateEvictionThreshold(double threshold)
+        {
+            _evictionThreshold = Math.Clamp(threshold, 0.5, 0.95);
+        }
+
+        public async Task UpdatePressureThreshold(double threshold)
+        {
+            _pressureThreshold = Math.Clamp(threshold, 0.6, 0.99);
+        }
+
+        public async Task UpdateEvictionStrategy(EvictionStrategy strategy)
+        {
+            if (strategy != _currentStrategy)
             {
-                ["LRU"] = new LRUEvictionPolicy(),
-                ["LFU"] = new LFUEvictionPolicy(),
-                ["FIFO"] = new FIFOEvictionPolicy(),
-                ["SizeWeighted"] = new SizeWeightedEvictionPolicy(),
-                ["Hybrid"] = new HybridEvictionPolicy()
+                var switchEvent = new PolicySwitchEvent
+                {
+                    FromStrategy = _currentStrategy,
+                    ToStrategy = strategy,
+                    Timestamp = DateTime.UtcNow,
+                    Reason = "Manual strategy switch",
+                    Metrics = GetCurrentMetrics()
+                };
+
+                _switchHistory.Enqueue(switchEvent);
+                _currentStrategy = strategy;
+            }
+        }
+
+        public async Task ForceEviction(long bytesToFree)
+        {
+            // Implementation handled by cache provider
+        }
+
+        private Dictionary<string, double> GetCurrentMetrics()
+        {
+            if (_policyStates.TryGetValue(_currentStrategy.ToString(), out var state))
+            {
+                return new Dictionary<string, double>
+                {
+                    ["hit_rate"] = state.HitRate,
+                    ["memory_efficiency"] = state.MemoryEfficiency,
+                    ["response_time"] = state.ResponseTime
+                };
+            }
+            return new Dictionary<string, double>();
+        }
+
+        public void UpdateMLPredictions(string strategyKey, MLPredictionMetrics metrics)
+        {
+            _mlMetrics.AddOrUpdate(strategyKey, metrics, (_, __) => metrics);
+        }
+
+        public Dictionary<string, int> GetEvictionStats()
+        {
+            return new Dictionary<string, int>
+            {
+                ["policy_switches"] = _switchHistory.Count,
+                ["tracked_strategies"] = _policyStates.Count,
+                ["recent_evictions"] = _recentEvictions.Count
             };
-
-            _policyMetrics = new Dictionary<string, IEvictionPolicyMetrics>();
-            _switchHistory = new List<PolicySwitchEvent>();
-            _currentPolicy = _policies["Hybrid"]; // Start with Hybrid as default
-            _lastEvaluation = DateTime.UtcNow;
-
-            InitializeMetrics();
         }
 
-        private void InitializeMetrics()
+        public IEnumerable<CacheEvictionEvent> GetRecentEvictions(int count)
         {
-            foreach (var policy in _policies.Keys)
-            {
-                _policyMetrics[policy] = new EvictionPolicyMetrics();
-            }
+            return _recentEvictions.Take(count);
         }
 
-        public IEnumerable<string> SelectItemsForEviction(
-            IEnumerable<KeyValuePair<string, CacheItemStats>> items, 
-            long targetSize)
-        {
-            EvaluateAndSwitchPolicy();
-            return _currentPolicy.SelectItemsForEviction(items, targetSize);
-        }
-
-        public void UpdatePolicy(CacheAccessStats stats)
-        {
-            // Update metrics for all policies
-            foreach (var policy in _policies.Values)
-            {
-                policy.UpdatePolicy(stats);
-            }
-
-            // Update policy metrics
-            UpdatePolicyMetrics(stats);
-
-            // Learn from performance data
-            LearnFromPerformanceData(stats);
-        }
-
-        private void EvaluateAndSwitchPolicy()
+        private async Task EvaluateAndSwitchPolicy()
         {
             if (DateTime.UtcNow - _lastEvaluation < _evaluationInterval)
                 return;
 
             _lastEvaluation = DateTime.UtcNow;
 
-            var bestPolicy = SelectBestPolicy();
-            if (bestPolicy.Key != GetCurrentPolicyName())
+            var bestStrategy = await SelectBestStrategy();
+            if (bestStrategy != _currentStrategy)
             {
-                SwitchPolicy(bestPolicy.Key, bestPolicy.Value);
+                await UpdateEvictionStrategy(bestStrategy);
             }
         }
 
-        private KeyValuePair<string, double> SelectBestPolicy()
+        private async Task<EvictionStrategy> SelectBestStrategy()
         {
-            var scores = new Dictionary<string, double>();
+            var scores = new Dictionary<EvictionStrategy, double>();
 
-            foreach (var policy in _policies)
+            foreach (var strategy in Enum.GetValues<EvictionStrategy>())
             {
-                var metrics = _policyMetrics[policy.Key];
-                scores[policy.Key] = CalculatePolicyScore(metrics);
+                scores[strategy] = await CalculateStrategyScore(strategy);
             }
 
-            return scores.OrderByDescending(s => s.Value).First();
+            return scores.OrderByDescending(s => s.Value).First().Key;
         }
 
-        private double CalculatePolicyScore(IEvictionPolicyMetrics metrics)
+        private async Task<double> CalculateStrategyScore(EvictionStrategy strategy)
         {
-            const double hitRateWeight = 0.35;
-            const double memoryWeight = 0.25;
-            const double responseTimeWeight = 0.20;
-            const double utilizationWeight = 0.10;
-            const double accuracyWeight = 0.10;
+            if (!_policyStates.TryGetValue(strategy.ToString(), out var state))
+                return 0;
 
-            return (metrics.HitRate * hitRateWeight) +
-                   (metrics.MemoryEfficiency * memoryWeight) +
-                   (1 / metrics.AverageResponseTime * responseTimeWeight) +
-                   (metrics.ResourceUtilization * utilizationWeight) +
-                   (metrics.EvictionAccuracy * accuracyWeight);
-        }
+            if (!_mlMetrics.TryGetValue(strategy.ToString(), out var predictions))
+                return 0;
 
-        private void SwitchPolicy(string newPolicyName, double score)
-        {
-            var oldPolicyName = GetCurrentPolicyName();
-            var oldPolicy = _currentPolicy;
-            _currentPolicy = _policies[newPolicyName];
+            const double currentWeight = 0.6;
+            const double predictionWeight = 0.4;
 
-            var switchEvent = new PolicySwitchEvent
-            {
-                FromPolicy = oldPolicyName,
-                ToPolicy = newPolicyName,
-                Timestamp = DateTime.UtcNow,
-                PerformanceImpact = new Dictionary<string, double>
-                {
-                    ["score_improvement"] = score - CalculatePolicyScore(_policyMetrics[oldPolicyName])
-                },
-                Reason = $"Better overall performance score: {score:F2}"
-            };
+            var currentScore = (state.HitRate * 0.4) +
+                             (state.MemoryEfficiency * 0.3) +
+                             (1.0 / (state.ResponseTime + 1) * 0.3);
 
-            _switchHistory.Add(switchEvent);
-        }
+            var predictionScore = (predictions.PredictedHitRate * 0.4) +
+                                (1.0 / predictions.PredictedMemoryUsage * 0.3) +
+                                (1.0 / predictions.PredictedLatency * 0.3);
 
-        private string GetCurrentPolicyName()
-        {
-            return _policies.First(p => p.Value == _currentPolicy).Key;
-        }
-
-        private void UpdatePolicyMetrics(CacheAccessStats stats)
-        {
-            var currentMetrics = _policyMetrics[GetCurrentPolicyName()] as EvictionPolicyMetrics;
-            if (currentMetrics != null)
-            {
-                currentMetrics.UpdateMetrics(stats);
-            }
-        }
-
-        private void LearnFromPerformanceData(CacheAccessStats stats)
-        {
-            // Analyze workload patterns
-            var workloadType = AnalyzeWorkloadPattern(stats);
-            var temporalPatterns = AnalyzeTemporalPatterns(stats);
-            var sizeDistribution = AnalyzeSizeDistribution(stats);
-
-            // Update policy preferences based on patterns
-            AdjustPolicyPreferences(workloadType, temporalPatterns, sizeDistribution);
-        }
-
-        private string AnalyzeWorkloadPattern(CacheAccessStats stats)
-        {
-            if (stats.ReadWriteRatio > 0.8) return "ReadHeavy";
-            if (stats.ReadWriteRatio < 0.2) return "WriteHeavy";
-            return "Balanced";
-        }
-
-        private Dictionary<string, string> AnalyzeTemporalPatterns(CacheAccessStats stats)
-        {
-            return stats.TemporalPatterns.ToDictionary(
-                p => p.Key,
-                p => IdentifyPattern(p.Value));
-        }
-
-        private Dictionary<string, string> AnalyzeSizeDistribution(CacheAccessStats stats)
-        {
-            return stats.DataSizeDistribution.ToDictionary(
-                p => p.Key,
-                p => p.Value > 1024 * 1024 ? "Large" : "Small");
-        }
-
-        private string IdentifyPattern(List<DateTime> accessTimes)
-        {
-            // Simple pattern recognition
-            var intervals = accessTimes.Zip(accessTimes.Skip(1), (a, b) => b - a).ToList();
-            var avgInterval = intervals.Average(i => i.TotalMinutes);
-            var stdDev = Math.Sqrt(intervals.Average(i => Math.Pow(i.TotalMinutes - avgInterval, 2)));
-
-            if (stdDev < avgInterval * 0.1) return "Regular";
-            if (stdDev < avgInterval * 0.3) return "Somewhat Regular";
-            return "Irregular";
-        }
-
-        private void AdjustPolicyPreferences(
-            string workloadType,
-            Dictionary<string, string> temporalPatterns,
-            Dictionary<string, string> sizeDistribution)
-        {
-            var policyPreferences = new Dictionary<string, double>();
-
-            // Adjust preferences based on workload type
-            switch (workloadType)
-            {
-                case "ReadHeavy":
-                    policyPreferences["LRU"] = 1.2;
-                    policyPreferences["LFU"] = 1.1;
-                    break;
-                case "WriteHeavy":
-                    policyPreferences["FIFO"] = 1.2;
-                    policyPreferences["SizeWeighted"] = 1.1;
-                    break;
-                case "Balanced":
-                    policyPreferences["Hybrid"] = 1.2;
-                    break;
-            }
-
-            // Consider temporal patterns
-            if (temporalPatterns.Values.Any(p => p == "Regular"))
-            {
-                policyPreferences["LFU"] = (policyPreferences.GetValueOrDefault("LFU", 1.0) * 1.1);
-            }
-
-            // Consider size distribution
-            if (sizeDistribution.Values.Count(s => s == "Large") > sizeDistribution.Values.Count(s => s == "Small"))
-            {
-                policyPreferences["SizeWeighted"] = (policyPreferences.GetValueOrDefault("SizeWeighted", 1.0) * 1.1);
-            }
-
-            // Apply preferences to metrics
-            foreach (var (policy, preference) in policyPreferences)
-            {
-                if (_policyMetrics.TryGetValue(policy, out var metrics))
-                {
-                    (metrics as EvictionPolicyMetrics)?.ApplyPreference(preference);
-                }
-            }
-        }
-
-        public Dictionary<string, double> GetPolicyMetrics()
-        {
-            var metrics = new Dictionary<string, double>();
-
-            // Add current policy metrics
-            foreach (var (key, value) in _currentPolicy.GetPolicyMetrics())
-            {
-                metrics[$"current_{key}"] = value;
-            }
-
-            // Add adaptive policy specific metrics
-            metrics["policy_switches"] = _switchHistory.Count;
-            metrics["time_since_last_switch"] = (DateTime.UtcNow - _switchHistory.LastOrDefault()?.Timestamp ?? DateTime.UtcNow).TotalMinutes;
-            metrics["current_policy_score"] = CalculatePolicyScore(_policyMetrics[GetCurrentPolicyName()]);
-
-            return metrics;
-        }
-
-        private class EvictionPolicyMetrics : IEvictionPolicyMetrics
-        {
-            public double HitRate { get; private set; }
-            public double MemoryEfficiency { get; private set; }
-            public double AverageResponseTime { get; private set; }
-            public double ResourceUtilization { get; private set; }
-            public double EvictionAccuracy { get; private set; }
-            public Dictionary<string, double> CustomMetrics { get; }
-
-            private double _preferenceMultiplier = 1.0;
-
-            public EvictionPolicyMetrics()
-            {
-                CustomMetrics = new Dictionary<string, double>();
-                ResetMetrics();
-            }
-
-            public void ResetMetrics()
-            {
-                HitRate = 0.5;
-                MemoryEfficiency = 0.5;
-                AverageResponseTime = 100;
-                ResourceUtilization = 0.5;
-                EvictionAccuracy = 0.5;
-            }
-
-            public void UpdateMetrics(CacheAccessStats stats)
-            {
-                HitRate = stats.TotalHits / (double)(stats.TotalHits + stats.TotalMisses);
-                MemoryEfficiency = 1 - stats.MemoryUtilization;
-                AverageResponseTime = stats.AverageResponseTimes.Values.Average();
-                ResourceUtilization = 1 - (stats.UnnecessaryEvictions / (double)stats.TotalHits);
-                EvictionAccuracy = stats.HitRateImpact;
-
-                // Apply preference multiplier
-                HitRate *= _preferenceMultiplier;
-                MemoryEfficiency *= _preferenceMultiplier;
-                ResourceUtilization *= _preferenceMultiplier;
-                EvictionAccuracy *= _preferenceMultiplier;
-            }
-
-            public void ApplyPreference(double multiplier)
-            {
-                _preferenceMultiplier = multiplier;
-            }
+            return (currentScore * currentWeight) + (predictionScore * predictionWeight);
         }
     }
 }
