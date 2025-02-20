@@ -9,20 +9,61 @@ using System.Security.Authentication;
 
 namespace XPlain.Services;
 
-public class TokenBucket
+public class DualTokenBucket
 {
     private readonly object _lock = new();
-    private double _tokens;
-    private readonly double _capacity;
-    private readonly double _refillRate;
+    private double _secondTokens;
+    private double _minuteTokens;
+    private readonly double _secondCapacity;
+    private readonly double _minuteCapacity;
+    private readonly double _secondRefillRate;
+    private readonly double _minuteRefillRate;
     private DateTime _lastRefillTime;
 
-    public TokenBucket(double capacity, double refillRate)
+    public DualTokenBucket(double secondCapacity, double minuteCapacity, double secondRefillRate, double minuteRefillRate)
     {
-        _capacity = capacity;
-        _refillRate = refillRate;
-        _tokens = capacity;
+        _secondCapacity = secondCapacity;
+        _minuteCapacity = minuteCapacity;
+        _secondRefillRate = secondRefillRate;
+        _minuteRefillRate = minuteRefillRate;
+        _secondTokens = secondCapacity;
+        _minuteTokens = minuteCapacity;
         _lastRefillTime = DateTime.UtcNow;
+    }
+
+    public async Task<bool> ConsumeTokenAsync(CancellationToken cancellationToken = default)
+    {
+        while (!cancellationToken.IsCancellationRequested)
+        {
+            lock (_lock)
+            {
+                RefillTokens();
+                if (_secondTokens >= 1 && _minuteTokens >= 1)
+                {
+                    _secondTokens--;
+                    _minuteTokens--;
+                    return true;
+                }
+            }
+            await Task.Delay(50, cancellationToken);
+        }
+        return false;
+    }
+
+    private void RefillTokens()
+    {
+        var now = DateTime.UtcNow;
+        var timePassed = (now - _lastRefillTime).TotalSeconds;
+        
+        // Refill per-second tokens
+        var secondTokensToAdd = timePassed * _secondRefillRate;
+        _secondTokens = Math.Min(_secondCapacity, _secondTokens + secondTokensToAdd);
+        
+        // Refill per-minute tokens
+        var minuteTokensToAdd = timePassed * _minuteRefillRate / 60.0; // Convert to per-second rate
+        _minuteTokens = Math.Min(_minuteCapacity, _minuteTokens + minuteTokensToAdd);
+        
+        _lastRefillTime = now;
     }
 
     public async Task<bool> ConsumeTokenAsync(CancellationToken cancellationToken = default)
@@ -53,6 +94,128 @@ public class TokenBucket
     }
 }
 
+public class RequestBatcher
+{
+    private class BatchKey : IEquatable<BatchKey>
+    {
+        public string Model { get; }
+        public string Content { get; }
+        public int MaxTokens { get; }
+
+        public BatchKey(string model, string content, int maxTokens)
+        {
+            Model = model;
+            Content = content;
+            MaxTokens = maxTokens;
+        }
+
+        public bool Equals(BatchKey other)
+        {
+            if (ReferenceEquals(null, other)) return false;
+            if (ReferenceEquals(this, other)) return true;
+            return Model == other.Model && Content == other.Content && MaxTokens == other.MaxTokens;
+        }
+
+        public override bool Equals(object obj)
+        {
+            if (ReferenceEquals(null, obj)) return false;
+            if (ReferenceEquals(this, obj)) return true;
+            if (obj.GetType() != this.GetType()) return false;
+            return Equals((BatchKey)obj);
+        }
+
+        public override int GetHashCode()
+        {
+            return HashCode.Combine(Model, Content, MaxTokens);
+        }
+    }
+
+    private class PendingRequest
+    {
+        public TaskCompletionSource<string> TaskCompletion { get; }
+        public DateTime Timestamp { get; }
+        public CancellationToken CancellationToken { get; }
+
+        public PendingRequest(TaskCompletionSource<string> taskCompletion, CancellationToken cancellationToken)
+        {
+            TaskCompletion = taskCompletion;
+            Timestamp = DateTime.UtcNow;
+            CancellationToken = cancellationToken;
+        }
+    }
+
+    private readonly Dictionary<BatchKey, List<PendingRequest>> _pendingRequests = new();
+    private readonly object _lock = new();
+    private readonly Timer _batchTimer;
+    private readonly int _maxBatchAge;
+    private readonly Func<BatchKey, List<PendingRequest>, CancellationToken, Task> _batchProcessor;
+
+    public RequestBatcher(int maxBatchAgeMs, Func<BatchKey, List<PendingRequest>, CancellationToken, Task> batchProcessor)
+    {
+        _maxBatchAge = maxBatchAgeMs;
+        _batchProcessor = batchProcessor;
+        _batchTimer = new Timer(ProcessBatches, null, 1000, 1000);
+    }
+
+    public Task<string> EnqueueRequest(string model, string content, int maxTokens, CancellationToken cancellationToken)
+    {
+        var key = new BatchKey(model, content, maxTokens);
+        var tcs = new TaskCompletionSource<string>();
+        var request = new PendingRequest(tcs, cancellationToken);
+
+        lock (_lock)
+        {
+            if (!_pendingRequests.TryGetValue(key, out var requests))
+            {
+                requests = new List<PendingRequest>();
+                _pendingRequests[key] = requests;
+            }
+            requests.Add(request);
+        }
+
+        return tcs.Task;
+    }
+
+    private async void ProcessBatches(object state)
+    {
+        List<(BatchKey Key, List<PendingRequest> Requests)> batchesToProcess = new();
+
+        lock (_lock)
+        {
+            var now = DateTime.UtcNow;
+            foreach (var kvp in _pendingRequests)
+            {
+                var oldestRequest = kvp.Value.First().Timestamp;
+                if ((now - oldestRequest).TotalMilliseconds >= _maxBatchAge)
+                {
+                    batchesToProcess.Add((kvp.Key, kvp.Value));
+                    _pendingRequests.Remove(kvp.Key);
+                }
+            }
+        }
+
+        foreach (var batch in batchesToProcess)
+        {
+            try
+            {
+                await _batchProcessor(batch.Key, batch.Requests, CancellationToken.None);
+            }
+            catch (Exception ex)
+            {
+                foreach (var request in batch.Requests)
+                {
+                    request.TaskCompletion.TrySetException(ex);
+                }
+            }
+        }
+    }
+
+    public void Dispose()
+    {
+        _batchTimer.Dispose();
+    }
+}
+
 public class RequestQueue
 {
     private class QueueItem
@@ -62,6 +225,7 @@ public class RequestQueue
         public required CancellationToken CancellationToken { get; init; }
         public DateTime EnqueueTime { get; init; } = DateTime.UtcNow;
         public int Priority { get; init; }
+        public string RequestKey { get; init; }
     }
 
     private readonly PriorityQueue<QueueItem, int> _queue = new();
@@ -268,11 +432,15 @@ public class AnthropicClient : BaseLLMProvider, IAnthropicClient, IDisposable
     public override string ModelName => _settings.DefaultModel;
     private readonly CircuitBreaker _circuitBreaker;
     private readonly Random _random = new();
-    private readonly TokenBucket _tokenBucket;
+    private readonly DualTokenBucket _tokenBucket;
     private readonly RequestQueue _requestQueue;
+    private readonly RequestBatcher _requestBatcher;
     private const int RequestTimeoutMs = 30000; // 30 seconds timeout for queued requests
     private const double TokensPerSecond = 1.0; // Base rate of 1 request per second
-    private const double BurstCapacity = 5.0; // Allow bursts of up to 5 requests
+    private const double TokensPerMinute = 50.0; // Base rate of 50 requests per minute
+    private const double BurstCapacityPerSecond = 5.0; // Allow bursts of up to 5 requests per second
+    private const double BurstCapacityPerMinute = 100.0; // Allow bursts of up to 100 requests per minute
+    private const int MaxBatchAgeMs = 500; // Maximum age of a batch before processing
 
     private static readonly HashSet<HttpStatusCode> RetryableStatusCodes = new()
     {
@@ -300,8 +468,67 @@ public class AnthropicClient : BaseLLMProvider, IAnthropicClient, IDisposable
             _settings.CircuitBreakerFailureThreshold,
             _settings.CircuitBreakerResetTimeoutMs);
             
-        _tokenBucket = new TokenBucket(BurstCapacity, TokensPerSecond);
+        _tokenBucket = new DualTokenBucket(
+            BurstCapacityPerSecond, 
+            BurstCapacityPerMinute,
+            TokensPerSecond,
+            TokensPerMinute);
+            
+        _requestBatcher = new RequestBatcher(MaxBatchAgeMs, ProcessBatchAsync);
         _requestQueue = new RequestQueue(_tokenBucket, RequestTimeoutMs);
+    }
+
+    private async Task ProcessBatchAsync(BatchKey key, List<PendingRequest> requests, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var response = await ExecuteWithRetryAsync(async (ct) =>
+            {
+                AnthropicRequest requestBody = new AnthropicRequest
+                {
+                    Model = key.Model,
+                    Messages =
+                    [
+                        new AnthropicMessage
+                        {
+                            Role = "user",
+                            Content = [new AnthropicMessageContent { Type = "text", Text = key.Content }]
+                        }
+                    ],
+                    MaxTokens = key.MaxTokens,
+                    Temperature = 0.7,
+                };
+
+                HttpResponseMessage response = await _httpClient.PostAsJsonAsync("/v1/messages", requestBody, ct);
+                response.EnsureSuccessStatusCode();
+
+                // Track rate limit information from headers
+                if (response.Headers.TryGetValues("x-ratelimit-remaining", out var remainingValues) &&
+                    int.TryParse(remainingValues.FirstOrDefault(), out var remaining))
+                {
+                    Debug.WriteLine($"Rate limit remaining: {remaining}");
+                }
+
+                var result = await response.Content.ReadFromJsonAsync<AnthropicResponse>(cancellationToken: ct);
+                return result?.Content.FirstOrDefault()?.Text.Trim() ?? "No response received from the API.";
+            }, priority: 0, cancellationToken);
+
+            // Set the result for all requests in the batch
+            foreach (var request in requests)
+            {
+                if (!request.CancellationToken.IsCancellationRequested)
+                {
+                    request.TaskCompletion.TrySetResult(response);
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            foreach (var request in requests)
+            {
+                request.TaskCompletion.TrySetException(ex);
+            }
+        }
     }
 
     private async Task<T> ExecuteWithRetryAsync<T>(Func<CancellationToken, Task<T>> operation, int priority = 0, CancellationToken cancellationToken = default)
@@ -367,67 +594,47 @@ public class AnthropicClient : BaseLLMProvider, IAnthropicClient, IDisposable
 
     protected override async Task<string> GetCompletionInternalAsync(string prompt)
     {
-        return await ExecuteWithRetryAsync(async (cancellationToken) =>
+        var cts = new CancellationTokenSource(RequestTimeoutMs);
+        try
         {
-            AnthropicRequest requestBody = new AnthropicRequest
-            {
-                Model = _settings.DefaultModel,
-                Messages =
-                [
-                    new AnthropicMessage
-                        {Role = "user", Content = [new AnthropicMessageContent {Type = "text", Text = prompt}]}
-                ],
-                MaxTokens = _settings.MaxTokenLimit,
-                Temperature = 0.7,
-            };
-
-            HttpResponseMessage response = await _httpClient.PostAsJsonAsync("/v1/messages", requestBody, cancellationToken);
-            response.EnsureSuccessStatusCode();
-
-            // Track rate limit information from headers
-            if (response.Headers.TryGetValues("x-ratelimit-remaining", out var remainingValues) &&
-                int.TryParse(remainingValues.FirstOrDefault(), out var remaining))
-            {
-                // Log or monitor remaining rate limit
-                Debug.WriteLine($"Rate limit remaining: {remaining}");
-            }
-
-            var result = await response.Content.ReadFromJsonAsync<AnthropicResponse>(cancellationToken: cancellationToken);
-            return result?.Content.FirstOrDefault()?.Text.Trim() ?? "No response received from the API.";
-        });
+            // Try to batch similar requests
+            return await _requestBatcher.EnqueueRequest(
+                _settings.DefaultModel,
+                prompt,
+                _settings.MaxTokenLimit,
+                cts.Token);
+        }
+        catch (OperationCanceledException)
+        {
+            throw new TimeoutException("Request timed out");
+        }
+        finally
+        {
+            cts.Dispose();
+        }
     }
 
     public async Task<string> AskQuestion(string question, string codeContext)
     {
-        return await ExecuteWithRetryAsync(async (cancellationToken) =>
+        var prompt = BuildPrompt(question, codeContext);
+        var cts = new CancellationTokenSource(RequestTimeoutMs);
+        try
         {
-            var prompt = BuildPrompt(question, codeContext);
-            AnthropicRequest requestBody = new AnthropicRequest
-            {
-                Model = _settings.DefaultModel,
-                Messages =
-                [
-                    new AnthropicMessage
-                        {Role = "user", Content = [new AnthropicMessageContent {Type = "text", Text = prompt}]}
-                ],
-                MaxTokens = _settings.MaxTokenLimit,
-                Temperature = 0.7,
-            };
-
-            HttpResponseMessage response = await _httpClient.PostAsJsonAsync("/v1/messages", requestBody, cancellationToken);
-            response.EnsureSuccessStatusCode();
-
-            // Track rate limit information from headers
-            if (response.Headers.TryGetValues("x-ratelimit-remaining", out var remainingValues) &&
-                int.TryParse(remainingValues.FirstOrDefault(), out var remaining))
-            {
-                // Log or monitor remaining rate limit
-                Debug.WriteLine($"Rate limit remaining: {remaining}");
-            }
-
-            var result = await response.Content.ReadFromJsonAsync<AnthropicResponse>(cancellationToken: cancellationToken);
-            return result?.Content.FirstOrDefault()?.Text.Trim() ?? "No response received from the API.";
-        });
+            // Try to batch similar requests
+            return await _requestBatcher.EnqueueRequest(
+                _settings.DefaultModel,
+                prompt,
+                _settings.MaxTokenLimit,
+                cts.Token);
+        }
+        catch (OperationCanceledException)
+        {
+            throw new TimeoutException("Request timed out");
+        }
+        finally
+        {
+            cts.Dispose();
+        }
     }
 
     public async Task<bool> ValidateApiConnection()
@@ -470,6 +677,7 @@ public class AnthropicClient : BaseLLMProvider, IAnthropicClient, IDisposable
     {
         _httpClient.Dispose();
         _requestQueue.Dispose();
+        _requestBatcher.Dispose();
     }
 }
 
