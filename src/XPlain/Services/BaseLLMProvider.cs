@@ -5,6 +5,7 @@ using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using XPlain.Configuration;
+using XPlain.Services.Validation;
 
 namespace XPlain.Services
 {
@@ -16,19 +17,22 @@ namespace XPlain.Services
         protected readonly IRateLimitingService _rateLimitingService;
         protected readonly LLMProviderMetrics _metrics;
         protected readonly TimeSpan _timeout;
+        protected readonly IInputValidator _inputValidator;
 
         protected BaseLLMProvider(
             ILogger logger,
             HttpClient httpClient,
             IRateLimitingService rateLimitingService,
             LLMProviderMetrics metrics,
-            IOptions<LLMSettings> settings)
+            IOptions<LLMSettings> settings,
+            IInputValidator inputValidator)
         {
             _logger = logger ?? throw new ArgumentNullException(nameof(logger));
             _httpClient = httpClient ?? throw new ArgumentNullException(nameof(httpClient));
             _rateLimitingService = rateLimitingService ?? throw new ArgumentNullException(nameof(rateLimitingService));
             _metrics = metrics ?? throw new ArgumentNullException(nameof(metrics));
             _timeout = TimeSpan.FromSeconds(settings?.Value?.TimeoutSeconds ?? 30);
+            _inputValidator = inputValidator ?? throw new ArgumentNullException(nameof(inputValidator));
             
             _circuitBreaker = new CircuitBreaker(
                 maxFailures: 3,
@@ -43,12 +47,39 @@ namespace XPlain.Services
             return _circuitBreaker.IsAllowed() && _rateLimitingService.CanMakeRequest(ProviderName);
         }
 
-        public abstract Task<string> GetCompletionAsync(string prompt);
+        public async Task<string> GetCompletionAsync(string prompt)
+        {
+            // Validate and sanitize the input before passing to the provider
+            var validatedPrompt = await ValidateAndSanitizePromptAsync(prompt);
+            return await GetCompletionInternalAsync(validatedPrompt);
+        }
+
+        protected abstract Task<string> GetCompletionInternalAsync(string validatedPrompt);
+
+        protected async Task<string> ValidateAndSanitizePromptAsync(string prompt)
+        {
+            try
+            {
+                return await _inputValidator.ValidateAndSanitizeAsync(prompt, ProviderName);
+            }
+            catch (InputValidationException ex)
+            {
+                _logger.LogWarning(ex, $"Input validation failed for provider {ProviderName}: {ex.ValidationError}");
+                throw new LLMProviderException(
+                    $"Input validation failed: {ex.Message}",
+                    LLMErrorType.InvalidInput,
+                    false,
+                    ex);
+            }
+        }
 
         protected virtual LLMProviderException ClassifyException(Exception ex)
         {
             return ex switch
             {
+                InputValidationException validationEx =>
+                    new LLMProviderException(validationEx.Message, LLMErrorType.InvalidInput, false, validationEx),
+
                 HttpRequestException httpEx when httpEx.Message.Contains("401") =>
                     new LLMProviderException("Authentication failed", LLMErrorType.Unauthorized, false, httpEx),
                 
