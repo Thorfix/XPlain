@@ -92,6 +92,39 @@
                 </div>
             </div>
         </div>
+
+        <div class="row">
+            <div class="col-12">
+                <div class="card mb-4">
+                    <div class="card-header">
+                        <h3>Automatic Mitigation Status</h3>
+                    </div>
+                    <div class="card-body">
+                        <div id="mitigation-status"></div>
+                        <div class="mt-4">
+                            <h4>Mitigation Thresholds</h4>
+                            <form id="threshold-form" class="mt-3">
+                                <div class="row g-3">
+                                    <div class="col-md-4">
+                                        <label for="minHitRatio" class="form-label">Minimum Hit Ratio</label>
+                                        <input type="number" class="form-control" id="minHitRatio" step="0.01" min="0" max="1">
+                                    </div>
+                                    <div class="col-md-4">
+                                        <label for="maxMemoryUsage" class="form-label">Max Memory Usage (MB)</label>
+                                        <input type="number" class="form-control" id="maxMemoryUsage" min="0">
+                                    </div>
+                                    <div class="col-md-4">
+                                        <label for="maxResponseTime" class="form-label">Max Response Time (ms)</label>
+                                        <input type="number" class="form-control" id="maxResponseTime" min="0">
+                                    </div>
+                                </div>
+                                <button type="submit" class="btn btn-primary mt-3">Update Thresholds</button>
+                            </form>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
     </div>
 
     <script src="js/dashboard.js"></script>

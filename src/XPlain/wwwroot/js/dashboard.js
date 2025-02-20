@@ -7,7 +7,88 @@ function initializeDashboard() {
     fetchMetrics();
     fetchAlerts();
     fetchPredictions();
+    fetchMitigationStatus();
+    setupThresholdForm();
     startRealTimeUpdates();
+}
+
+async function fetchMitigationStatus() {
+    try {
+        const response = await fetch('/api/cache/mitigation/status');
+        const status = await response.json();
+        updateMitigationStatus(status);
+    } catch (error) {
+        console.error('Error fetching mitigation status:', error);
+    }
+}
+
+function updateMitigationStatus(status) {
+    const container = document.getElementById('mitigation-status');
+    if (!container) return;
+
+    const recentMitigations = status.RecentMitigations || [];
+    const html = `
+        <div class="row">
+            <div class="col-md-6">
+                <h4>Recent Automatic Actions</h4>
+                <ul class="list-group">
+                    ${recentMitigations.map(mitigation => `
+                        <li class="list-group-item">
+                            <strong>${mitigation.Operation}</strong>
+                            <br>
+                            <small class="text-muted">
+                                ${new Date(mitigation.Timestamp).toLocaleString()}
+                                (${mitigation.Status})
+                            </small>
+                        </li>
+                    `).join('')}
+                </ul>
+            </div>
+            <div class="col-md-6">
+                <h4>Current Thresholds</h4>
+                <ul class="list-group">
+                    <li class="list-group-item">
+                        Min Hit Ratio: ${status.Thresholds.MinHitRatio.toFixed(2)}
+                    </li>
+                    <li class="list-group-item">
+                        Max Memory Usage: ${status.Thresholds.MaxMemoryUsageMB} MB
+                    </li>
+                    <li class="list-group-item">
+                        Max Response Time: ${status.Thresholds.MaxResponseTimeMs} ms
+                    </li>
+                </ul>
+            </div>
+        </div>
+    `;
+    container.innerHTML = html;
+}
+
+function setupThresholdForm() {
+    const form = document.getElementById('threshold-form');
+    if (!form) return;
+
+    form.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const thresholds = {
+            MinHitRatio: parseFloat(document.getElementById('minHitRatio').value),
+            MaxMemoryUsageMB: parseFloat(document.getElementById('maxMemoryUsage').value),
+            MaxResponseTimeMs: parseFloat(document.getElementById('maxResponseTime').value)
+        };
+
+        try {
+            await fetch('/api/cache/mitigation/thresholds', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify(thresholds)
+            });
+            fetchMitigationStatus(); // Refresh the display
+        } catch (error) {
+            console.error('Error updating thresholds:', error);
+            alert('Failed to update thresholds');
+        }
+    });
 }
 
 async function fetchMetrics() {
@@ -228,6 +309,7 @@ function startRealTimeUpdates() {
         fetchMetrics();
         fetchAlerts();
         fetchPredictions();
+        fetchMitigationStatus();
     }, 5000);
 }
 

@@ -13,8 +13,13 @@ namespace XPlain.Services
         private readonly Dictionary<string, List<PolicySwitchEvent>> _policySwitchHistory;
         private readonly Dictionary<string, Dictionary<string, double>> _policyPerformanceHistory;
         private readonly MLPredictionService _predictionService;
+        private readonly AutomaticMitigationService _mitigationService;
+        private readonly System.Timers.Timer _mitigationTimer;
 
-        public CacheMonitoringService(ICacheProvider cacheProvider, MLPredictionService predictionService)
+        public CacheMonitoringService(
+            ICacheProvider cacheProvider,
+            MLPredictionService predictionService,
+            AutomaticMitigationService mitigationService)
         {
             _cacheProvider = cacheProvider;
             _activeAlerts = new List<CacheAlert>();
@@ -22,6 +27,55 @@ namespace XPlain.Services
             _policySwitchHistory = new Dictionary<string, List<PolicySwitchEvent>>();
             _policyPerformanceHistory = new Dictionary<string, Dictionary<string, double>>();
             _predictionService = predictionService;
+            _mitigationService = mitigationService;
+
+            // Setup automatic mitigation timer
+            _mitigationTimer = new System.Timers.Timer(30000); // Check every 30 seconds
+            _mitigationTimer.Elapsed += async (sender, e) => await CheckAndApplyMitigations();
+            _mitigationTimer.Start();
+        }
+
+        private async Task CheckAndApplyMitigations()
+        {
+            try
+            {
+                var predictions = await _predictionService.PredictPerformanceMetrics();
+                if (ShouldApplyMitigations(predictions))
+                {
+                    await _mitigationService.ApplyMitigations();
+                }
+            }
+            catch (Exception ex)
+            {
+                // Log error but don't stop monitoring
+                await CreateAlertAsync(
+                    "MitigationError",
+                    $"Error during automatic mitigation: {ex.Message}",
+                    "Warning");
+            }
+        }
+
+        private bool ShouldApplyMitigations(Dictionary<string, PredictionResult> predictions)
+        {
+            foreach (var (metric, prediction) in predictions)
+            {
+                if (prediction.Confidence < 0.7) continue; // Only act on high-confidence predictions
+
+                switch (metric.ToLower())
+                {
+                    case "cachehitrate" when prediction.Value < _thresholds.MinHitRatio:
+                    case "memoryusage" when prediction.Value > _thresholds.MaxMemoryUsageMB * 0.9:
+                    case "averageresponsetime" when prediction.Value > _thresholds.MaxResponseTimeMs * 0.9:
+                        return true;
+                }
+            }
+            return false;
+        }
+
+        public override void Dispose()
+        {
+            _mitigationTimer?.Dispose();
+            base.Dispose();
         }
 
         public async Task<Dictionary<string, PredictionResult>> GetPerformancePredictionsAsync()

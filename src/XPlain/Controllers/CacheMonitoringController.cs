@@ -105,6 +105,31 @@ namespace XPlain.Controllers
             return Ok(schedule);
         }
 
+        [HttpGet("mitigation/status")]
+        public async Task<IActionResult> GetMitigationStatus()
+        {
+            var predictions = await _monitoringService.GetPerformancePredictionsAsync();
+            var thresholds = await _monitoringService.GetCurrentThresholdsAsync();
+            var lastMitigations = await _monitoringService.GetMaintenanceLogsAsync(DateTime.UtcNow.AddHours(-1));
+
+            return Ok(new
+            {
+                Predictions = predictions,
+                Thresholds = thresholds,
+                RecentMitigations = lastMitigations.Where(log => 
+                    log.Operation == "CachePreWarming" || 
+                    log.Operation == "EvictionPolicyAdjustment" ||
+                    log.Operation == "ResourceAllocation")
+            });
+        }
+
+        [HttpPost("mitigation/thresholds")]
+        public async Task<IActionResult> UpdateMitigationThresholds([FromBody] MonitoringThresholds thresholds)
+        {
+            await _monitoringService.UpdateMonitoringThresholdsAsync(thresholds);
+            return Ok();
+        }
+
         [HttpGet("maintenance/logs")]
         public async Task<IActionResult> GetMaintenanceLogs()
         {
