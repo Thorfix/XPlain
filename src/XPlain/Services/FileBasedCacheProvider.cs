@@ -30,9 +30,14 @@ namespace XPlain.Services
         private readonly string _statsFilePath;
         private readonly string _analyticsFilePath;
         private readonly Timer _analyticsTimer;
+        private readonly Timer _maintenanceTimer;
+        private readonly Timer _warmupTimer;
+        private readonly Timer _keyRotationTimer;
         private readonly string _keyStorePath;
         private readonly byte[] _encryptionKey;
         private readonly object _encryptionLock = new object();
+        private readonly object _maintenanceLock = new object();
+        private readonly ConcurrentDictionary<string, (long Size, DateTime LastAccess)> _cacheItemStats = new();
 
         public FileBasedCacheProvider(IOptions<CacheSettings> settings, ILLMProvider llmProvider)
         {
@@ -65,6 +70,34 @@ namespace XPlain.Services
             // Set up periodic analytics logging (every hour)
             _analyticsTimer = new Timer(async _ => await LogAnalyticsAsync(), 
                 null, TimeSpan.Zero, TimeSpan.FromHours(1));
+
+            // Initialize maintenance timer
+            _maintenanceTimer = new Timer(async _ => await PerformMaintenanceAsync(),
+                null, TimeSpan.Zero, TimeSpan.FromMinutes(_settings.MaintenanceIntervalMinutes));
+
+            // Initialize cache warmup timer
+            if (_settings.EnableCacheWarming)
+            {
+                _warmupTimer = new Timer(async _ => await PerformCacheWarmupAsync(),
+                    null, TimeSpan.Zero, TimeSpan.FromMinutes(_settings.WarmupIntervalMinutes));
+            }
+
+            // Initialize key rotation timer
+            if (_settings.EnableKeyRotation && _settings.EncryptionEnabled)
+            {
+                _keyRotationTimer = new Timer(async _ => await RotateEncryptionKeyIfNeededAsync(),
+                    null, TimeSpan.Zero, TimeSpan.FromHours(24));
+            }
+
+            // Load initial cache item stats
+            foreach (var file in Directory.GetFiles(_cacheDirectory, "*.json"))
+            {
+                var fileInfo = new FileInfo(file);
+                _cacheItemStats.TryAdd(
+                    Path.GetFileNameWithoutExtension(file),
+                    (fileInfo.Length, fileInfo.LastAccessTime)
+                );
+            }
         }
 
         private string GetFilePath(string key)
@@ -86,6 +119,13 @@ namespace XPlain.Services
                 IncrementMisses();
                 return null;
             }
+
+            // Update last access time
+            _cacheItemStats.AddOrUpdate(
+                Path.GetFileNameWithoutExtension(filePath),
+                (new FileInfo(filePath).Length, DateTime.UtcNow),
+                (_, stats) => (stats.Size, DateTime.UtcNow)
+            );
 
             try
             {
@@ -322,6 +362,9 @@ namespace XPlain.Services
         public async Task SetAsync<T>(string key, T value, TimeSpan? expiration = null) where T : class
         {
             if (!_settings.CacheEnabled) return;
+
+            // Check cache size limits before adding new item
+            await EnforceCacheLimitsAsync();
 
             var filePath = GetFilePath(key);
             var tempFilePath = filePath + ".tmp";
@@ -981,6 +1024,222 @@ namespace XPlain.Services
                 // Save new key
                 SaveEncryptionKey(newKey);
             }
+        }
+
+        private async Task PerformMaintenanceAsync()
+        {
+            if (!_settings.CacheEnabled) return;
+
+            // Check if we're within maintenance window if restricted
+            if (_settings.RestrictMaintenanceWindow)
+            {
+                var now = DateTime.Now.TimeOfDay;
+                if (now < _settings.MaintenanceWindowStart || now > _settings.MaintenanceWindowEnd)
+                {
+                    return;
+                }
+            }
+
+            lock (_maintenanceLock)
+            {
+                try
+                {
+                    // Calculate current cache size
+                    var totalSize = GetCacheStorageUsage();
+                    var sizeLimit = _settings.MaxCacheSizeBytes;
+                    var cleanupThreshold = sizeLimit * _settings.CleanupThresholdPercent / 100;
+
+                    if (totalSize > cleanupThreshold)
+                    {
+                        // Get all cache items sorted by last access time
+                        var items = _cacheItemStats
+                            .OrderBy(x => x.Value.LastAccess)
+                            .ToList();
+
+                        var targetSize = sizeLimit * 0.7; // Aim to reduce to 70% of limit
+                        var currentSize = totalSize;
+
+                        foreach (var item in items)
+                        {
+                            // Keep recent items regardless of size
+                            if (item.Value.LastAccess > DateTime.UtcNow.AddHours(-_settings.KeepRecentItemsHours))
+                            {
+                                continue;
+                            }
+
+                            // Remove item
+                            var filePath = GetFilePath(item.Key);
+                            if (File.Exists(filePath))
+                            {
+                                File.Delete(filePath);
+                                currentSize -= item.Value.Size;
+                                _cacheItemStats.TryRemove(item.Key, out _);
+                            }
+
+                            if (currentSize <= targetSize)
+                            {
+                                break;
+                            }
+                        }
+                    }
+
+                    // Enforce per-query-type quotas
+                    if (_settings.QueryTypeQuotas.Any())
+                    {
+                        EnforceQueryTypeQuotas();
+                    }
+
+                    // Log maintenance results
+                    LogMaintenanceResults(totalSize, GetCacheStorageUsage());
+                }
+                catch (Exception ex)
+                {
+                    // Log maintenance error
+                    Console.WriteLine($"Cache maintenance error: {ex.Message}");
+                }
+            }
+        }
+
+        private async Task PerformCacheWarmupAsync()
+        {
+            if (!_settings.EnableCacheWarming) return;
+
+            try
+            {
+                // Get top queries by frequency
+                var topQueries = _queryFrequency
+                    .Where(q => q.Value >= _settings.MinQueryFrequency)
+                    .OrderByDescending(q => q.Value)
+                    .Take(_settings.MaxWarmupQueries)
+                    .Select(q => q.Key)
+                    .ToList();
+
+                // Get current code context
+                var codeHash = await CalculateCodeHashAsync();
+
+                foreach (var query in topQueries)
+                {
+                    var key = GetCacheKey(query, codeHash);
+                    if (!await ExistsAsync(key))
+                    {
+                        try
+                        {
+                            var response = await _llmProvider.GetCompletionAsync(query);
+                            await SetAsync(key, response);
+                        }
+                        catch
+                        {
+                            // Skip failed warmup attempts
+                            continue;
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                // Log warmup error
+                Console.WriteLine($"Cache warmup error: {ex.Message}");
+            }
+        }
+
+        private async Task RotateEncryptionKeyIfNeededAsync()
+        {
+            if (!_settings.EnableKeyRotation || !_settings.EncryptionEnabled) return;
+
+            try
+            {
+                var keyAge = DateTime.UtcNow - File.GetLastWriteTimeUtc(_keyStorePath);
+                if (keyAge.TotalDays >= _settings.KeyRotationDays)
+                {
+                    await RotateEncryptionKeyAsync();
+                }
+            }
+            catch (Exception ex)
+            {
+                // Log key rotation error
+                Console.WriteLine($"Key rotation error: {ex.Message}");
+            }
+        }
+
+        private async Task EnforceCacheLimitsAsync()
+        {
+            var totalSize = GetCacheStorageUsage();
+            if (totalSize >= _settings.MaxCacheSizeBytes)
+            {
+                await PerformMaintenanceAsync();
+            }
+        }
+
+        private void EnforceQueryTypeQuotas()
+        {
+            foreach (var quota in _settings.QueryTypeQuotas)
+            {
+                var queryType = quota.Key;
+                var maxSize = quota.Value;
+                var currentSize = _cacheItemStats
+                    .Where(x => GetQueryTypeFromKey(x.Key) == queryType)
+                    .Sum(x => x.Value.Size);
+
+                if (currentSize > maxSize)
+                {
+                    // Remove oldest items until under quota
+                    var items = _cacheItemStats
+                        .Where(x => GetQueryTypeFromKey(x.Key) == queryType)
+                        .OrderBy(x => x.Value.LastAccess)
+                        .ToList();
+
+                    foreach (var item in items)
+                    {
+                        var filePath = GetFilePath(item.Key);
+                        if (File.Exists(filePath))
+                        {
+                            File.Delete(filePath);
+                            currentSize -= item.Value.Size;
+                            _cacheItemStats.TryRemove(item.Key, out _);
+                        }
+
+                        if (currentSize <= maxSize)
+                        {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        private string GetQueryTypeFromKey(string key)
+        {
+            // Extract query type from cache key
+            // Implementation depends on how query types are encoded in cache keys
+            try
+            {
+                var decodedKey = Encoding.UTF8.GetString(Convert.FromBase64String(key));
+                var parts = decodedKey.Split(':', 2);
+                return parts[0];
+            }
+            catch
+            {
+                return "unknown";
+            }
+        }
+
+        private void LogMaintenanceResults(long originalSize, long newSize)
+        {
+            var stats = new
+            {
+                Timestamp = DateTime.UtcNow,
+                OriginalSize = originalSize,
+                NewSize = newSize,
+                SpaceFreed = originalSize - newSize,
+                RemainingItems = _cacheItemStats.Count,
+                QueryTypeStats = _queryTypeStats
+            };
+
+            var logFile = Path.Combine(_analyticsDirectory, 
+                $"maintenance_{DateTime.UtcNow:yyyyMMdd_HHmmss}.json");
+            
+            File.WriteAllText(logFile, 
+                JsonSerializer.Serialize(stats, new JsonSerializerOptions { WriteIndented = true }));
         }
     }
 }
