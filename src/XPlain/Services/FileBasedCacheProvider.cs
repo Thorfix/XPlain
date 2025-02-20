@@ -13,6 +13,7 @@ namespace XPlain.Services
     public class FileBasedCacheProvider : ICacheProvider
     {
         private readonly CacheSettings _settings;
+        private readonly ICacheMonitoringService _monitoringService;
         private readonly string _cacheDirectory;
         private readonly string _analyticsDirectory;
         private readonly string _walDirectory;
@@ -39,10 +40,14 @@ namespace XPlain.Services
         private readonly object _maintenanceLock = new object();
         private readonly ConcurrentDictionary<string, (long Size, DateTime LastAccess)> _cacheItemStats = new();
 
-        public FileBasedCacheProvider(IOptions<CacheSettings> settings, ILLMProvider llmProvider)
+        public FileBasedCacheProvider(
+            IOptions<CacheSettings> settings,
+            ILLMProvider llmProvider,
+            ICacheMonitoringService monitoringService)
         {
             _settings = settings.Value;
             _llmProvider = llmProvider;
+            _monitoringService = monitoringService;
             _cacheDirectory = _settings.CacheDirectory ?? Path.Combine(AppContext.BaseDirectory, "cache");
             _analyticsDirectory = Path.Combine(_cacheDirectory, "analytics");
             _walDirectory = Path.Combine(_cacheDirectory, "wal");
@@ -151,16 +156,29 @@ namespace XPlain.Services
                 {
                     await RemoveAsync(key);
                     IncrementMisses();
+                    await _monitoringService.CreateAlertAsync(
+                        "CacheExpiration",
+                        $"Cache entry expired: {key}",
+                        "Info");
                     return null;
                 }
 
                 IncrementHits();
+                await _monitoringService.LogQueryStatsAsync(
+                    GetQueryTypeFromKey(key),
+                    key,
+                    0, // response time not measured here
+                    true);
                 return cacheEntry.Value;
             }
-            catch
+            catch (Exception ex)
             {
                 await RemoveAsync(key);
                 IncrementMisses();
+                await _monitoringService.CreateAlertAsync(
+                    "CacheError",
+                    $"Error reading cache entry: {key}, Error: {ex.Message}",
+                    "Error");
                 return null;
             }
         }
@@ -1166,6 +1184,10 @@ namespace XPlain.Services
             var totalSize = GetCacheStorageUsage();
             if (totalSize >= _settings.MaxCacheSizeBytes)
             {
+                await _monitoringService.CreateAlertAsync(
+                    "CacheSizeLimit",
+                    $"Cache size exceeds limit: {totalSize / (1024.0 * 1024.0):F2}MB",
+                    "Warning");
                 await PerformMaintenanceAsync();
             }
         }

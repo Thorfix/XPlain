@@ -841,6 +841,7 @@ file class Program
             var cacheSettings = new CacheSettings();
             configuration.GetSection("Cache").Bind(cacheSettings);
             services.AddSingleton(Options.Create(cacheSettings));
+            services.AddSingleton<ICacheMonitoringService, CacheMonitoringService>();
             services.AddSingleton<ICacheProvider, FileBasedCacheProvider>();
 
             // Configure settings
