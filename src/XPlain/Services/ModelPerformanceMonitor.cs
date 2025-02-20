@@ -28,6 +28,8 @@ namespace XPlain.Services
         private readonly IResourceMonitor _resourceMonitor;
         private readonly MLPredictionService _predictionService;
         private readonly TimeSeriesMetricsStore _metricsStore;
+        private readonly IAlertManagementService _alertService;
+        private readonly AlertSettings _alertSettings;
         private readonly Dictionary<string, double> _performanceThresholds;
         private readonly List<PerformanceMetrics> _metricsHistory;
         private readonly Queue<PerformanceMetrics> _rollingWindow;
@@ -42,7 +44,9 @@ namespace XPlain.Services
             IAutomaticMitigationService mitigationService,
             IResourceMonitor resourceMonitor,
             MLPredictionService predictionService,
-            TimeSeriesMetricsStore metricsStore)
+            TimeSeriesMetricsStore metricsStore,
+            IAlertManagementService alertService,
+            AlertSettings alertSettings)
         {
             _logger = logger;
             _validationService = validationService;
@@ -51,6 +55,8 @@ namespace XPlain.Services
             _resourceMonitor = resourceMonitor;
             _predictionService = predictionService;
             _metricsStore = metricsStore;
+            _alertService = alertService;
+            _alertSettings = alertSettings;
             _metricsHistory = new List<PerformanceMetrics>();
             _rollingWindow = new Queue<PerformanceMetrics>(_rollingWindowSize);
             
@@ -270,14 +276,19 @@ namespace XPlain.Services
 
         private async Task SendAlert(AlertSeverity severity, string title, string message)
         {
-            var alert = new ModelAlert
+            var alert = new Alert
             {
-                Severity = severity,
                 Title = title,
-                Message = message,
-                Timestamp = DateTime.UtcNow
+                Description = message,
+                Severity = severity,
+                Source = "ModelPerformanceMonitor",
+                Metadata = new Dictionary<string, object>
+                {
+                    { "modelVersion", (await GetCurrentMetrics()).ModelVersion }
+                }
             };
 
+            await _alertService.CreateAlertAsync(alert);
             await _monitoringHub.SendAsync("ModelAlert", alert);
         }
     }
