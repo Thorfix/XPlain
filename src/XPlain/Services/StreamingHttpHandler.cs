@@ -13,9 +13,9 @@ public class StreamingHttpHandler : DelegatingHandler
 
     public StreamingHttpHandler(StreamingSettings settings)
     {
-        _timeout = timeout;
-        _maxRetries = maxRetries;
-        _initialRetryDelay = initialRetryDelay ?? TimeSpan.FromSeconds(1);
+        _timeout = TimeSpan.FromSeconds(settings.StreamingTimeoutSeconds);
+        _maxRetries = settings.MaxStreamingRetries;
+        _initialRetryDelay = TimeSpan.FromMilliseconds(settings.InitialRetryDelayMs);
         InnerHandler = new HttpClientHandler
         {
             AutomaticDecompression = DecompressionMethods.GZip | DecompressionMethods.Deflate
