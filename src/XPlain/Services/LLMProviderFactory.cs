@@ -5,6 +5,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using XPlain.Configuration;
+using XPlain.Services.Validation;
 
 namespace XPlain.Services
 {
@@ -17,6 +18,7 @@ namespace XPlain.Services
         private readonly LLMSettings _llmSettings;
         private readonly LLMFallbackSettings _fallbackSettings;
         private readonly ILogger<LLMProviderFactory> _logger;
+        private readonly IDictionary<string, IResponseValidator> _validators;
 
         public LLMProviderFactory(
             IServiceProvider serviceProvider,
@@ -28,6 +30,52 @@ namespace XPlain.Services
             _llmSettings = settings?.Value ?? throw new ArgumentNullException(nameof(settings));
             _fallbackSettings = fallbackSettings?.Value;
             _logger = logger ?? throw new ArgumentNullException(nameof(logger));
+            
+            // Initialize validators
+            _validators = new Dictionary<string, IResponseValidator>(StringComparer.OrdinalIgnoreCase)
+            {
+                { "anthropic", new AnthropicResponseValidator() },
+                { "openai", new OpenAIResponseValidator() },
+                { "azureopenai", new AzureOpenAIResponseValidator() }
+            };
+        }
+
+        /// <summary>
+        /// Gets the appropriate validator for the specified provider
+        /// </summary>
+        private IResponseValidator GetValidator(string providerName)
+        {
+            if (string.IsNullOrEmpty(providerName))
+            {
+                throw new ArgumentException("Provider name cannot be empty", nameof(providerName));
+            }
+
+            if (!_validators.TryGetValue(providerName, out var validator))
+            {
+                throw new ArgumentException($"No validator found for provider: {providerName}");
+            }
+
+            return validator;
+        }
+
+        /// <summary>
+        /// Validates the response from an LLM provider
+        /// </summary>
+        public async Task ValidateResponseAsync(string providerName, string response)
+        {
+            var validator = GetValidator(providerName);
+
+            if (!await validator.ValidateSchemaAsync(response))
+                throw new ResponseValidationException($"Invalid response schema from {providerName}", ResponseValidationType.Schema);
+
+            if (!await validator.ValidateQualityAsync(response))
+                throw new ResponseValidationException($"Response quality check failed for {providerName}", ResponseValidationType.Quality);
+
+            if (!await validator.ValidateFormatAsync(response))
+                throw new ResponseValidationException($"Invalid response format from {providerName}", ResponseValidationType.Format);
+
+            if (!await validator.DetectErrorsAsync(response))
+                throw new ResponseValidationException($"Error detected in response from {providerName}", ResponseValidationType.Error);
         }
 
         /// <summary>
@@ -72,7 +120,9 @@ namespace XPlain.Services
                 {
                     throw new InvalidOperationException("Failed to create Anthropic client");
                 }
-                return client;
+
+                // Decorate the client with validation
+                return new ValidatingLLMProvider(client, "anthropic", this);
             }
             catch (Exception ex) when (ex is not InvalidOperationException)
             {
@@ -89,7 +139,9 @@ namespace XPlain.Services
                 {
                     throw new InvalidOperationException("Failed to create OpenAI client");
                 }
-                return client;
+
+                // Decorate the client with validation
+                return new ValidatingLLMProvider(client, "openai", this);
             }
             catch (Exception ex) when (ex is not InvalidOperationException)
             {
@@ -136,7 +188,9 @@ namespace XPlain.Services
                 {
                     throw new InvalidOperationException("Failed to create Azure OpenAI client");
                 }
-                return client;
+
+                // Decorate the client with validation
+                return new ValidatingLLMProvider(client, "azureopenai", this);
             }
             catch (Exception ex) when (ex is not InvalidOperationException)
             {
