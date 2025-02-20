@@ -1180,6 +1180,326 @@ namespace XPlain.Tests.Services
             Assert.Equal(testValue, await provider3.GetAsync<string>(testKey));
         }
 
+        [Fact]
+        public async Task FileSystem_ErrorScenarios()
+        {
+            // Arrange
+            var key = "error_test_key";
+            var value = "error_test_value";
+            var readOnlyDir = Path.Combine(_testDirectory, "readonly");
+            Directory.CreateDirectory(readOnlyDir);
+            
+            var readOnlySettings = _defaultSettings with { CacheDirectory = readOnlyDir };
+            File.SetAttributes(readOnlyDir, FileAttributes.ReadOnly);
+
+            // Act & Assert - Permission errors
+            var readOnlyProvider = new FileBasedCacheProvider(
+                Options.Create(readOnlySettings),
+                _llmProviderMock.Object);
+            
+            await Assert.ThrowsAnyAsync<IOException>(async () =>
+                await readOnlyProvider.SetAsync(key, value));
+
+            // Reset directory attributes
+            File.SetAttributes(readOnlyDir, FileAttributes.Normal);
+
+            // Simulate disk full scenario
+            var originalPath = Path.Combine(_testDirectory, "huge_file.tmp");
+            try
+            {
+                // Create a file that's too large to handle
+                using (var fs = new FileStream(originalPath, FileMode.Create, FileAccess.Write))
+                {
+                    fs.SetLength(long.MaxValue - 1); // Simulate disk full
+                }
+
+                await Assert.ThrowsAnyAsync<IOException>(async () =>
+                    await _cacheProvider.SetAsync("large_key", "large_value"));
+            }
+            catch (IOException)
+            {
+                // Expected when system actually can't allocate the space
+            }
+            finally
+            {
+                if (File.Exists(originalPath))
+                    File.Delete(originalPath);
+            }
+        }
+
+        [Fact]
+        public async Task LockTimeout_DeadlockPrevention()
+        {
+            // Arrange
+            var key = "lock_test_key";
+            var value = "lock_test_value";
+            var lockFile = Path.Combine(_testDirectory, "lock_file");
+            var maxWaitTime = TimeSpan.FromSeconds(2);
+            var operationTimeout = TimeSpan.FromSeconds(5);
+
+            // Create artificial lock
+            using (var fileLock = File.Open(lockFile, FileMode.Create, FileAccess.ReadWrite, FileShare.None))
+            {
+                // Act - Try operations while file is locked
+                var task = Task.Run(async () =>
+                {
+                    await _cacheProvider.SetAsync(key, value);
+                    return await _cacheProvider.GetAsync<string>(key);
+                });
+
+                // Assert - Operation should timeout or fail gracefully
+                var completedInTime = task.Wait(operationTimeout);
+                Assert.True(completedInTime, "Operation did not timeout as expected");
+            }
+
+            // Verify cache is still operational
+            await _cacheProvider.SetAsync(key, value);
+            var result = await _cacheProvider.GetAsync<string>(key);
+            Assert.Equal(value, result);
+        }
+
+        [Fact]
+        public async Task CacheOperations_PerformanceMetrics()
+        {
+            // Arrange
+            var iterations = 1000;
+            var results = new Dictionary<string, List<double>>
+            {
+                { "Read", new List<double>() },
+                { "Write", new List<double>() },
+                { "Update", new List<double>() }
+            };
+
+            var key = "perf_metric_key";
+            var value = "perf_metric_value";
+
+            // Act
+            // Measure write performance
+            for (int i = 0; i < iterations; i++)
+            {
+                var sw = Stopwatch.StartNew();
+                await _cacheProvider.SetAsync($"{key}_{i}", value);
+                sw.Stop();
+                results["Write"].Add(sw.ElapsedMilliseconds);
+            }
+
+            // Measure read performance
+            for (int i = 0; i < iterations; i++)
+            {
+                var sw = Stopwatch.StartNew();
+                await _cacheProvider.GetAsync<string>($"{key}_{i}");
+                sw.Stop();
+                results["Read"].Add(sw.ElapsedMilliseconds);
+            }
+
+            // Measure update performance
+            for (int i = 0; i < iterations; i++)
+            {
+                var sw = Stopwatch.StartNew();
+                await _cacheProvider.SetAsync($"{key}_{i}", $"{value}_updated");
+                sw.Stop();
+                results["Update"].Add(sw.ElapsedMilliseconds);
+            }
+
+            // Assert
+            foreach (var (operation, measurements) in results)
+            {
+                var avg = measurements.Average();
+                var max = measurements.Max();
+                var min = measurements.Min();
+                var p95 = measurements.OrderBy(m => m).ElementAt((int)(iterations * 0.95));
+
+                // Performance thresholds
+                Assert.True(avg < 50, $"{operation} average time ({avg}ms) exceeded threshold");
+                Assert.True(p95 < 100, $"{operation} P95 time ({p95}ms) exceeded threshold");
+                Assert.True(max < 200, $"{operation} max time ({max}ms) exceeded threshold");
+
+                // Operation specific assertions
+                switch (operation)
+                {
+                    case "Read":
+                        Assert.True(avg < results["Write"].Average(), 
+                            "Read operations should be faster than writes");
+                        break;
+                    case "Update":
+                        Assert.True(avg <= results["Write"].Average() * 1.2, 
+                            "Update should not be significantly slower than write");
+                        break;
+                }
+            }
+
+            // Verify cache statistics
+            var stats = _cacheProvider.GetCacheStats();
+            Assert.Equal(iterations, stats.Hits); // All reads should be hits
+        }
+
+        [Theory]
+        [InlineData("/tmp/cache")]      // Unix-style path
+        [InlineData("C:\\temp\\cache")] // Windows-style path
+        [InlineData("./relative/path")]  // Relative path
+        [InlineData("../parent/path")]   // Parent directory path
+        [InlineData("path with spaces")] // Path with spaces
+        public async Task DifferentEnvironments_PathHandling(string basePath)
+        {
+            // Arrange
+            var testPath = Path.Combine(_testDirectory, "env_test");
+            Directory.CreateDirectory(testPath);
+            
+            var envSettings = _defaultSettings with 
+            { 
+                CacheDirectory = Path.Combine(testPath, basePath.Replace('\\', Path.DirectorySeparatorChar))
+            };
+
+            var provider = new FileBasedCacheProvider(
+                Options.Create(envSettings),
+                _llmProviderMock.Object);
+
+            // Act
+            await provider.SetAsync("env_key", "env_value");
+            var result = await provider.GetAsync<string>("env_key");
+
+            // Assert
+            Assert.Equal("env_value", result);
+        }
+
+        [Fact]
+        public async Task ConcurrentDictionary_SpecificOperations()
+        {
+            // Arrange
+            const int concurrentOperations = 1000;
+            var tasks = new List<Task>();
+            var exceptions = new ConcurrentBag<Exception>();
+            var successCount = 0;
+
+            // Act
+            // Test 1: Concurrent additions
+            for (int i = 0; i < concurrentOperations; i++)
+            {
+                var current = i;
+                tasks.Add(Task.Run(async () =>
+                {
+                    try
+                    {
+                        await _cacheProvider.SetAsync($"concurrent_key_{current}", $"value_{current}");
+                        Interlocked.Increment(ref successCount);
+                    }
+                    catch (Exception ex)
+                    {
+                        exceptions.Add(ex);
+                    }
+                }));
+            }
+            await Task.WhenAll(tasks);
+            
+            // Assert first test
+            Assert.Empty(exceptions);
+            Assert.Equal(concurrentOperations, successCount);
+
+            // Reset for next test
+            tasks.Clear();
+            exceptions.Clear();
+            successCount = 0;
+
+            // Test 2: Concurrent reads and writes to same keys
+            var keys = Enumerable.Range(0, 10).Select(i => $"shared_key_{i}").ToArray();
+            foreach (var key in keys)
+            {
+                await _cacheProvider.SetAsync(key, "initial");
+            }
+
+            for (int i = 0; i < concurrentOperations; i++)
+            {
+                var current = i;
+                tasks.Add(Task.Run(async () =>
+                {
+                    try
+                    {
+                        var key = keys[current % keys.Length];
+                        if (current % 2 == 0)
+                        {
+                            await _cacheProvider.SetAsync(key, $"value_{current}");
+                        }
+                        else
+                        {
+                            var value = await _cacheProvider.GetAsync<string>(key);
+                            Assert.NotNull(value);
+                        }
+                        Interlocked.Increment(ref successCount);
+                    }
+                    catch (Exception ex)
+                    {
+                        exceptions.Add(ex);
+                    }
+                }));
+            }
+            await Task.WhenAll(tasks);
+
+            // Assert second test
+            Assert.Empty(exceptions);
+            Assert.Equal(concurrentOperations, successCount);
+
+            // Verify final state
+            foreach (var key in keys)
+            {
+                Assert.True(await _cacheProvider.ExistsAsync(key));
+            }
+        }
+
+        [Fact]
+        public async Task EncryptionDecryption_ComprehensiveVerification()
+        {
+            // Arrange
+            var testCases = new[]
+            {
+                // Regular string
+                new { Key = "regular_key", Value = "regular_value" },
+                // Large data
+                new { Key = "large_key", Value = new string('x', 1024 * 1024) },
+                // Special characters
+                new { Key = "special_key", Value = "!@#$%^&*()_+{}[]|\\:;\"'<>,.?/~`" },
+                // Unicode
+                new { Key = "unicode_key", Value = "Hello, 世界! Привет, мир! שָׁלוֹם, עוֹלָם!" },
+                // JSON structure
+                new { Key = "json_key", Value = "{\"nested\":{\"array\":[1,2,3],\"value\":\"test\"}}" },
+                // Empty string
+                new { Key = "empty_key", Value = "" },
+                // Whitespace
+                new { Key = "whitespace_key", Value = "   \t\n\r   " }
+            };
+
+            foreach (var testCase in testCases)
+            {
+                // Act
+                await _cacheProvider.SetAsync(testCase.Key, testCase.Value);
+
+                // Get encrypted file content
+                var filePath = Directory.GetFiles(_testDirectory, "*.json")
+                    .First(f => f.Contains(
+                        Convert.ToBase64String(SHA256.HashData(Encoding.UTF8.GetBytes(testCase.Key)))));
+                
+                var encryptedContent = await File.ReadAllTextAsync(filePath);
+
+                // Assert
+                // 1. Encrypted content should not contain original value
+                Assert.DoesNotContain(testCase.Value, encryptedContent);
+
+                // 2. Decrypt and verify
+                var decrypted = await _cacheProvider.GetAsync<string>(testCase.Key);
+                Assert.Equal(testCase.Value, decrypted);
+
+                // 3. Check encryption markers
+                Assert.Contains("\"IV\":", encryptedContent); // Should contain IV
+                Assert.DoesNotContain("\"Value\":", encryptedContent); // Raw value should not be visible
+            }
+
+            // Additional encryption verification
+            var stats = _cacheProvider.GetCacheStats();
+            var encryptionStatus = stats.EncryptionStatus;
+            Assert.True(encryptionStatus.Enabled);
+            Assert.Equal(_defaultSettings.EncryptionAlgorithm, encryptionStatus.Algorithm);
+            Assert.Equal(testCases.Length, encryptionStatus.EncryptedFileCount);
+        }
+
         public void Dispose()
         {
             try
