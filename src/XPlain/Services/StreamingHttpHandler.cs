@@ -11,10 +11,7 @@ public class StreamingHttpHandler : DelegatingHandler
     private readonly int _maxRetries;
     private readonly TimeSpan _initialRetryDelay;
 
-    public StreamingHttpHandler(
-        TimeSpan timeout,
-        int maxRetries = 3,
-        TimeSpan? initialRetryDelay = null)
+    public StreamingHttpHandler(StreamingSettings settings)
     {
         _timeout = timeout;
         _maxRetries = maxRetries;

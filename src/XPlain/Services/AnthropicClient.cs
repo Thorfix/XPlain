@@ -35,17 +35,14 @@ public class AnthropicClient : BaseLLMProvider, IAnthropicClient, IDisposable
     public AnthropicClient(
         IOptions<AnthropicSettings> settings,
         ICacheProvider cacheProvider,
-        IRateLimitingService rateLimitingService)
-        : base(cacheProvider, rateLimitingService)
+        IRateLimitingService rateLimitingService,
+        StreamingSettings streamingSettings)
+        : base(cacheProvider, rateLimitingService, streamingSettings)
     {
         _settings = settings.Value;
         _rateLimitingService = rateLimitingService;
         
-        _httpClient = new HttpClient(
-            new StreamingHttpHandler(
-                timeout: TimeSpan.FromSeconds(30),
-                maxRetries: 3,
-                initialRetryDelay: TimeSpan.FromSeconds(1)))
+        _httpClient = new HttpClient(new StreamingHttpHandler(streamingSettings))
         {
             BaseAddress = new Uri(_settings.ApiEndpoint)
         };

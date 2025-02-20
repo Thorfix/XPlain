@@ -9,13 +9,16 @@ public abstract class BaseLLMProvider : ILLMProvider
 {
     protected readonly ICacheProvider _cacheProvider;
     protected readonly IRateLimitingService _rateLimitingService;
+    protected readonly StreamingSettings _streamingSettings;
 
     protected BaseLLMProvider(
         ICacheProvider cacheProvider,
-        IRateLimitingService rateLimitingService)
+        IRateLimitingService rateLimitingService,
+        StreamingSettings streamingSettings)
     {
         _cacheProvider = cacheProvider;
         _rateLimitingService = rateLimitingService;
+        _streamingSettings = streamingSettings;
     }
 
     public abstract string ProviderName { get; }
@@ -23,7 +26,15 @@ public abstract class BaseLLMProvider : ILLMProvider
 
     protected abstract Task<string> GetCompletionInternalAsync(string prompt);
     
-    protected abstract IAsyncEnumerable<string> GetCompletionStreamInternalAsync(string prompt);
+    /// <summary>
+    /// Gets a streaming completion from the LLM provider
+    /// </summary>
+    /// <param name="prompt">The prompt to send to the LLM</param>
+    /// <param name="cancellationToken">Token to cancel the streaming operation</param>
+    /// <returns>An async enumerable of completion chunks</returns>
+    protected abstract IAsyncEnumerable<string> GetCompletionStreamInternalAsync(
+        string prompt,
+        CancellationToken cancellationToken = default);
 
     public async Task<string> GetCompletionAsync(string prompt)
     {
