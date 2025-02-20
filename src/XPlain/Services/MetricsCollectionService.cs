@@ -5,26 +5,26 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
+using Microsoft.Extensions.Hosting;
+using XPlain.Configuration;
 
 namespace XPlain.Services
 {
-    public class MetricsRecord
-    {
-        public DateTime Timestamp { get; set; }
-        public double ResponseTime { get; set; }
-        public bool IsHit { get; set; }
-        public int RequestCount { get; set; }
-    }
-
-    public class MetricsCollectionService
+    public class MetricsCollectionService : IHostedService, IDisposable
     {
         private readonly ILogger<MetricsCollectionService> _logger;
         private readonly TimeSeriesMetricsStore _timeSeriesStore;
         private readonly MetricsSettings _settings;
-        private readonly ConcurrentDictionary<string, ConcurrentQueue<MetricsRecord>> _metricsStore;
-        private readonly ConcurrentDictionary<string, long> _queryCounters;
-        private readonly Timer _cleanupTimer;
+        
+        // In-memory sliding windows for real-time aggregation
+        private readonly ConcurrentDictionary<string, ConcurrentQueue<MetricsRecord>> _recentMetrics;
+        private readonly ConcurrentDictionary<string, ConcurrentQueue<MetricsRecord>> _frequencyMetrics;
+        private readonly ConcurrentQueue<MetricsRecord> _activityMetrics;
+        
         private readonly SemaphoreSlim _cleanupLock = new SemaphoreSlim(1, 1);
+        private Timer? _cleanupTimer;
+        private bool _disposed;
 
         public MetricsCollectionService(
             ILogger<MetricsCollectionService> logger,
@@ -34,124 +34,175 @@ namespace XPlain.Services
             _logger = logger;
             _timeSeriesStore = timeSeriesStore;
             _settings = settings.Value;
-            _metricsStore = new ConcurrentDictionary<string, ConcurrentQueue<MetricsRecord>>();
-            _queryCounters = new ConcurrentDictionary<string, long>();
-            _cleanupTimer = new Timer(CleanupOldMetrics, null, TimeSpan.FromMinutes(5), TimeSpan.FromMinutes(5));
+            
+            _recentMetrics = new ConcurrentDictionary<string, ConcurrentQueue<MetricsRecord>>();
+            _frequencyMetrics = new ConcurrentDictionary<string, ConcurrentQueue<MetricsRecord>>();
+            _activityMetrics = new ConcurrentQueue<MetricsRecord>();
+        }
+
+        public Task StartAsync(CancellationToken cancellationToken)
+        {
+            _logger.LogInformation("Metrics Collection Service is starting.");
+            
+            _cleanupTimer = new Timer(
+                CleanupOldMetrics,
+                null,
+                TimeSpan.Zero,
+                TimeSpan.FromMinutes(_settings.CleanupIntervalMinutes));
+
+            return Task.CompletedTask;
+        }
+
+        public Task StopAsync(CancellationToken cancellationToken)
+        {
+            _logger.LogInformation("Metrics Collection Service is stopping.");
+
+            _cleanupTimer?.Change(Timeout.Infinite, 0);
+            return Task.CompletedTask;
         }
 
         public async Task RecordQueryMetrics(string key, double responseTime, bool isHit)
         {
             try
             {
-                // Store in memory for immediate access
+                var timestamp = DateTime.UtcNow;
                 var metrics = new MetricsRecord
                 {
-                    Timestamp = DateTime.UtcNow,
+                    Timestamp = timestamp,
                     ResponseTime = responseTime,
                     IsHit = isHit,
-                    RequestCount = 1
+                    Key = key
                 };
 
-                var queue = _metricsStore.GetOrAdd(key, _ => new ConcurrentQueue<MetricsRecord>());
-                queue.Enqueue(metrics);
-
-                _queryCounters.AddOrUpdate(key, 1, (_, count) => count + 1);
+                // Update real-time sliding windows
+                UpdateSlidingWindows(metrics);
 
                 // Persist to time series database
-                await _timeSeriesStore.StoreQueryMetric(key, responseTime, isHit, metrics.Timestamp);
+                await _timeSeriesStore.StoreQueryMetric(key, responseTime, isHit, timestamp);
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Error recording metrics for key: {Key}", key);
+                _logger.LogError(ex, "Error recording metrics for key {Key}", key);
             }
         }
 
-        public async Task<double> GetQueryFrequency(string key, TimeSpan window)
+        private void UpdateSlidingWindows(MetricsRecord metrics)
+        {
+            // Update recent metrics (for response time and hit rate)
+            var recentQueue = _recentMetrics.GetOrAdd(metrics.Key, _ => new ConcurrentQueue<MetricsRecord>());
+            recentQueue.Enqueue(metrics);
+
+            // Update frequency metrics
+            var frequencyQueue = _frequencyMetrics.GetOrAdd(metrics.Key, _ => new ConcurrentQueue<MetricsRecord>());
+            frequencyQueue.Enqueue(metrics);
+
+            // Update activity metrics
+            _activityMetrics.Enqueue(metrics);
+        }
+
+        public async Task<double> GetQueryFrequency(string key)
         {
             try
             {
-                // Try to get from time series store first
-                var frequency = await _timeSeriesStore.GetQueryFrequency(key, window);
-                if (frequency > 0) return frequency;
+                var window = TimeSpan.FromMinutes(_settings.QueryFrequencyWindowMinutes);
 
-                // Fall back to in-memory data if time series query fails
-                var queue = _metricsStore.GetOrAdd(key, _ => new ConcurrentQueue<MetricsRecord>());
+                // Try time series store first
+                var storedFrequency = await _timeSeriesStore.GetQueryFrequency(key, window);
+                if (storedFrequency > 0) return storedFrequency;
+
+                // Fall back to in-memory sliding window
                 var cutoff = DateTime.UtcNow - window;
-                var recentRequests = queue.Where(m => m.Timestamp >= cutoff).Sum(m => m.RequestCount);
-                
-                return recentRequests / window.TotalHours;
+                if (_frequencyMetrics.TryGetValue(key, out var queue))
+                {
+                    var count = queue.Count(m => m.Timestamp >= cutoff);
+                    return count / window.TotalHours;
+                }
+
+                return 0;
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Error calculating query frequency for key: {Key}", key);
+                _logger.LogError(ex, "Error getting query frequency for key {Key}", key);
                 return 0;
             }
         }
 
-        public async Task<double> GetAverageResponseTime(string key, TimeSpan window)
+        public async Task<double> GetAverageResponseTime(string key)
         {
             try
             {
-                // Try to get from time series store first
-                var avgResponseTime = await _timeSeriesStore.GetAverageResponseTime(key, window);
-                if (avgResponseTime > 0) return avgResponseTime;
+                var window = TimeSpan.FromMinutes(_settings.ResponseTimeWindowMinutes);
 
-                // Fall back to in-memory data if time series query fails
-                var queue = _metricsStore.GetOrAdd(key, _ => new ConcurrentQueue<MetricsRecord>());
+                // Try time series store first
+                var storedAverage = await _timeSeriesStore.GetAverageResponseTime(key, window);
+                if (storedAverage > 0) return storedAverage;
+
+                // Fall back to in-memory sliding window
                 var cutoff = DateTime.UtcNow - window;
-                var metrics = queue.Where(m => m.Timestamp >= cutoff).ToList();
+                if (_recentMetrics.TryGetValue(key, out var queue))
+                {
+                    var metrics = queue.Where(m => m.Timestamp >= cutoff).ToList();
+                    if (metrics.Any())
+                    {
+                        return metrics.Average(m => m.ResponseTime);
+                    }
+                }
 
-                if (!metrics.Any()) return 0;
-
-                return metrics.Average(m => m.ResponseTime);
+                return 0;
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Error calculating average response time for key: {Key}", key);
+                _logger.LogError(ex, "Error getting average response time for key {Key}", key);
                 return 0;
             }
         }
 
-        public async Task<double> GetCacheHitRate(string key, TimeSpan window)
+        public async Task<double> GetCacheHitRate(string key)
         {
             try
             {
-                // Try to get from time series store first
-                var hitRate = await _timeSeriesStore.GetCacheHitRate(key, window);
-                if (hitRate >= 0) return hitRate;
+                var window = TimeSpan.FromMinutes(_settings.HitRateWindowMinutes);
 
-                // Fall back to in-memory data if time series query fails
-                var queue = _metricsStore.GetOrAdd(key, _ => new ConcurrentQueue<MetricsRecord>());
+                // Try time series store first
+                var storedHitRate = await _timeSeriesStore.GetCacheHitRate(key, window);
+                if (storedHitRate >= 0) return storedHitRate;
+
+                // Fall back to in-memory sliding window
                 var cutoff = DateTime.UtcNow - window;
-                var metrics = queue.Where(m => m.Timestamp >= cutoff).ToList();
+                if (_recentMetrics.TryGetValue(key, out var queue))
+                {
+                    var metrics = queue.Where(m => m.Timestamp >= cutoff).ToList();
+                    if (metrics.Any())
+                    {
+                        return (double)metrics.Count(m => m.IsHit) / metrics.Count;
+                    }
+                }
 
-                if (!metrics.Any()) return 0;
-
-                var hits = metrics.Count(m => m.IsHit);
-                return (double)hits / metrics.Count;
+                return 0;
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Error calculating cache hit rate for key: {Key}", key);
+                _logger.LogError(ex, "Error getting cache hit rate for key {Key}", key);
                 return 0;
             }
         }
 
-        public async Task<double> GetUserActivityLevel(TimeSpan window)
+        public async Task<double> GetUserActivityLevel()
         {
             try
             {
-                // Try to get from time series store first
-                var activityLevel = await _timeSeriesStore.GetUserActivityLevel(window);
-                if (activityLevel >= 0) return activityLevel;
+                var window = TimeSpan.FromMinutes(_settings.UserActivityWindowMinutes);
 
-                // Fall back to in-memory data if time series query fails
+                // Try time series store first
+                var storedActivityLevel = await _timeSeriesStore.GetUserActivityLevel(window);
+                if (storedActivityLevel >= 0) return storedActivityLevel;
+
+                // Fall back to in-memory sliding window
                 var cutoff = DateTime.UtcNow - window;
-                var totalRequests = _metricsStore.Values
-                    .SelectMany(q => q.Where(m => m.Timestamp >= cutoff))
-                    .Sum(m => m.RequestCount);
+                var recentRequests = _activityMetrics.Count(m => m.Timestamp >= cutoff);
+                var requestsPerHour = recentRequests / window.TotalHours;
 
-                var requestsPerHour = totalRequests / window.TotalHours;
+                // Normalize to 0-1 range (1000 requests/hour considered high activity)
                 return Math.Min(1.0, requestsPerHour / 1000.0);
             }
             catch (Exception ex)
@@ -167,23 +218,22 @@ namespace XPlain.Services
 
             try
             {
-                // Cleanup time series database
+                var now = DateTime.UtcNow;
+
+                // Cleanup recent metrics
+                var recentWindow = TimeSpan.FromMinutes(_settings.ResponseTimeWindowMinutes);
+                await CleanupQueue(_recentMetrics, now - recentWindow);
+
+                // Cleanup frequency metrics
+                var frequencyWindow = TimeSpan.FromMinutes(_settings.QueryFrequencyWindowMinutes);
+                await CleanupQueue(_frequencyMetrics, now - frequencyWindow);
+
+                // Cleanup activity metrics
+                var activityWindow = TimeSpan.FromMinutes(_settings.UserActivityWindowMinutes);
+                await CleanupSingleQueue(_activityMetrics, now - activityWindow);
+
+                // Cleanup persisted metrics
                 await _timeSeriesStore.CleanupOldMetrics();
-
-                // Cleanup in-memory cache
-                var cutoff = DateTime.UtcNow - TimeSpan.FromHours(1); // Keep only last hour in memory
-
-                foreach (var key in _metricsStore.Keys)
-                {
-                    if (_metricsStore.TryGetValue(key, out var queue))
-                    {
-                        var newQueue = new ConcurrentQueue<MetricsRecord>(
-                            queue.Where(m => m.Timestamp >= cutoff)
-                        );
-
-                        _metricsStore.TryUpdate(key, newQueue, queue);
-                    }
-                }
             }
             catch (Exception ex)
             {
@@ -194,5 +244,58 @@ namespace XPlain.Services
                 _cleanupLock.Release();
             }
         }
+
+        private async Task CleanupQueue(
+            ConcurrentDictionary<string, ConcurrentQueue<MetricsRecord>> queues,
+            DateTime cutoff)
+        {
+            foreach (var key in queues.Keys)
+            {
+                if (queues.TryGetValue(key, out var queue))
+                {
+                    await CleanupSingleQueue(queue, cutoff);
+                }
+            }
+        }
+
+        private async Task CleanupSingleQueue(ConcurrentQueue<MetricsRecord> queue, DateTime cutoff)
+        {
+            var newQueue = new ConcurrentQueue<MetricsRecord>(
+                queue.Where(m => m.Timestamp >= cutoff)
+            );
+
+            while (queue.TryDequeue(out _)) { }
+            foreach (var item in newQueue)
+            {
+                queue.Enqueue(item);
+            }
+        }
+
+        public void Dispose()
+        {
+            Dispose(true);
+            GC.SuppressFinalize(this);
+        }
+
+        protected virtual void Dispose(bool disposing)
+        {
+            if (_disposed) return;
+
+            if (disposing)
+            {
+                _cleanupTimer?.Dispose();
+                _cleanupLock.Dispose();
+            }
+
+            _disposed = true;
+        }
+    }
+
+    public class MetricsRecord
+    {
+        public DateTime Timestamp { get; set; }
+        public string Key { get; set; } = "";
+        public double ResponseTime { get; set; }
+        public bool IsHit { get; set; }
     }
 }
