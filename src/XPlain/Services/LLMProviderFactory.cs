@@ -1,5 +1,8 @@
 using System;
+using System.Collections.Generic;
+using System.Linq;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using XPlain.Configuration;
 
@@ -12,11 +15,19 @@ namespace XPlain.Services
     {
         private readonly IServiceProvider _serviceProvider;
         private readonly LLMSettings _llmSettings;
+        private readonly LLMFallbackSettings _fallbackSettings;
+        private readonly ILogger<LLMProviderFactory> _logger;
 
-        public LLMProviderFactory(IServiceProvider serviceProvider, IOptions<LLMSettings> settings)
+        public LLMProviderFactory(
+            IServiceProvider serviceProvider,
+            IOptions<LLMSettings> settings,
+            IOptions<LLMFallbackSettings> fallbackSettings,
+            ILogger<LLMProviderFactory> logger)
         {
             _serviceProvider = serviceProvider ?? throw new ArgumentNullException(nameof(serviceProvider));
             _llmSettings = settings?.Value ?? throw new ArgumentNullException(nameof(settings));
+            _fallbackSettings = fallbackSettings?.Value;
+            _logger = logger ?? throw new ArgumentNullException(nameof(logger));
         }
 
         /// <summary>
@@ -26,11 +37,17 @@ namespace XPlain.Services
         /// <returns>An ILLMProvider instance</returns>
         /// <exception cref="ArgumentException">Thrown when provider is not supported</exception>
         /// <exception cref="InvalidOperationException">Thrown when provider cannot be instantiated</exception>
-        public ILLMProvider CreateProvider(string providerName)
+        public ILLMProvider CreateProvider(string providerName = null)
         {
+            // If fallback is enabled and no specific provider is requested, create a fallback provider
+            if (_fallbackSettings?.Enabled == true && string.IsNullOrEmpty(providerName))
+            {
+                return CreateFallbackProvider();
+            }
+
             if (string.IsNullOrEmpty(providerName))
             {
-                throw new ArgumentException("Provider name cannot be empty", nameof(providerName));
+                throw new ArgumentException("Provider name cannot be empty when fallback is disabled", nameof(providerName));
             }
 
             ILLMProvider provider = providerName.ToLowerInvariant() switch
@@ -77,6 +94,36 @@ namespace XPlain.Services
             {
                 throw new InvalidOperationException("Failed to initialize OpenAI provider", ex);
             }
+        }
+
+        private ILLMProvider CreateFallbackProvider()
+        {
+            var providers = new List<ILLMProvider>();
+
+            foreach (var providerConfig in _fallbackSettings.Providers)
+            {
+                try
+                {
+                    var provider = CreateProvider(providerConfig.Name);
+                    providers.Add(provider);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, $"Failed to initialize provider {providerConfig.Name} for fallback chain");
+                }
+            }
+
+            if (!providers.Any())
+            {
+                throw new InvalidOperationException("No providers could be initialized for fallback chain");
+            }
+
+            return new FallbackLLMProvider(
+                providers,
+                _fallbackSettings,
+                _serviceProvider.GetRequiredService<ILogger<FallbackLLMProvider>>(),
+                _serviceProvider.GetRequiredService<LLMProviderMetrics>(),
+                _serviceProvider.GetRequiredService<IRateLimitingService>());
         }
 
         private void ValidateProvider(ILLMProvider provider)
