@@ -1036,6 +1036,8 @@ file class Program
             services.AddSingleton<IMLModelTrainingService, MLModelTrainingService>();
             services.AddSingleton<MLPredictionService>();
             services.AddSingleton<IAutomaticCacheOptimizer, AutomaticCacheOptimizer>();
+            services.AddSingleton<MLModelValidationService>();
+            services.AddSingleton<AutomatedMLPipeline>();
             
             // Add load testing services
             services.AddSingleton<LoadTestEngine>();
