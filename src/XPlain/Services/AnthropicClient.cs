@@ -16,9 +16,18 @@ public class DualTokenBucket
     private double _minuteTokens;
     private readonly double _secondCapacity;
     private readonly double _minuteCapacity;
-    private readonly double _secondRefillRate;
-    private readonly double _minuteRefillRate;
+    private double _secondRefillRate;
+    private double _minuteRefillRate;
     private DateTime _lastRefillTime;
+    private int _remainingPerSecond;
+    private int _remainingPerMinute;
+    private DateTime _lastRateLimitUpdate = DateTime.MinValue;
+    private const double RateAdjustmentThreshold = 0.2; // Adjust rates when remaining capacity is below 20%
+    private const double RateDecreaseMultiplier = 0.8; // Decrease rates by 20% when approaching limits
+    private const double RateIncreaseMultiplier = 1.1; // Increase rates by 10% when limits are healthy
+    private readonly object _rateLimitLock = new();
+
+    public record RateLimitInfo(int RemainingPerSecond, int RemainingPerMinute, DateTime ResetTime);
 
     public DualTokenBucket(double secondCapacity, double minuteCapacity, double secondRefillRate, double minuteRefillRate)
     {
@@ -55,15 +64,85 @@ public class DualTokenBucket
         var now = DateTime.UtcNow;
         var timePassed = (now - _lastRefillTime).TotalSeconds;
         
-        // Refill per-second tokens
-        var secondTokensToAdd = timePassed * _secondRefillRate;
-        _secondTokens = Math.Min(_secondCapacity, _secondTokens + secondTokensToAdd);
-        
-        // Refill per-minute tokens
-        var minuteTokensToAdd = timePassed * _minuteRefillRate / 60.0; // Convert to per-second rate
-        _minuteTokens = Math.Min(_minuteCapacity, _minuteTokens + minuteTokensToAdd);
+        lock (_rateLimitLock)
+        {
+            // Adjust rates based on remaining capacity
+            AdjustRatesBasedOnUsage();
+            
+            // Refill per-second tokens
+            var secondTokensToAdd = timePassed * _secondRefillRate;
+            _secondTokens = Math.Min(_secondCapacity, _secondTokens + secondTokensToAdd);
+            
+            // Refill per-minute tokens
+            var minuteTokensToAdd = timePassed * _minuteRefillRate / 60.0; // Convert to per-second rate
+            _minuteTokens = Math.Min(_minuteCapacity, _minuteTokens + minuteTokensToAdd);
+        }
         
         _lastRefillTime = now;
+    }
+
+    public void UpdateRateLimits(HttpResponseHeaders headers)
+    {
+        if (!headers.TryGetValues("x-ratelimit-remaining-requests", out var requestsRemaining) ||
+            !headers.TryGetValues("x-ratelimit-remaining-tokens", out var tokensRemaining) ||
+            !headers.TryGetValues("x-ratelimit-reset", out var resetTime))
+        {
+            return;
+        }
+
+        lock (_rateLimitLock)
+        {
+            if (int.TryParse(requestsRemaining.FirstOrDefault(), out var remainingRequests) &&
+                int.TryParse(tokensRemaining.FirstOrDefault(), out var remainingTokens) &&
+                DateTimeOffset.TryParse(resetTime.FirstOrDefault(), out var reset))
+            {
+                _remainingPerSecond = remainingRequests;
+                _remainingPerMinute = remainingTokens;
+                _lastRateLimitUpdate = DateTime.UtcNow;
+                
+                // Log rate limit information
+                Debug.WriteLine($"Rate limits updated - Requests: {remainingRequests}, Tokens: {remainingTokens}, Reset: {reset}");
+            }
+        }
+    }
+
+    private void AdjustRatesBasedOnUsage()
+    {
+        if (DateTime.UtcNow - _lastRateLimitUpdate > TimeSpan.FromMinutes(1))
+        {
+            return; // Don't adjust rates if we haven't received recent rate limit information
+        }
+
+        var secondRemainingPercentage = _remainingPerSecond / (double)_secondCapacity;
+        var minuteRemainingPercentage = _remainingPerMinute / (double)_minuteCapacity;
+
+        if (secondRemainingPercentage < RateAdjustmentThreshold || minuteRemainingPercentage < RateAdjustmentThreshold)
+        {
+            // Decrease rates when approaching limits
+            _secondRefillRate *= RateDecreaseMultiplier;
+            _minuteRefillRate *= RateDecreaseMultiplier;
+            Debug.WriteLine($"Decreasing rates - Second: {_secondRefillRate:F2}, Minute: {_minuteRefillRate:F2}");
+        }
+        else if (secondRemainingPercentage > 0.5 && minuteRemainingPercentage > 0.5)
+        {
+            // Gradually increase rates when usage is healthy
+            _secondRefillRate *= RateIncreaseMultiplier;
+            _minuteRefillRate *= RateIncreaseMultiplier;
+            
+            // Cap at original rates
+            _secondRefillRate = Math.Min(_secondRefillRate, TokensPerSecond);
+            _minuteRefillRate = Math.Min(_minuteRefillRate, TokensPerMinute);
+            
+            Debug.WriteLine($"Increasing rates - Second: {_secondRefillRate:F2}, Minute: {_minuteRefillRate:F2}");
+        }
+    }
+
+    public RateLimitInfo GetCurrentRateLimits()
+    {
+        lock (_rateLimitLock)
+        {
+            return new RateLimitInfo(_remainingPerSecond, _remainingPerMinute, _lastRateLimitUpdate);
+        }
     }
 
     public async Task<bool> ConsumeTokenAsync(CancellationToken cancellationToken = default)
@@ -482,6 +561,11 @@ public class AnthropicClient : BaseLLMProvider, IAnthropicClient, IDisposable
     {
         try
         {
+            // Calculate batch priority based on age of oldest request
+            var oldestRequest = requests.Min(r => r.Timestamp);
+            var waitTime = DateTime.UtcNow - oldestRequest;
+            var priority = Math.Max(0, 5 - (int)waitTime.TotalSeconds); // Higher priority for older requests
+
             var response = await ExecuteWithRetryAsync(async (ct) =>
             {
                 AnthropicRequest requestBody = new AnthropicRequest
@@ -499,31 +583,40 @@ public class AnthropicClient : BaseLLMProvider, IAnthropicClient, IDisposable
                     Temperature = 0.7,
                 };
 
-                HttpResponseMessage response = await _httpClient.PostAsJsonAsync("/v1/messages", requestBody, ct);
-                response.EnsureSuccessStatusCode();
-
-                // Track rate limit information from headers
-                if (response.Headers.TryGetValues("x-ratelimit-remaining", out var remainingValues) &&
-                    int.TryParse(remainingValues.FirstOrDefault(), out var remaining))
+                // Get current rate limits before making request
+                var rateLimits = _tokenBucket.GetCurrentRateLimits();
+                if (rateLimits.RemainingPerSecond < 2 || rateLimits.RemainingPerMinute < 10)
                 {
-                    Debug.WriteLine($"Rate limit remaining: {remaining}");
+                    // Add adaptive delay when close to limits
+                    var delay = Math.Max(
+                        1000 / Math.Max(1, rateLimits.RemainingPerSecond),
+                        60000 / Math.Max(1, rateLimits.RemainingPerMinute));
+                    await Task.Delay((int)delay, ct);
                 }
+
+                HttpResponseMessage response = await _httpClient.PostAsJsonAsync("/v1/messages", requestBody, ct);
+                
+                // Update rate limits from response headers
+                _tokenBucket.UpdateRateLimits(response.Headers);
+                
+                response.EnsureSuccessStatusCode();
 
                 var result = await response.Content.ReadFromJsonAsync<AnthropicResponse>(cancellationToken: ct);
                 return result?.Content.FirstOrDefault()?.Text.Trim() ?? "No response received from the API.";
-            }, priority: 0, cancellationToken);
+            }, priority, cancellationToken);
 
-            // Set the result for all requests in the batch
-            foreach (var request in requests)
+            // Set the result for all non-cancelled requests in the batch
+            foreach (var request in requests.Where(r => !r.CancellationToken.IsCancellationRequested))
             {
-                if (!request.CancellationToken.IsCancellationRequested)
-                {
-                    request.TaskCompletion.TrySetResult(response);
-                }
+                request.TaskCompletion.TrySetResult(response);
             }
+
+            // Log batch processing success
+            Debug.WriteLine($"Successfully processed batch of {requests.Count} requests with model {key.Model}");
         }
         catch (Exception ex)
         {
+            Debug.WriteLine($"Batch processing failed: {ex.Message}");
             foreach (var request in requests)
             {
                 request.TaskCompletion.TrySetException(ex);
@@ -675,9 +768,20 @@ public class AnthropicClient : BaseLLMProvider, IAnthropicClient, IDisposable
 
     public void Dispose()
     {
-        _httpClient.Dispose();
-        _requestQueue.Dispose();
-        _requestBatcher.Dispose();
+        try
+        {
+            // Log final rate limit status
+            var finalRateLimits = _tokenBucket.GetCurrentRateLimits();
+            Debug.WriteLine($"Final rate limits - Requests/sec: {finalRateLimits.RemainingPerSecond}, Requests/min: {finalRateLimits.RemainingPerMinute}");
+            
+            _httpClient.Dispose();
+            _requestQueue.Dispose();
+            _requestBatcher.Dispose();
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"Error during disposal: {ex.Message}");
+        }
     }
 }
 
