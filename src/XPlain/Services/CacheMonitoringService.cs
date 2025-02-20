@@ -9,12 +9,13 @@ namespace XPlain.Services
     {
         private readonly ICacheProvider _cacheProvider;
         private readonly List<CacheAlert> _activeAlerts;
-        private readonly MonitoringThresholds _thresholds;
+        private MonitoringThresholds _thresholds;
         private readonly Dictionary<string, List<PolicySwitchEvent>> _policySwitchHistory;
         private readonly Dictionary<string, Dictionary<string, double>> _policyPerformanceHistory;
         private readonly MLPredictionService _predictionService;
         private readonly AutomaticMitigationService _mitigationService;
         private readonly System.Timers.Timer _mitigationTimer;
+        private readonly Dictionary<string, PredictionThresholds> _predictionThresholds;
 
         public CacheMonitoringService(
             ICacheProvider cacheProvider,
@@ -24,6 +25,27 @@ namespace XPlain.Services
             _cacheProvider = cacheProvider;
             _activeAlerts = new List<CacheAlert>();
             _thresholds = new MonitoringThresholds();
+            _predictionThresholds = new Dictionary<string, PredictionThresholds>
+            {
+                ["CacheHitRate"] = new PredictionThresholds 
+                { 
+                    WarningThreshold = 0.75,
+                    CriticalThreshold = 0.6,
+                    MinConfidence = 0.7
+                },
+                ["MemoryUsage"] = new PredictionThresholds 
+                { 
+                    WarningThreshold = 85,
+                    CriticalThreshold = 95,
+                    MinConfidence = 0.8
+                },
+                ["AverageResponseTime"] = new PredictionThresholds 
+                { 
+                    WarningThreshold = 150,
+                    CriticalThreshold = 200,
+                    MinConfidence = 0.75
+                }
+            };
             _policySwitchHistory = new Dictionary<string, List<PolicySwitchEvent>>();
             _policyPerformanceHistory = new Dictionary<string, Dictionary<string, double>>();
             _predictionService = predictionService;
@@ -83,14 +105,75 @@ namespace XPlain.Services
             return await _predictionService.PredictPerformanceMetrics();
         }
 
+        public async Task<Dictionary<string, PredictionThresholds>> GetPredictionThresholdsAsync()
+        {
+            return _predictionThresholds;
+        }
+
+        public async Task UpdatePredictionThresholdsAsync(Dictionary<string, PredictionThresholds> newThresholds)
+        {
+            foreach (var (metric, threshold) in newThresholds)
+            {
+                if (_predictionThresholds.ContainsKey(metric))
+                {
+                    _predictionThresholds[metric] = threshold;
+                }
+            }
+        }
+
         public async Task<List<PredictedAlert>> GetPredictedAlertsAsync()
         {
             var regularAlerts = await _predictionService.GetPredictedAlerts();
             var precursorPatterns = _predictionService.GetActivePrecursorPatterns();
+            var predictions = await _predictionService.PredictPerformanceMetrics();
 
+            // Add alerts based on prediction thresholds
+            foreach (var (metric, prediction) in predictions)
+            {
+                if (_predictionThresholds.TryGetValue(metric, out var thresholds) &&
+                    prediction.Confidence >= thresholds.MinConfidence)
+                {
+                    if (prediction.Value <= thresholds.CriticalThreshold)
+                    {
+                        regularAlerts.Add(new PredictedAlert
+                        {
+                            Type = "ThresholdPrediction",
+                            Message = $"Predicted {metric} will reach critical level: {prediction.Value:F2}",
+                            Severity = "Critical",
+                            Confidence = prediction.Confidence,
+                            TimeToImpact = prediction.TimeToImpact,
+                            Metadata = new Dictionary<string, object>
+                            {
+                                ["metric"] = metric,
+                                ["predictedValue"] = prediction.Value,
+                                ["threshold"] = thresholds.CriticalThreshold
+                            }
+                        });
+                    }
+                    else if (prediction.Value <= thresholds.WarningThreshold)
+                    {
+                        regularAlerts.Add(new PredictedAlert
+                        {
+                            Type = "ThresholdPrediction",
+                            Message = $"Predicted {metric} will reach warning level: {prediction.Value:F2}",
+                            Severity = "Warning",
+                            Confidence = prediction.Confidence,
+                            TimeToImpact = prediction.TimeToImpact,
+                            Metadata = new Dictionary<string, object>
+                            {
+                                ["metric"] = metric,
+                                ["predictedValue"] = prediction.Value,
+                                ["threshold"] = thresholds.WarningThreshold
+                            }
+                        });
+                    }
+                }
+            }
+
+            // Add precursor pattern alerts
             foreach (var pattern in precursorPatterns)
             {
-                var alert = new PredictedAlert
+                regularAlerts.Add(new PredictedAlert
                 {
                     Type = "PrecursorPattern",
                     Message = $"Detected pattern that typically precedes {pattern.TargetIssue} " +
@@ -104,10 +187,9 @@ namespace XPlain.Services
                         ["precursorMetrics"] = pattern.Sequences.Select(s => s.MetricName).ToList()
                     }
                 };
-                regularAlerts.Add(alert);
             }
 
-            return regularAlerts;
+            return regularAlerts.OrderByDescending(a => a.Severity).ToList();
         }
 
         public async Task<Dictionary<string, TrendAnalysis>> GetMetricTrendsAsync()

@@ -157,43 +157,165 @@ function setupChartContainers() {
 
 function initializeChart(metric) {
     const ctx = document.getElementById(`${metric}-chart`).getContext('2d');
+    const metricColor = getMetricColor(metric);
+    
     metricsCharts[metric] = new Chart(ctx, {
         type: 'line',
         data: {
             labels: [],
-            datasets: [{
-                label: formatMetricName(metric),
-                data: [],
-                borderColor: getMetricColor(metric),
-                tension: 0.1
-            }]
+            datasets: [
+                {
+                    label: `${formatMetricName(metric)} (Actual)`,
+                    data: [],
+                    borderColor: metricColor,
+                    tension: 0.1,
+                    fill: false
+                },
+                {
+                    label: `${formatMetricName(metric)} (Predicted)`,
+                    data: [],
+                    borderColor: adjustColor(metricColor, 0.6),
+                    borderDash: [5, 5],
+                    tension: 0.1,
+                    fill: false
+                },
+                {
+                    label: 'Confidence Interval (Upper)',
+                    data: [],
+                    borderColor: 'transparent',
+                    backgroundColor: adjustColor(metricColor, 0.2),
+                    fill: '+1'
+                },
+                {
+                    label: 'Confidence Interval (Lower)',
+                    data: [],
+                    borderColor: 'transparent',
+                    backgroundColor: adjustColor(metricColor, 0.2),
+                    fill: false
+                }
+            ]
         },
         options: {
             responsive: true,
+            interaction: {
+                intersect: false,
+                mode: 'index'
+            },
             scales: {
                 y: {
-                    beginAtZero: true
+                    beginAtZero: true,
+                    grid: {
+                        drawBorder: false
+                    }
+                },
+                x: {
+                    grid: {
+                        display: false
+                    }
+                }
+            },
+            plugins: {
+                tooltip: {
+                    callbacks: {
+                        label: function(context) {
+                            const value = context.raw;
+                            const datasetLabel = context.dataset.label;
+                            if (datasetLabel.includes('Confidence')) {
+                                return null; // Don't show confidence bounds in tooltip
+                            }
+                            return `${datasetLabel}: ${value.toFixed(2)}`;
+                        }
+                    }
+                },
+                legend: {
+                    labels: {
+                        filter: function(item) {
+                            return !item.text.includes('Confidence'); // Hide confidence bounds from legend
+                        }
+                    }
                 }
             }
         }
     });
 }
 
+function adjustColor(color, alpha) {
+    const rgb = color.match(/\d+/g);
+    return `rgba(${rgb[0]}, ${rgb[1]}, ${rgb[2]}, ${alpha})`;
+}
+
 function updateMetricsDisplay(metrics) {
     Object.entries(metrics).forEach(([metric, value]) => {
         if (metricsCharts[metric]) {
             const chart = metricsCharts[metric];
-            chart.data.labels.push(new Date().toLocaleTimeString());
-            chart.data.datasets[0].data.push(value);
+            const now = new Date().toLocaleTimeString();
             
+            // Add actual value
+            chart.data.labels.push(now);
+            chart.data.datasets[0].data.push(value);
+
+            // Add prediction line and confidence interval if available
+            if (currentPredictions[metric]) {
+                const prediction = currentPredictions[metric];
+                const confidenceRange = calculateConfidenceRange(prediction);
+                
+                chart.data.datasets[1].data.push(prediction.value);
+                chart.data.datasets[2].data.push(confidenceRange.upper);
+                chart.data.datasets[3].data.push(confidenceRange.lower);
+            }
+            
+            // Remove old data points
             if (chart.data.labels.length > 20) {
                 chart.data.labels.shift();
-                chart.data.datasets[0].data.shift();
+                chart.data.datasets.forEach(dataset => dataset.data.shift());
             }
             
             chart.update();
         }
     });
+    updateConfidenceIndicators();
+}
+
+function calculateConfidenceRange(prediction) {
+    const range = prediction.value * (1 - prediction.confidence);
+    return {
+        upper: prediction.value + range,
+        lower: prediction.value - range
+    };
+}
+
+function updateConfidenceIndicators() {
+    const container = document.getElementById('confidence-indicators');
+    if (!container) return;
+
+    let html = '<div class="row">';
+    Object.entries(currentPredictions).forEach(([metric, prediction]) => {
+        const confidenceClass = prediction.confidence >= 0.85 ? 'high' :
+                              prediction.confidence >= 0.6 ? 'medium' : 'low';
+        
+        html += `
+            <div class="col-md-4">
+                <div class="confidence-indicator ${confidenceClass}">
+                    <h5>${formatMetricName(metric)}</h5>
+                    <div class="confidence-gauge">
+                        <div class="gauge-fill" style="width: ${prediction.confidence * 100}%"></div>
+                    </div>
+                    <div class="confidence-details">
+                        <span class="confidence-value">${(prediction.confidence * 100).toFixed(1)}%</span>
+                        <span class="confidence-label">Confidence</span>
+                    </div>
+                    ${prediction.detectedPattern ? `
+                        <div class="pattern-info">
+                            <span class="pattern-type">${prediction.detectedPattern.type}</span>
+                            <span class="pattern-time">Lead time: ${formatTimeSpan(prediction.detectedPattern.timeToIssue)}</span>
+                        </div>
+                    ` : ''}
+                </div>
+            </div>
+        `;
+    });
+    html += '</div>';
+    container.innerHTML = html;
 }
 
 function updatePredictionCharts(predictions) {

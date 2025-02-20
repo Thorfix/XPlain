@@ -41,6 +41,79 @@
             background-color: rgba(255, 99, 132, 0.2);
             border: 1px solid rgba(255, 99, 132, 1);
         }
+
+        .confidence-indicator {
+            padding: 15px;
+            margin: 10px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+
+        .confidence-indicator.high {
+            background-color: rgba(75, 192, 192, 0.1);
+            border: 1px solid rgba(75, 192, 192, 0.5);
+        }
+
+        .confidence-indicator.medium {
+            background-color: rgba(255, 206, 86, 0.1);
+            border: 1px solid rgba(255, 206, 86, 0.5);
+        }
+
+        .confidence-indicator.low {
+            background-color: rgba(255, 99, 132, 0.1);
+            border: 1px solid rgba(255, 99, 132, 0.5);
+        }
+
+        .confidence-gauge {
+            height: 8px;
+            background-color: rgba(0,0,0,0.1);
+            border-radius: 4px;
+            margin: 10px 0;
+            overflow: hidden;
+        }
+
+        .gauge-fill {
+            height: 100%;
+            background-color: currentColor;
+            transition: width 0.3s ease;
+        }
+
+        .confidence-details {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-top: 5px;
+        }
+
+        .confidence-value {
+            font-size: 1.2em;
+            font-weight: bold;
+        }
+
+        .confidence-label {
+            color: #666;
+        }
+
+        .pattern-info {
+            margin-top: 10px;
+            padding-top: 10px;
+            border-top: 1px solid rgba(0,0,0,0.1);
+            font-size: 0.9em;
+        }
+
+        .pattern-type {
+            display: block;
+            font-weight: bold;
+            margin-bottom: 3px;
+        }
+
+        .pattern-time {
+            color: #666;
+        }
+
+        #metrics-container {
+            margin-top: 30px;
+        }
         .trend-card {
             background: #f8f9fa;
             border-radius: 5px;
