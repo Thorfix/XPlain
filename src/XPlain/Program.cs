@@ -412,8 +412,22 @@ file class Program
                 else
                 {
                     string codeContext = BuildCodeContext(options.CodebasePath);
-                    string response = await provider.GetCompletionAsync($"I have the following code:\n\n{codeContext}\n\nMy question is: {options.DirectQuestion}");
-                    OutputResponse(response, options.OutputFormat);
+                    string prompt = $"I have the following code:\n\n{codeContext}\n\nMy question is: {options.DirectQuestion}";
+
+                    if (options.EnableStreaming)
+                    {
+                        await using var responseStream = provider.GetCompletionStreamAsync(prompt);
+                        await foreach (var chunk in responseStream)
+                        {
+                            Console.Write(chunk);
+                        }
+                        Console.WriteLine(); // Add newline after streaming response
+                    }
+                    else
+                    {
+                        string response = await provider.GetCompletionAsync(prompt);
+                        OutputResponse(response, options.OutputFormat);
+                    }
                 }
 
                 return 0;
@@ -577,13 +591,32 @@ file class Program
                             try
                             {
                                 string codeContext = BuildCodeContext(options.CodebasePath);
-                                string response = await provider.GetCompletionAsync($"I have the following code:\n\n{codeContext}\n\nMy question is: {input}");
-                                if (options.VerbosityLevel >= 1)
-                                {
-                                    Console.WriteLine("\nResponse:");
-                                }
+                                string prompt = $"I have the following code:\n\n{codeContext}\n\nMy question is: {input}";
 
-                                OutputResponse(response, options.OutputFormat);
+                                if (options.EnableStreaming)
+                                {
+                                    if (options.VerbosityLevel >= 1)
+                                    {
+                                        Console.WriteLine("\nStreaming response:");
+                                    }
+
+                                    await using var responseStream = provider.GetCompletionStreamAsync(prompt);
+                                    await foreach (var chunk in responseStream)
+                                    {
+                                        Console.Write(chunk);
+                                    }
+                                    Console.WriteLine(); // Add newline after streaming response
+                                }
+                                else
+                                {
+                                    string response = await provider.GetCompletionAsync(prompt);
+                                    if (options.VerbosityLevel >= 1)
+                                    {
+                                        Console.WriteLine("\nResponse:");
+                                    }
+
+                                    OutputResponse(response, options.OutputFormat);
+                                }
                             }
                             catch (Exception ex)
                             {
