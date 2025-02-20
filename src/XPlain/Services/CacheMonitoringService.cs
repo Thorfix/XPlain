@@ -85,7 +85,29 @@ namespace XPlain.Services
 
         public async Task<List<PredictedAlert>> GetPredictedAlertsAsync()
         {
-            return await _predictionService.GetPredictedAlerts();
+            var regularAlerts = await _predictionService.GetPredictedAlerts();
+            var precursorPatterns = _predictionService.GetActivePrecursorPatterns();
+
+            foreach (var pattern in precursorPatterns)
+            {
+                var alert = new PredictedAlert
+                {
+                    Type = "PrecursorPattern",
+                    Message = $"Detected pattern that typically precedes {pattern.TargetIssue} " +
+                             $"(Lead time: {pattern.LeadTime.TotalMinutes:F1} minutes)",
+                    Severity = pattern.Confidence > 0.9 ? "Warning" : "Info",
+                    Metadata = new Dictionary<string, object>
+                    {
+                        ["targetIssue"] = pattern.TargetIssue,
+                        ["leadTime"] = pattern.LeadTime,
+                        ["confidence"] = pattern.Confidence,
+                        ["precursorMetrics"] = pattern.Sequences.Select(s => s.MetricName).ToList()
+                    }
+                };
+                regularAlerts.Add(alert);
+            }
+
+            return regularAlerts;
         }
 
         public async Task<Dictionary<string, TrendAnalysis>> GetMetricTrendsAsync()

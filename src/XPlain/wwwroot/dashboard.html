@@ -14,6 +14,33 @@
             border: 1px solid #ddd;
             border-radius: 5px;
         }
+        .confidence-gauge {
+            width: 150px;
+            height: 150px;
+            margin: 10px;
+            display: inline-block;
+        }
+        .prediction-legend {
+            padding: 15px;
+            border-left: 1px solid #ddd;
+        }
+        .confidence-level {
+            padding: 8px;
+            margin: 5px 0;
+            border-radius: 4px;
+        }
+        .confidence-level.high {
+            background-color: rgba(75, 192, 192, 0.2);
+            border: 1px solid rgba(75, 192, 192, 1);
+        }
+        .confidence-level.medium {
+            background-color: rgba(255, 206, 86, 0.2);
+            border: 1px solid rgba(255, 206, 86, 1);
+        }
+        .confidence-level.low {
+            background-color: rgba(255, 99, 132, 0.2);
+            border: 1px solid rgba(255, 99, 132, 1);
+        }
         .trend-card {
             background: #f8f9fa;
             border-radius: 5px;
@@ -74,6 +101,16 @@
                         <h3>Metrics and Predictions</h3>
                     </div>
                     <div class="card-body">
+                        <div class="row mb-4">
+                            <div class="col-md-4" id="confidence-gauges"></div>
+                            <div class="col-md-8">
+                                <div class="prediction-legend">
+                                    <div class="confidence-level high">High Confidence (>85%)</div>
+                                    <div class="confidence-level medium">Medium Confidence (60-85%)</div>
+                                    <div class="confidence-level low">Low Confidence (<60%)</div>
+                                </div>
+                            </div>
+                        </div>
                         <div id="metrics-container"></div>
                     </div>
                 </div>

@@ -10,15 +10,36 @@ namespace XPlain.Services
         private readonly ICacheMonitoringService _monitoringService;
         private readonly Dictionary<string, List<double>> _metricHistory;
         private readonly Dictionary<string, List<Pattern>> _degradationPatterns;
+        private readonly Dictionary<string, List<PrecursorPattern>> _precursorPatterns;
         private readonly int _historyWindow = 100;  // Number of data points to keep
         private readonly double _confidenceThreshold = 0.85;
         private readonly int _patternWindow = 10;   // Window size for pattern detection
+        private readonly int _precursorWindow = 20; // Window size for precursor detection
 
         public MLPredictionService(ICacheMonitoringService monitoringService)
         {
             _monitoringService = monitoringService;
             _metricHistory = new Dictionary<string, List<double>>();
             _degradationPatterns = new Dictionary<string, List<Pattern>>();
+            _precursorPatterns = new Dictionary<string, List<PrecursorPattern>>();
+        }
+
+        private class PrecursorPattern
+        {
+            public List<MetricSequence> Sequences { get; set; } = new();
+            public TimeSpan LeadTime { get; set; }
+            public string TargetIssue { get; set; }
+            public double Confidence { get; set; }
+            public int OccurrenceCount { get; set; }
+            public Dictionary<string, (double Min, double Max)> Thresholds { get; set; }
+        }
+
+        private class MetricSequence
+        {
+            public string MetricName { get; set; }
+            public List<double> Values { get; set; }
+            public List<double> Derivatives { get; set; }
+            public Dictionary<string, double> Correlations { get; set; }
         }
 
         private class Pattern
@@ -32,10 +53,58 @@ namespace XPlain.Services
 
         private async Task UpdateDegradationPatterns(string metric, double currentValue)
         {
-            if (!_metricHistory.ContainsKey(metric)) return;
+            await base.UpdateDegradationPatterns(metric, currentValue);
+            await AnalyzePrecursorPatterns(metric, currentValue);
+        }
 
-            var history = _metricHistory[metric];
-            if (history.Count < _patternWindow + 1) return;
+        private async Task AnalyzePrecursorPatterns(string metric, double currentValue)
+        {
+            if (!_metricHistory.ContainsKey(metric) || 
+                _metricHistory[metric].Count < _precursorWindow) return;
+
+            // Detect performance degradation
+            var isDegradation = IsPerformanceDegradation(metric, currentValue);
+            if (!isDegradation) return;
+
+            // Analyze all metrics for precursor patterns
+            var allMetrics = _metricHistory.Keys.ToList();
+            var timeWindow = TimeSpan.FromMinutes(_precursorWindow * 5); // Assuming 5-minute intervals
+
+            var precursorCandidates = new List<(string Metric, List<double> Pattern, TimeSpan LeadTime)>();
+            
+            foreach (var metricName in allMetrics)
+            {
+                var metricHistory = _metricHistory[metricName].TakeLast(_precursorWindow).ToList();
+                var derivatives = CalculateDerivatives(metricHistory);
+                var correlations = CalculateCorrelations(metricName, allMetrics);
+
+                // Look for significant changes that precede the degradation
+                var changePoints = DetectChangePoints(derivatives);
+                foreach (var changePoint in changePoints)
+                {
+                    var leadTime = TimeSpan.FromMinutes((changePoint - _precursorWindow) * 5);
+                    if (leadTime > TimeSpan.Zero && leadTime <= timeWindow)
+                    {
+                        precursorCandidates.Add((
+                            metricName,
+                            metricHistory.Skip(changePoint).Take(_patternWindow).ToList(),
+                            leadTime
+                        ));
+                    }
+                }
+            }
+
+            // Update precursor patterns
+            foreach (var candidate in precursorCandidates)
+            {
+                await UpdatePrecursorPattern(
+                    candidate.Metric,
+                    candidate.Pattern,
+                    candidate.LeadTime,
+                    metric,
+                    currentValue
+                );
+            }
 
             // Check if this is a degradation point
             bool isDegradation = IsPerformanceDegradation(metric, currentValue);
@@ -80,6 +149,124 @@ namespace XPlain.Services
             }
         }
 
+        private List<double> CalculateDerivatives(List<double> values)
+        {
+            var derivatives = new List<double>();
+            for (int i = 1; i < values.Count; i++)
+            {
+                derivatives.Add(values[i] - values[i - 1]);
+            }
+            return derivatives;
+        }
+
+        private Dictionary<string, double> CalculateCorrelations(string baseMetric, List<string> allMetrics)
+        {
+            var correlations = new Dictionary<string, double>();
+            var baseValues = _metricHistory[baseMetric];
+
+            foreach (var otherMetric in allMetrics)
+            {
+                if (otherMetric == baseMetric) continue;
+
+                var otherValues = _metricHistory[otherMetric];
+                var correlation = CalculatePearsonCorrelation(
+                    baseValues.TakeLast(_precursorWindow).ToList(),
+                    otherValues.TakeLast(_precursorWindow).ToList()
+                );
+                correlations[otherMetric] = correlation;
+            }
+
+            return correlations;
+        }
+
+        private double CalculatePearsonCorrelation(List<double> x, List<double> y)
+        {
+            var n = Math.Min(x.Count, y.Count);
+            var meanX = x.Take(n).Average();
+            var meanY = y.Take(n).Average();
+
+            var sumXY = x.Take(n).Zip(y.Take(n), (a, b) => (a - meanX) * (b - meanY)).Sum();
+            var sumX2 = x.Take(n).Sum(a => Math.Pow(a - meanX, 2));
+            var sumY2 = y.Take(n).Sum(b => Math.Pow(b - meanY, 2));
+
+            return sumXY / Math.Sqrt(sumX2 * sumY2);
+        }
+
+        private List<int> DetectChangePoints(List<double> derivatives)
+        {
+            var changePoints = new List<int>();
+            var mean = derivatives.Average();
+            var stdDev = Math.Sqrt(derivatives.Select(x => Math.Pow(x - mean, 2)).Average());
+            var threshold = stdDev * 2; // 2 standard deviations
+
+            for (int i = 1; i < derivatives.Count; i++)
+            {
+                if (Math.Abs(derivatives[i] - derivatives[i - 1]) > threshold)
+                {
+                    changePoints.Add(i);
+                }
+            }
+
+            return changePoints;
+        }
+
+        private async Task UpdatePrecursorPattern(
+            string precursorMetric,
+            List<double> pattern,
+            TimeSpan leadTime,
+            string targetMetric,
+            double degradationValue)
+        {
+            if (!_precursorPatterns.ContainsKey(targetMetric))
+            {
+                _precursorPatterns[targetMetric] = new List<PrecursorPattern>();
+            }
+
+            var normalizedPattern = NormalizeSequence(pattern);
+            var existingPattern = _precursorPatterns[targetMetric]
+                .FirstOrDefault(p => p.Sequences
+                    .Any(s => s.MetricName == precursorMetric && 
+                             IsSimilarPattern(s.Values, normalizedPattern)));
+
+            if (existingPattern != null)
+            {
+                existingPattern.OccurrenceCount++;
+                existingPattern.Confidence = Math.Min(0.95, 
+                    existingPattern.Confidence + (1.0 / existingPattern.OccurrenceCount));
+                existingPattern.LeadTime = TimeSpan.FromTicks(
+                    (existingPattern.LeadTime.Ticks * (existingPattern.OccurrenceCount - 1) +
+                     leadTime.Ticks) / existingPattern.OccurrenceCount);
+            }
+            else
+            {
+                var newPattern = new PrecursorPattern
+                {
+                    Sequences = new List<MetricSequence>
+                    {
+                        new MetricSequence
+                        {
+                            MetricName = precursorMetric,
+                            Values = normalizedPattern,
+                            Derivatives = CalculateDerivatives(pattern),
+                            Correlations = CalculateCorrelations(precursorMetric, _metricHistory.Keys.ToList())
+                        }
+                    },
+                    LeadTime = leadTime,
+                    TargetIssue = $"{targetMetric}Degradation",
+                    Confidence = 0.5,
+                    OccurrenceCount = 1,
+                    Thresholds = new Dictionary<string, (double Min, double Max)>
+                    {
+                        [precursorMetric] = (
+                            pattern.Min() * 0.9,
+                            pattern.Max() * 1.1
+                        )
+                    }
+                };
+                _precursorPatterns[targetMetric].Add(newPattern);
+            }
+        }
+
         private bool IsPerformanceDegradation(string metric, double currentValue)
         {
             var history = _metricHistory[metric];
@@ -105,6 +292,33 @@ namespace XPlain.Services
                 "slowresponse" => currentValue * 1.5, // Predict 50% slowdown
                 _ => currentValue
             };
+        }
+
+        public List<PrecursorPattern> GetActivePrecursorPatterns()
+        {
+            var activePatterns = new List<PrecursorPattern>();
+            
+            foreach (var (metric, patterns) in _precursorPatterns)
+            {
+                foreach (var pattern in patterns.Where(p => p.Confidence > 0.7))
+                {
+                    var isActive = pattern.Sequences.All(seq =>
+                    {
+                        var currentHistory = _metricHistory[seq.MetricName]
+                            .TakeLast(seq.Values.Count)
+                            .ToList();
+                        var normalizedCurrent = NormalizeSequence(currentHistory);
+                        return IsSimilarPattern(normalizedCurrent, seq.Values);
+                    });
+
+                    if (isActive)
+                    {
+                        activePatterns.Add(pattern);
+                    }
+                }
+            }
+
+            return activePatterns;
         }
 
         private List<double> NormalizeSequence(List<double> sequence)
