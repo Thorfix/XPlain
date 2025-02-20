@@ -1,228 +1,187 @@
 using System;
 using System.Collections.Generic;
-using System.IO;
-using System.Linq;
 using System.Threading.Tasks;
+using System.Linq;
 using Microsoft.ML;
 using Microsoft.ML.Data;
 using Microsoft.ML.Trainers;
-using System.Text.Json;
+using Microsoft.Extensions.Logging;
 
 namespace XPlain.Services
 {
-    public interface IMLModelTrainingService
+    public class ModelTrainingParameters
     {
-        Task TrainModels();
-        Task<MLModel> GetLatestModel(string metricType);
-        Task<bool> ValidateModel(MLModel model, string metricType);
+        public bool IncludeTimeFeatures { get; set; }
+        public bool IncludeUserActivityPatterns { get; set; }
+        public bool IncludeQueryPatterns { get; set; }
+        public bool OptimizeForResourceUsage { get; set; }
+        public Dictionary<string, object> Features { get; set; } = new();
+        public Dictionary<string, double> Weights { get; set; } = new();
     }
 
-    public class MLModelTrainingService : IMLModelTrainingService
+    public class CacheTrainingData
     {
-        private readonly ICacheMonitoringService _monitoringService;
-        private readonly string _modelDirectory = "Models";
+        [LoadColumn(0)]
+        public string Key { get; set; } = "";
+
+        [LoadColumn(1)]
+        public float AccessFrequency { get; set; }
+
+        [LoadColumn(2)]
+        public float TimeOfDay { get; set; }
+
+        [LoadColumn(3)]
+        public float DayOfWeek { get; set; }
+
+        [LoadColumn(4)]
+        public float UserActivityLevel { get; set; }
+
+        [LoadColumn(5)]
+        public float ResponseTime { get; set; }
+
+        [LoadColumn(6)]
+        public float CacheHitRate { get; set; }
+
+        [LoadColumn(7)]
+        public float ResourceUsage { get; set; }
+
+        [LoadColumn(8)]
+        public float PerformanceGain { get; set; }
+
+        [LoadColumn(9)]
+        public float Label { get; set; } // Predicted cache value
+    }
+
+    public class MLModelTrainingService
+    {
         private readonly MLContext _mlContext;
-        private readonly Dictionary<string, ITransformer> _activeModels;
-        private readonly int _trainHistoryHours = 24;
-        private readonly double _validationSplit = 0.2;
+        private readonly ILogger<MLModelTrainingService> _logger;
+        private ITransformer? _trainedModel;
 
-        public MLModelTrainingService(ICacheMonitoringService monitoringService)
+        public MLModelTrainingService(ILogger<MLModelTrainingService> logger)
         {
-            _monitoringService = monitoringService;
             _mlContext = new MLContext(seed: 1);
-            _activeModels = new Dictionary<string, ITransformer>();
-            
-            if (!Directory.Exists(_modelDirectory))
-            {
-                Directory.CreateDirectory(_modelDirectory);
-            }
+            _logger = logger;
         }
 
-        public async Task TrainModels()
+        public async Task TrainModelAsync(List<CacheTrainingData> trainingData, ModelTrainingParameters parameters)
         {
-            var metricTypes = new[] { "CacheHitRate", "MemoryUsage", "AverageResponseTime" };
-            
-            foreach (var metricType in metricTypes)
+            try
             {
-                var data = await CollectTrainingData(metricType);
-                if (data.Count > 0)
+                var dataView = _mlContext.Data.LoadFromEnumerable(trainingData);
+
+                // Create data processing pipeline
+                var pipeline = _mlContext.Transforms
+                    .Concatenate("Features",
+                        "AccessFrequency",
+                        "ResponseTime",
+                        "CacheHitRate",
+                        "ResourceUsage",
+                        "PerformanceGain");
+
+                // Add time-based features if requested
+                if (parameters.IncludeTimeFeatures)
                 {
-                    await TrainModelForMetric(metricType, data);
+                    pipeline = pipeline.Append(_mlContext.Transforms.Concatenate(
+                        "TimeFeatures",
+                        "TimeOfDay",
+                        "DayOfWeek"));
                 }
-            }
-        }
 
-        private async Task<List<MetricDataPoint>> CollectTrainingData(string metricType)
-        {
-            var data = new List<MetricDataPoint>();
-            var metrics = await _monitoringService.GetHistoricalMetrics(TimeSpan.FromHours(_trainHistoryHours));
-            
-            // Create sliding windows of data points
-            const int windowSize = 10;
-            for (int i = 0; i <= metrics.Count - windowSize; i++)
-            {
-                var window = metrics.Skip(i).Take(windowSize).ToList();
-                var features = ExtractFeatures(window, metricType);
-                var label = window.Last().GetMetricValue(metricType);
-                
-                data.Add(new MetricDataPoint
+                // Add user activity features if requested
+                if (parameters.IncludeUserActivityPatterns)
                 {
-                    Features = features,
-                    MetricValue = label,
-                    Timestamp = window.Last().Timestamp
-                });
-            }
-            
-            return data;
-        }
+                    pipeline = pipeline.Append(_mlContext.Transforms.Concatenate(
+                        "ActivityFeatures",
+                        "UserActivityLevel"));
+                }
 
-        private float[] ExtractFeatures(List<PerformanceMetrics> window, string metricType)
-        {
-            var features = new List<float>();
-            
-            // Historical values
-            features.AddRange(window.Select(m => (float)m.GetMetricValue(metricType)));
-            
-            // Rate of change
-            for (int i = 1; i < window.Count; i++)
-            {
-                var change = (float)(window[i].GetMetricValue(metricType) - 
-                                   window[i-1].GetMetricValue(metricType));
-                features.Add(change);
-            }
-            
-            // System load indicators
-            features.Add((float)window.Last().SystemCpuUsage);
-            features.Add((float)window.Last().SystemMemoryUsage);
-            features.Add((float)window.Last().ActiveConnections);
-            
-            return features.ToArray();
-        }
+                // Normalize features
+                pipeline = pipeline
+                    .Append(_mlContext.Transforms.NormalizeMinMax("Features"))
+                    .Append(_mlContext.Transforms.NormalizeMinMax("TimeFeatures"))
+                    .Append(_mlContext.Transforms.NormalizeMinMax("ActivityFeatures"));
 
-        private async Task TrainModelForMetric(string metricType, List<MetricDataPoint> data)
-        {
-            // Create training dataset
-            var trainingData = _mlContext.Data.LoadFromEnumerable(data);
-            
-            // Split data
-            var dataSplit = _mlContext.Data.TrainTestSplit(trainingData, testFraction: _validationSplit);
-            
-            // Define pipeline
-            var pipeline = _mlContext.Transforms.Concatenate("Features", "Features")
-                .Append(_mlContext.Transforms.NormalizeMinMax("Features"))
-                .Append(_mlContext.Regression.Trainers.LbfgsPoissonRegression());
-            
-            // Train model
-            var model = pipeline.Fit(dataSplit.TrainSet);
-            
-            // Evaluate
-            var predictions = model.Transform(dataSplit.TestSet);
-            var metrics = _mlContext.Regression.Evaluate(predictions);
-            
-            if (IsModelAcceptable(metrics))
-            {
-                await SaveModel(model, metricType);
-                _activeModels[metricType] = model;
-            }
-        }
-
-        private bool IsModelAcceptable(RegressionMetrics metrics)
-        {
-            return metrics.RSquared > 0.7 && metrics.MeanAbsoluteError < 0.2;
-        }
-
-        private async Task SaveModel(ITransformer model, string metricType)
-        {
-            var modelPath = Path.Combine(_modelDirectory, $"{metricType}_{DateTime.UtcNow:yyyyMMddHHmmss}.zip");
-            using (var stream = File.Create(modelPath))
-            {
-                _mlContext.Model.Save(model, null, stream);
-            }
-            
-            await SaveModelMetadata(modelPath, metricType);
-        }
-
-        private async Task SaveModelMetadata(string modelPath, string metricType)
-        {
-            var metadata = new ModelMetadata
-            {
-                ModelPath = modelPath,
-                MetricType = metricType,
-                CreatedAt = DateTime.UtcNow,
-                Version = GetNextVersion(metricType)
-            };
-            
-            var metadataPath = Path.Combine(_modelDirectory, $"{metricType}_metadata.json");
-            await File.WriteAllTextAsync(metadataPath, JsonSerializer.Serialize(metadata));
-        }
-
-        private string GetNextVersion(string metricType)
-        {
-            var metadataPath = Path.Combine(_modelDirectory, $"{metricType}_metadata.json");
-            if (!File.Exists(metadataPath)) return "1.0.0";
-            
-            var metadata = JsonSerializer.Deserialize<ModelMetadata>(
-                File.ReadAllText(metadataPath));
-            var version = Version.Parse(metadata.Version);
-            return new Version(version.Major, version.Minor + 1, 0).ToString();
-        }
-
-        public async Task<MLModel> GetLatestModel(string metricType)
-        {
-            var metadataPath = Path.Combine(_modelDirectory, $"{metricType}_metadata.json");
-            if (!File.Exists(metadataPath)) return null;
-            
-            var metadata = JsonSerializer.Deserialize<ModelMetadata>(
-                File.ReadAllText(metadataPath));
-            
-            if (!File.Exists(metadata.ModelPath)) return null;
-            
-            using (var stream = File.OpenRead(metadata.ModelPath))
-            {
-                var model = _mlContext.Model.Load(stream, out var _);
-                return new MLModel
+                // Configure the trainer
+                var trainerOptions = new LbfgsMaximumEntropyMulticlassTrainer.Options
                 {
-                    Transformer = model,
-                    Metadata = metadata
+                    L1Regularization = 0.01f,
+                    L2Regularization = 0.01f,
+                    OptimizationTolerance = 1e-7f,
+                    HistorySize = 50,
+                    MaximumNumberOfIterations = 100
                 };
+
+                // Add the trainer to the pipeline
+                var trainingPipeline = pipeline.Append(
+                    _mlContext.Regression.Trainers.LbfgsPoissonRegression(
+                        labelColumnName: "Label",
+                        featureColumnName: "Features")
+                );
+
+                // Train the model
+                _trainedModel = trainingPipeline.Fit(dataView);
+
+                // Evaluate the model
+                var predictions = _trainedModel.Transform(dataView);
+                var metrics = _mlContext.Regression.Evaluate(predictions);
+
+                _logger.LogInformation(
+                    "Model trained successfully. R² score: {RSquared}, RMS error: {RootMeanSquaredError}",
+                    metrics.RSquared,
+                    metrics.RootMeanSquaredError);
+
+                // Save the model
+                await Task.Run(() => _mlContext.Model.Save(_trainedModel, dataView.Schema, "cache_prediction_model.zip"));
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error training cache prediction model");
+                throw;
             }
         }
 
-        public async Task<bool> ValidateModel(MLModel model, string metricType)
+        public async Task<Dictionary<string, double>> PredictCacheValuesAsync(List<CacheTrainingData> data)
         {
-            // Collect recent data for validation
-            var validationData = await CollectTrainingData(metricType);
-            if (validationData.Count == 0) return false;
-            
-            var dataView = _mlContext.Data.LoadFromEnumerable(validationData);
-            var predictions = model.Transformer.Transform(dataView);
-            var metrics = _mlContext.Regression.Evaluate(predictions);
-            
-            return IsModelAcceptable(metrics);
+            if (_trainedModel == null)
+            {
+                throw new InvalidOperationException("Model has not been trained");
+            }
+
+            var predictionEngine = _mlContext.Model.CreatePredictionEngine<CacheTrainingData, CachePrediction>(_trainedModel);
+            var results = new Dictionary<string, double>();
+
+            foreach (var item in data)
+            {
+                var prediction = predictionEngine.Predict(item);
+                results[item.Key] = prediction.PredictedValue;
+            }
+
+            return results;
         }
-    }
 
-    public class MetricDataPoint
-    {
-        [VectorType(23)]
-        public float[] Features { get; set; }
-        
-        public float MetricValue { get; set; }
-        
-        public DateTime Timestamp { get; set; }
-    }
+        public class CachePrediction
+        {
+            [ColumnName("Score")]
+            public float PredictedValue { get; set; }
+        }
 
-    public class ModelMetadata
-    {
-        public string ModelPath { get; set; }
-        public string MetricType { get; set; }
-        public DateTime CreatedAt { get; set; }
-        public string Version { get; set; }
-    }
+        public async Task<List<string>> GetActiveFeatures()
+        {
+            if (_trainedModel == null)
+            {
+                return new List<string>();
+            }
 
-    public class MLModel
-    {
-        public ITransformer Transformer { get; set; }
-        public ModelMetadata Metadata { get; set; }
+            return _trainedModel.GetOutputSchema(GetCurrentSchema())
+                .Select(col => col.Name)
+                .Where(name => name.EndsWith("Features"))
+                .ToList();
+        }
+
+        private DataViewSchema GetCurrentSchema()
+        {
+            return _mlContext.Data.LoadFromEnumerable(new List<CacheTrainingData>()).Schema;
+        }
     }
 }

@@ -4,11 +4,50 @@ using System.Collections.Generic;
 
 namespace XPlain.Services
 {
+    public enum PreWarmPriority
+    {
+        Low,
+        Medium,
+        High,
+        Critical
+    }
+
+    public record PreWarmMetrics
+    {
+        public double UsageFrequency { get; init; }
+        public double AverageResponseTime { get; init; }
+        public double PerformanceImpact { get; init; }
+        public DateTime LastAccessed { get; init; }
+        public PreWarmPriority RecommendedPriority { get; init; }
+        public double ResourceCost { get; init; }
+        public double PredictedValue { get; init; }
+    }
+
+    public record PreWarmingStrategy
+    {
+        public Dictionary<string, PreWarmPriority> KeyPriorities { get; init; } = new();
+        public TimeSpan PreWarmInterval { get; init; }
+        public int BatchSize { get; init; }
+        public double ResourceThreshold { get; init; }
+        public Dictionary<string, DateTime> OptimalTimings { get; init; } = new();
+    }
+
     public record CachePerformanceMetrics
     {
         public double CachedResponseTime { get; init; }
         public double NonCachedResponseTime { get; init; }
         public double PerformanceGain => NonCachedResponseTime == 0 ? 0 : (NonCachedResponseTime - CachedResponseTime) / NonCachedResponseTime * 100;
+    }
+
+    public record PreWarmingMetrics
+    {
+        public int TotalAttempts { get; init; }
+        public int SuccessfulPreWarms { get; init; }
+        public double SuccessRate => TotalAttempts == 0 ? 0 : (double)SuccessfulPreWarms / TotalAttempts;
+        public double AverageResourceUsage { get; init; }
+        public double CacheHitImprovementPercent { get; init; }
+        public double AverageResponseTimeImprovement { get; init; }
+        public DateTime LastUpdate { get; init; }
     }
 
     public record CacheStats
@@ -49,5 +88,10 @@ namespace XPlain.Services
         Task LogAnalyticsAsync();
         Task<List<string>> GetCacheWarmingRecommendationsAsync();
         Task<string> GeneratePerformanceChartAsync(OutputFormat format);
+        
+        // New adaptive cache warming methods
+        Task<Dictionary<string, PreWarmMetrics>> GetPreWarmCandidatesAsync();
+        Task<bool> PreWarmBatchAsync(IEnumerable<string> keys, PreWarmPriority priority);
+        Task<PreWarmingStrategy> OptimizePreWarmingStrategyAsync();
     }
 }
