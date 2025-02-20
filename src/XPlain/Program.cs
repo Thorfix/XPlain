@@ -635,6 +635,10 @@ file class Program
                     catch (Exception ex)
                     {
                         Console.Error.WriteLine($"Error in command processing: {ex.Message}");
+                        if (options.VerbosityLevel >= 2)
+                        {
+                            Console.WriteLine($"Full error: {ex}");
+                        }
                     }
                     finally
                     {
@@ -675,6 +679,10 @@ file class Program
             Console.WriteLine("Navigation:");
             Console.WriteLine("  exit     - Exit the application");
             Console.WriteLine("  quit     - Exit the application");
+            Console.WriteLine();
+            Console.WriteLine("Features:");
+            Console.WriteLine("  - Streaming responses enabled: " + (CommandLineOptions.EnableStreaming ? "Yes" : "No"));
+            Console.WriteLine("  - Use --enable-streaming flag to see responses in real-time");
             Console.WriteLine();
             Console.WriteLine("Type your questions about the code to analyze them.");
         }
@@ -789,8 +797,8 @@ file class Program
                               # Find specific information
                               xplain ./my-project -q "List all interfaces and their implementations"
 
-                              Output Formats
-                              -------------
+                              Output and Interaction
+                              --------------------
                               # Markdown for documentation
                               xplain ./my-project -f markdown -q "Generate API documentation"
 
@@ -799,6 +807,9 @@ file class Program
 
                               # Plain text (default)
                               xplain ./my-project -q "Explain the error handling"
+
+                              # Streaming responses (real-time output)
+                              xplain ./my-project --enable-streaming -q "Analyze the architecture"
 
                               Verbosity Levels
                               ---------------
