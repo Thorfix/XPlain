@@ -14,6 +14,7 @@ namespace XPlain.Services
         private readonly ICacheMonitoringService _monitoringService;
         private readonly IMLModelTrainingService _modelTrainingService;
         private readonly MLPredictionService _predictionService;
+        private readonly MLModelValidationService _validationService;
         private readonly ILogger<AutomaticCacheOptimizer> _logger;
         private readonly Dictionary<string, double> _baselineThresholds;
         private readonly string _strategyHistoryPath = "optimization_strategies.json";
@@ -33,6 +34,7 @@ namespace XPlain.Services
             ICacheMonitoringService monitoringService,
             IMLModelTrainingService modelTrainingService,
             MLPredictionService predictionService,
+            MLModelValidationService validationService,
             ILogger<AutomaticCacheOptimizer> logger)
         {
             _cacheProvider = cacheProvider;
