@@ -1039,6 +1039,7 @@ file class Program
             // Configure ML model settings
             services.AddSingleton<IMLModelTrainingService, MLModelTrainingService>();
             services.AddSingleton<MLPredictionService>();
+            services.AddSingleton<IInputValidator, DefaultInputValidator>();
             services.AddSingleton<IAutomaticCacheOptimizer, AutomaticCacheOptimizer>();
             services.AddSingleton<MLModelValidationService>();
             services.AddSingleton<AutomatedMLPipeline>();
