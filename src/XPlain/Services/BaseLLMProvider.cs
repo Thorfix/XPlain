@@ -55,7 +55,9 @@ public abstract class BaseLLMProvider : ILLMProvider
     }
 
 
-    public async Task<IAsyncEnumerable<string>> GetCompletionStreamAsync(string prompt)
+    public async Task<IAsyncEnumerable<string>> GetCompletionStreamAsync(
+        string prompt,
+        CancellationToken cancellationToken = default)
     {
         // Generate cache key from prompt
         var cacheKey = GenerateCacheKey(prompt);
@@ -69,27 +71,37 @@ public abstract class BaseLLMProvider : ILLMProvider
         }
 
         // Get new completion with rate limiting
-        await _rateLimitingService.AcquirePermitAsync(ProviderName);
+        await _rateLimitingService.AcquirePermitAsync(ProviderName, cancellationToken: cancellationToken);
         
         // Create a StringBuilder to accumulate the full response for caching
         var fullResponse = new StringBuilder();
 
         // Return an async stream that accumulates the response and caches it when complete
         async IAsyncEnumerable<string> StreamWithCaching(
-            [EnumeratorCancellation] CancellationToken cancellationToken = default)
+            [EnumeratorCancellation] CancellationToken streamCancellationToken)
         {
             try
             {
                 await foreach (var chunk in GetCompletionStreamInternalAsync(prompt)
-                    .WithCancellation(cancellationToken))
+                    .WithCancellation(streamCancellationToken))
                 {
+                    if (streamCancellationToken.IsCancellationRequested)
+                    {
+                        // Don't cache partial responses when cancelled
+                        _rateLimitingService.ReleasePermit(ProviderName);
+                        yield break;
+                    }
+
                     fullResponse.Append(chunk);
                     yield return chunk;
                 }
 
-                // Cache the complete response
-                var completeResponse = fullResponse.ToString();
-                await _cacheProvider.SetAsync(cacheKey, completeResponse);
+                // Only cache complete responses
+                if (!streamCancellationToken.IsCancellationRequested)
+                {
+                    var completeResponse = fullResponse.ToString();
+                    await _cacheProvider.SetAsync(cacheKey, completeResponse);
+                }
             }
             finally
             {
@@ -97,7 +109,7 @@ public abstract class BaseLLMProvider : ILLMProvider
             }
         }
 
-        return StreamWithCaching();
+        return StreamWithCaching(cancellationToken);
     }
 
     private string GenerateCacheKey(string prompt)

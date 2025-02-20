@@ -18,6 +18,19 @@ file class Program
     {
         private const string Version = "1.0.0";
         static bool _keepRunning = true;
+        private static readonly string[] ProgressIndicators = new[] { "⣾", "⣽", "⣻", "⢿", "⡿", "⣟", "⣯", "⣷" };
+        private static int _progressIndex = 0;
+        
+        private static void UpdateProgressIndicator()
+        {
+            if (Console.IsOutputRedirected) return;
+            
+            var currentPos = Console.CursorLeft;
+            Console.Write("\b \b"); // Clear previous indicator
+            Console.Write(ProgressIndicators[_progressIndex]);
+            Console.CursorLeft = currentPos;
+            _progressIndex = (_progressIndex + 1) % ProgressIndicators.Length;
+        }
 
         internal static async Task ProcessCommandInternal(CommandLineOptions options)
         {
@@ -416,12 +429,41 @@ file class Program
 
                     if (options.EnableStreaming)
                     {
-                        await using var responseStream = provider.GetCompletionStreamAsync(prompt);
-                        await foreach (var chunk in responseStream)
+                        using var cts = new CancellationTokenSource();
+                        Console.CancelKeyPress += (s, e) => {
+                            e.Cancel = true; // Prevent process termination
+                            cts.Cancel();
+                            Console.WriteLine("\nCancelling stream...");
+                        };
+
+                        try 
                         {
-                            Console.Write(chunk);
+                            if (options.VerbosityLevel >= 1)
+                            {
+                                Console.WriteLine("Streaming response (Ctrl+C to cancel):");
+                            }
+
+                            await using var responseStream = provider.GetCompletionStreamAsync(prompt);
+                            var isFirstChunk = true;
+                            var progressTimer = new Timer(_ => UpdateProgressIndicator(), null, 0, 100);
+                            
+                            await foreach (var chunk in responseStream.WithCancellation(cts.Token))
+                            {
+                                if (isFirstChunk)
+                                {
+                                    progressTimer.Dispose();
+                                    Console.Write("\b \b"); // Clear progress indicator
+                                    isFirstChunk = false;
+                                }
+                                Console.Write(chunk);
+                            }
+                            Console.WriteLine(); // Add newline after streaming response
                         }
-                        Console.WriteLine(); // Add newline after streaming response
+                        catch (OperationCanceledException)
+                        {
+                            Console.WriteLine("\nResponse stream cancelled.");
+                            return 1;
+                        }
                     }
                     else
                     {
@@ -597,15 +639,38 @@ file class Program
                                 {
                                     if (options.VerbosityLevel >= 1)
                                     {
-                                        Console.WriteLine("\nStreaming response:");
+                                        Console.WriteLine("\nStreaming response (Ctrl+C to cancel):");
                                     }
 
-                                    await using var responseStream = provider.GetCompletionStreamAsync(prompt);
-                                    await foreach (var chunk in responseStream)
+                                    using var cts = new CancellationTokenSource();
+                                    Console.CancelKeyPress += (s, e) => {
+                                        e.Cancel = true; // Prevent process termination
+                                        cts.Cancel();
+                                        Console.WriteLine("\nCancelling stream...");
+                                    };
+
+                                    try 
                                     {
-                                        Console.Write(chunk);
+                                        await using var responseStream = provider.GetCompletionStreamAsync(prompt);
+                                        var isFirstChunk = true;
+                                        var progressTimer = new Timer(_ => UpdateProgressIndicator(), null, 0, 100);
+                                        
+                                        await foreach (var chunk in responseStream.WithCancellation(cts.Token))
+                                        {
+                                            if (isFirstChunk)
+                                            {
+                                                progressTimer.Dispose();
+                                                Console.Write("\b \b"); // Clear progress indicator
+                                                isFirstChunk = false;
+                                            }
+                                            Console.Write(chunk);
+                                        }
+                                        Console.WriteLine(); // Add newline after streaming response
                                     }
-                                    Console.WriteLine(); // Add newline after streaming response
+                                    catch (OperationCanceledException)
+                                    {
+                                        Console.WriteLine("\nResponse stream cancelled.");
+                                    }
                                 }
                                 else
                                 {
@@ -679,10 +744,12 @@ file class Program
             Console.WriteLine("Navigation:");
             Console.WriteLine("  exit     - Exit the application");
             Console.WriteLine("  quit     - Exit the application");
+            Console.WriteLine("  ctrl+c   - Cancel current streaming response");
             Console.WriteLine();
             Console.WriteLine("Features:");
             Console.WriteLine("  - Streaming responses enabled: " + (CommandLineOptions.EnableStreaming ? "Yes" : "No"));
             Console.WriteLine("  - Use --enable-streaming flag to see responses in real-time");
+            Console.WriteLine("  - Press Ctrl+C to cancel streaming responses");
             Console.WriteLine();
             Console.WriteLine("Type your questions about the code to analyze them.");
         }
