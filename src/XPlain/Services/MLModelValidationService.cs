@@ -35,14 +35,157 @@ namespace XPlain.Services
         private readonly ILogger<MLModelValidationService> _logger;
         private readonly MetricsCollectionService _metricsService;
         private readonly Dictionary<string, ModelValidationState> _shadowDeployments;
+        private readonly Dictionary<string, ABTestState> _abTests;
+        private readonly IAlertManagementService _alertService;
+        private readonly TimeSeriesMetricsStore _metricsStore;
 
         public MLModelValidationService(
             ILogger<MLModelValidationService> logger,
-            MetricsCollectionService metricsService)
+            MetricsCollectionService metricsService,
+            IAlertManagementService alertService,
+            TimeSeriesMetricsStore metricsStore)
         {
             _logger = logger;
             _metricsService = metricsService;
+            _alertService = alertService;
+            _metricsStore = metricsStore;
             _shadowDeployments = new Dictionary<string, ModelValidationState>();
+            _abTests = new Dictionary<string, ABTestState>();
+        }
+
+        public async Task<string> StartABTestAsync(string modelAId, string modelBId, ABTestConfig config)
+        {
+            var testId = Guid.NewGuid().ToString();
+            _abTests[testId] = new ABTestState
+            {
+                ModelAId = modelAId,
+                ModelBId = modelBId,
+                Config = config,
+                StartTime = DateTime.UtcNow,
+                ResultsA = new List<PredictionResult>(),
+                ResultsB = new List<PredictionResult>()
+            };
+
+            await _alertService.CreateAlertAsync(new Alert
+            {
+                Title = "A/B Test Started",
+                Description = $"Started A/B test comparing models {modelAId} and {modelBId}",
+                Severity = AlertSeverity.Info,
+                Source = "ModelValidation"
+            });
+
+            return testId;
+        }
+
+        public async Task<ABTestResults> GetABTestResultsAsync(string testId)
+        {
+            if (!_abTests.TryGetValue(testId, out var state))
+            {
+                throw new KeyNotFoundException($"A/B test {testId} not found");
+            }
+
+            var statsA = CalculateModelStats(state.ResultsA);
+            var statsB = CalculateModelStats(state.ResultsB);
+            var significanceTest = PerformStatisticalTest(statsA, statsB);
+
+            await _metricsStore.StoreMetrics($"abtest_{testId}", new
+            {
+                ModelA = statsA,
+                ModelB = statsB,
+                Significance = significanceTest
+            });
+
+            return new ABTestResults
+            {
+                TestId = testId,
+                ModelAStats = statsA,
+                ModelBStats = statsB,
+                SignificanceTest = significanceTest,
+                Winner = DetermineWinner(statsA, statsB, significanceTest),
+                Duration = DateTime.UtcNow - state.StartTime,
+                SampleSizeA = state.ResultsA.Count,
+                SampleSizeB = state.ResultsB.Count
+            };
+        }
+
+        private ModelStats CalculateModelStats(List<PredictionResult> results)
+        {
+            if (results.Count == 0)
+                return new ModelStats();
+
+            var accuracies = results.Select(r => Math.Abs(r.PredictedValue - r.ActualValue) < 0.1 ? 1.0 : 0.0).ToList();
+            var latencies = results.Select(r => r.Latency).ToList();
+
+            return new ModelStats
+            {
+                Accuracy = accuracies.Average(),
+                StandardError = CalculateStandardError(accuracies),
+                MeanLatency = latencies.Average(),
+                LatencyP95 = CalculatePercentile(latencies, 0.95),
+                SampleSize = results.Count
+            };
+        }
+
+        private SignificanceTestResult PerformStatisticalTest(ModelStats statsA, ModelStats statsB)
+        {
+            // Perform two-sample z-test for proportions
+            double pooledStdErr = Math.Sqrt(
+                Math.Pow(statsA.StandardError, 2) + Math.Pow(statsB.StandardError, 2));
+
+            double zScore = (statsA.Accuracy - statsB.Accuracy) / pooledStdErr;
+            double pValue = 2 * (1 - NormalCDF(Math.Abs(zScore))); // Two-tailed test
+
+            return new SignificanceTestResult
+            {
+                TestType = "Two-Sample Z-Test",
+                ZScore = zScore,
+                PValue = pValue,
+                IsSignificant = pValue < 0.05
+            };
+        }
+
+        private double NormalCDF(double x)
+        {
+            return 0.5 * (1 + Erf(x / Math.Sqrt(2)));
+        }
+
+        private double Erf(double x)
+        {
+            // Implementation of error function approximation
+            double t = 1.0 / (1.0 + 0.5 * Math.Abs(x));
+            double tau = t * Math.Exp(-x * x - 1.26551223 +
+                                    t * (1.00002368 +
+                                    t * (0.37409196 +
+                                    t * (0.09678418 +
+                                    t * (-0.18628806 +
+                                    t * (0.27886807 +
+                                    t * (-1.13520398 +
+                                    t * (1.48851587 +
+                                    t * (-0.82215223 +
+                                    t * 0.17087277)))))))));
+            return x >= 0 ? 1 - tau : tau - 1;
+        }
+
+        private string DetermineWinner(ModelStats statsA, ModelStats statsB, SignificanceTestResult sigTest)
+        {
+            if (!sigTest.IsSignificant)
+                return "No significant difference";
+
+            return statsA.Accuracy > statsB.Accuracy ? "ModelA" : "ModelB";
+        }
+
+        private double CalculateStandardError(List<double> values)
+        {
+            double mean = values.Average();
+            double variance = values.Sum(x => Math.Pow(x - mean, 2)) / (values.Count - 1);
+            return Math.Sqrt(variance / values.Count);
+        }
+
+        private double CalculatePercentile(List<double> values, double percentile)
+        {
+            var sorted = values.OrderBy(v => v).ToList();
+            int index = (int)Math.Ceiling(percentile * sorted.Count) - 1;
+            return sorted[Math.Max(0, index)];
         }
 
         public async Task<ValidationMetrics> ValidateModelAsync(
@@ -417,7 +560,55 @@ namespace XPlain.Services
             public string Key { get; set; } = "";
             public double ActualValue { get; set; }
             public double PredictedValue { get; set; }
+            public double Latency { get; set; }
             public Dictionary<string, object> Features { get; set; } = new();
+        }
+
+        private class ABTestState
+        {
+            public string ModelAId { get; set; } = "";
+            public string ModelBId { get; set; } = "";
+            public ABTestConfig Config { get; set; } = new();
+            public DateTime StartTime { get; set; }
+            public List<PredictionResult> ResultsA { get; set; } = new();
+            public List<PredictionResult> ResultsB { get; set; } = new();
+        }
+
+        public class ABTestConfig
+        {
+            public TimeSpan Duration { get; set; } = TimeSpan.FromDays(7);
+            public int MinimumSampleSize { get; set; } = 1000;
+            public double SignificanceLevel { get; set; } = 0.05;
+            public bool TrackLatency { get; set; } = true;
+        }
+
+        public class ABTestResults
+        {
+            public string TestId { get; set; } = "";
+            public ModelStats ModelAStats { get; set; } = new();
+            public ModelStats ModelBStats { get; set; } = new();
+            public SignificanceTestResult SignificanceTest { get; set; } = new();
+            public string Winner { get; set; } = "";
+            public TimeSpan Duration { get; set; }
+            public int SampleSizeA { get; set; }
+            public int SampleSizeB { get; set; }
+        }
+
+        public class ModelStats
+        {
+            public double Accuracy { get; set; }
+            public double StandardError { get; set; }
+            public double MeanLatency { get; set; }
+            public double LatencyP95 { get; set; }
+            public int SampleSize { get; set; }
+        }
+
+        public class SignificanceTestResult
+        {
+            public string TestType { get; set; } = "";
+            public double ZScore { get; set; }
+            public double PValue { get; set; }
+            public bool IsSignificant { get; set; }
         }
     }
 }

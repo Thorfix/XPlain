@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Model Performance Dashboard</title>
+    <link rel="stylesheet" href="css/styles.css">
+    <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/microsoft-signalr/6.0.1/signalr.min.js"></script>
+</head>
+<body>
+    <div class="dashboard-container">
+        <header>
+            <h1>Model Performance Monitoring</h1>
+            <div class="time-range-selector">
+                <select id="timeRange">
+                    <option value="1h">Last Hour</option>
+                    <option value="24h" selected>Last 24 Hours</option>
+                    <option value="7d">Last 7 Days</option>
+                    <option value="30d">Last 30 Days</option>
+                </select>
+            </div>
+        </header>
+
+        <div class="metrics-grid">
+            <div class="metric-card">
+                <h3>Model Accuracy</h3>
+                <div id="accuracyChart" class="chart"></div>
+            </div>
+            <div class="metric-card">
+                <h3>F1 Score</h3>
+                <div id="f1Chart" class="chart"></div>
+            </div>
+            <div class="metric-card">
+                <h3>Latency (ms)</h3>
+                <div id="latencyChart" class="chart"></div>
+            </div>
+            <div class="metric-card">
+                <h3>Feature Distribution</h3>
+                <div id="featureDistChart" class="chart"></div>
+            </div>
+        </div>
+
+        <div class="ab-test-section">
+            <h2>A/B Test Results</h2>
+            <div id="abTestResults"></div>
+        </div>
+
+        <div class="alerts-section">
+            <h2>Recent Alerts</h2>
+            <div id="alertsList"></div>
+        </div>
+
+        <div class="rollback-history">
+            <h2>Rollback History</h2>
+            <div id="rollbackList"></div>
+        </div>
+    </div>
+
+    <script src="js/model-performance-dashboard.js"></script>
+</body>
+</html>
