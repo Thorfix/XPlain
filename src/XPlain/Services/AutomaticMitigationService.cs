@@ -90,15 +90,35 @@ namespace XPlain.Services
 
         public async Task LogIncident(string description, Dictionary<string, object> metadata)
         {
+            var severity = metadata.ContainsKey("severity") 
+                ? Enum.Parse<IncidentSeverity>(metadata["severity"].ToString()) 
+                : IncidentSeverity.Medium;
+
+            var performanceMetrics = await _validationService.ValidateCurrentModel();
+
             var incident = new MitigationIncident
             {
                 Timestamp = DateTime.UtcNow,
                 Description = description,
+                Severity = severity,
+                Category = metadata.GetValueOrDefault("category")?.ToString(),
+                CorrelationId = metadata.GetValueOrDefault("correlationId")?.ToString(),
+                AffectedUsers = metadata.ContainsKey("affectedUsers") 
+                    ? Convert.ToInt32(metadata["affectedUsers"]) 
+                    : 0,
+                PerformanceMetrics = new Dictionary<string, object>
+                {
+                    { "accuracy", performanceMetrics.Accuracy },
+                    { "f1Score", performanceMetrics.F1Score },
+                    { "latency", performanceMetrics.AverageLatency }
+                },
                 Metadata = metadata
             };
 
             _incidentHistory.Add(incident);
-            _logger.LogInformation("Incident logged: {Description}", description);
+            _logger.LogInformation(
+                "Incident logged: {Description} [Severity: {Severity}, Category: {Category}, CorrelationId: {CorrelationId}]",
+                description, severity, incident.Category, incident.CorrelationId);
         }
 
         public async Task<List<MitigationIncident>> GetIncidentHistory()
@@ -107,10 +127,25 @@ namespace XPlain.Services
         }
     }
 
+    public enum IncidentSeverity
+    {
+        Low,
+        Medium,
+        High,
+        Critical
+    }
+
     public class MitigationIncident
     {
+        public string Id { get; set; } = Guid.NewGuid().ToString();
         public DateTime Timestamp { get; set; }
         public string Description { get; set; }
+        public IncidentSeverity Severity { get; set; }
+        public string Category { get; set; }
+        public string CorrelationId { get; set; }
+        public int AffectedUsers { get; set; }
+        public Dictionary<string, object> PerformanceMetrics { get; set; }
         public Dictionary<string, object> Metadata { get; set; }
+        public TimeSpan? RecoveryTime { get; set; }
     }
 }
