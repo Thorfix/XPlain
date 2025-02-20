@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Model Performance Alerts Dashboard</title>
+    <link rel="stylesheet" href="css/styles.css">
+</head>
+<body>
+    <div class="dashboard-container">
+        <h1>Model Performance Alerts Dashboard</h1>
+        
+        <div class="alert-stats">
+            <div class="stat-card">
+                <h3>Active Alerts</h3>
+                <div id="active-alerts-count">0</div>
+            </div>
+            <div class="stat-card">
+                <h3>Critical Alerts</h3>
+                <div id="critical-alerts-count">0</div>
+            </div>
+            <div class="stat-card">
+                <h3>Resolved Today</h3>
+                <div id="resolved-today-count">0</div>
+            </div>
+        </div>
+
+        <div class="alert-filters">
+            <select id="severity-filter">
+                <option value="all">All Severities</option>
+                <option value="critical">Critical</option>
+                <option value="warning">Warning</option>
+                <option value="info">Info</option>
+            </select>
+            <select id="status-filter">
+                <option value="all">All Statuses</option>
+                <option value="new">New</option>
+                <option value="acknowledged">Acknowledged</option>
+                <option value="resolved">Resolved</option>
+            </select>
+            <input type="date" id="date-filter" />
+        </div>
+
+        <div class="alert-list">
+            <h2>Active Alerts</h2>
+            <div id="active-alerts"></div>
+        </div>
+
+        <div class="alert-history">
+            <h2>Alert History</h2>
+            <div id="alert-history"></div>
+        </div>
+
+        <div class="alert-trends">
+            <h2>Alert Trends</h2>
+            <canvas id="alert-trend-chart"></canvas>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="js/alert-dashboard.js"></script>
+</body>
+</html>

@@ -343,6 +343,26 @@ file class Program
                    .WithName("GetCacheMetrics")
                    .WithOpenApi();
 
+                app.MapGet("/api/alerts", async (IAlertManagementService alertService) =>
+                    await alertService.GetActiveAlertsAsync())
+                   .WithName("GetAlerts")
+                   .WithOpenApi();
+
+                app.MapGet("/api/alerts/history", async (IAlertManagementService alertService, [FromQuery] DateTime startDate, [FromQuery] DateTime endDate) =>
+                    await alertService.GetAlertHistoryAsync(startDate, endDate))
+                   .WithName("GetAlertHistory")
+                   .WithOpenApi();
+
+                app.MapPost("/api/alerts/{alertId}/acknowledge", async (string alertId, IAlertManagementService alertService) =>
+                    await alertService.AcknowledgeAlertAsync(alertId))
+                   .WithName("AcknowledgeAlert")
+                   .WithOpenApi();
+
+                app.MapPost("/api/alerts/{alertId}/resolve", async (string alertId, IAlertManagementService alertService) =>
+                    await alertService.ResolveAlertAsync(alertId))
+                   .WithName("ResolveAlert")
+                   .WithOpenApi();
+
                 app.MapGet("/api/cache/alerts", async (ICacheMonitoringService monitoring) =>
                     await monitoring.GetActiveAlertsAsync())
                    .WithName("GetCacheAlerts")
@@ -1032,9 +1052,16 @@ file class Program
             services.AddSingleton<ICacheMonitoringService, CacheMonitoringService>();
             services.AddSingleton<ICacheProvider, FileBasedCacheProvider>();
             
-            // Configure ML model monitoring
+            // Configure ML model monitoring and alerting
             services.AddSingleton<IModelPerformanceMonitor, ModelPerformanceMonitor>();
             services.AddSingleton<IAutomaticMitigationService, AutomaticMitigationService>();
+            services.AddSingleton<IAlertManagementService, AlertManagementService>();
+            services.AddSingleton<INotificationService, NotificationService>();
+
+            // Configure alert settings
+            var alertSettings = new AlertSettings();
+            configuration.GetSection("Alert").Bind(alertSettings);
+            services.AddSingleton(Options.Create(alertSettings));
 
             // Configure metrics settings
             var metricsSettings = new MetricsSettings();
