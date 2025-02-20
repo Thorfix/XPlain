@@ -485,6 +485,337 @@ namespace XPlain.Tests.Services
                 Convert.ToBase64String(SHA256.HashData(Encoding.UTF8.GetBytes(expiredKey))) + ".json")));
         }
 
+        [Fact]
+        public async Task ConcurrentOperations_MaintainsCacheConsistency()
+        {
+            // Arrange 
+            var iterations = 1000;
+            var concurrentTasks = new List<Task>();
+            var expectedFinalValue = "final_value";
+            var key = "consistency_test_key";
+
+            // Act - Multiple concurrent reads and writes to same key
+            for (int i = 0; i < iterations; i++)
+            {
+                concurrentTasks.Add(_cacheProvider.SetAsync(key, $"value_{i}"));
+                concurrentTasks.Add(_cacheProvider.GetAsync<string>(key));
+                if (i == iterations - 1)
+                {
+                    // Ensure we know the final value that should be stored
+                    await _cacheProvider.SetAsync(key, expectedFinalValue);
+                }
+            }
+
+            await Task.WhenAll(concurrentTasks);
+
+            // Assert
+            var finalValue = await _cacheProvider.GetAsync<string>(key);
+            Assert.Equal(expectedFinalValue, finalValue);
+
+            // Verify no partial/corrupt files exist
+            var tempFiles = Directory.GetFiles(_testDirectory, "*.tmp");
+            Assert.Empty(tempFiles);
+
+            // Verify WAL is clean
+            var walFiles = Directory.GetFiles(Path.Combine(_testDirectory, "wal"));
+            Assert.Empty(walFiles);
+        }
+
+        [Fact]
+        public async Task EncryptionKeyRotation_PreservesData()
+        {
+            // Arrange
+            var key = "rotation_test_key";
+            var value = "sensitive_data";
+            await _cacheProvider.SetAsync(key, value);
+
+            // Get original encrypted file content
+            var filePath = Path.Combine(_testDirectory,
+                Convert.ToBase64String(SHA256.HashData(Encoding.UTF8.GetBytes(key))) + ".json");
+            var originalEncrypted = await File.ReadAllBytesAsync(filePath);
+
+            // Act - Create new provider with different encryption key
+            var newSettings = _defaultSettings with
+            {
+                EncryptionKey = Convert.ToBase64String(Aes.Create().Key)
+            };
+            var newProvider = new FileBasedCacheProvider(
+                Options.Create(newSettings),
+                _llmProviderMock.Object);
+
+            // Assert
+            var retrievedValue = await newProvider.GetAsync<string>(key);
+            Assert.Equal(value, retrievedValue);
+
+            // Verify file was re-encrypted
+            var newEncrypted = await File.ReadAllBytesAsync(filePath);
+            Assert.NotEqual(originalEncrypted, newEncrypted);
+        }
+
+        [Fact]
+        public async Task BackupRotation_ManagesStorageEfficiently()
+        {
+            // Arrange
+            var maxBackups = 5;
+            var backupDelay = 100; // ms between backups
+
+            // Act - Create multiple backups
+            for (int i = 0; i < maxBackups + 3; i++)
+            {
+                await _cacheProvider.SetAsync($"backup_key_{i}", $"backup_value_{i}");
+                await Task.Delay(backupDelay); // Wait for backup
+            }
+
+            // Assert
+            var backupFiles = Directory.GetFiles(Path.Combine(_testDirectory, "backups"))
+                .OrderByDescending(f => f)
+                .ToList();
+
+            // Verify only maxBackups are kept
+            Assert.Equal(maxBackups, backupFiles.Count);
+
+            // Verify backups are ordered correctly (newest first)
+            for (int i = 1; i < backupFiles.Count; i++)
+            {
+                var current = File.GetCreationTimeUtc(backupFiles[i - 1]);
+                var previous = File.GetCreationTimeUtc(backupFiles[i]);
+                Assert.True(current > previous);
+            }
+        }
+
+        [Fact]
+        public async Task AtomicOperations_HandlesMultiStepFailures()
+        {
+            // Arrange
+            var key = "atomic_test_key";
+            var value = "atomic_test_value";
+            var failurePoints = new List<string> { "temp", "wal", "main" };
+
+            foreach (var failPoint in failurePoints)
+            {
+                // Act - Simulate failure at different points
+                var succeeded = false;
+                try
+                {
+                    await _cacheProvider.SetAsync(key, value);
+
+                    // Simulate failure
+                    switch (failPoint)
+                    {
+                        case "temp":
+                            // Corrupt temp files during write
+                            foreach (var file in Directory.GetFiles(_testDirectory, "*.tmp"))
+                            {
+                                File.WriteAllText(file, "corrupted");
+                            }
+                            break;
+
+                        case "wal":
+                            // Corrupt WAL files
+                            foreach (var file in Directory.GetFiles(Path.Combine(_testDirectory, "wal")))
+                            {
+                                File.WriteAllText(file, "corrupted");
+                            }
+                            break;
+
+                        case "main":
+                            // Corrupt main cache file
+                            var cacheFile = Directory.GetFiles(_testDirectory, "*.json").First();
+                            File.WriteAllText(cacheFile, "corrupted");
+                            break;
+                    }
+
+                    // Try to read the value
+                    var retrieved = await _cacheProvider.GetAsync<string>(key);
+                    succeeded = retrieved == value;
+                }
+                catch
+                {
+                    // Expected for some failure points
+                }
+
+                // Assert - Data should either be fully written or not at all
+                var finalValue = await _cacheProvider.GetAsync<string>(key);
+                if (succeeded)
+                {
+                    Assert.Equal(value, finalValue);
+                }
+                else
+                {
+                    Assert.Null(finalValue);
+                }
+
+                // Cleanup for next iteration
+                await _cacheProvider.RemoveAsync(key);
+            }
+        }
+
+        [Fact]
+        public async Task EnvironmentSpecificPaths_HandledCorrectly()
+        {
+            // Arrange
+            var platformSpecificPaths = new[]
+            {
+                "folder\\subfolder\\file", // Windows style
+                "folder/subfolder/file",   // Unix style
+                "folder\\mixed/path/style\\test", // Mixed
+                Path.Combine("folder", "subfolder", "file"), // Platform-native
+                "folder name with spaces/file",
+                "földer/文件/file", // Unicode paths
+                @"C:\absolute\windows\path", // Windows absolute
+                "/absolute/unix/path",       // Unix absolute
+                "./relative/path",           // Relative paths
+                "../parent/path"            // Parent directory
+            };
+
+            // Act & Assert
+            foreach (var path in platformSpecificPaths)
+            {
+                var key = $"path_test_{path}";
+                var value = "test_value";
+
+                await _cacheProvider.SetAsync(key, value);
+                var retrieved = await _cacheProvider.GetAsync<string>(key);
+                Assert.Equal(value, retrieved);
+
+                // Verify file exists with safe name
+                var safePath = Convert.ToBase64String(
+                    SHA256.HashData(Encoding.UTF8.GetBytes(key))) + ".json";
+                Assert.True(File.Exists(Path.Combine(_testDirectory, safePath)));
+            }
+        }
+
+        [Fact]
+        public async Task SensitiveData_StorageAndCleanup()
+        {
+            // Arrange
+            var sensitiveKey = "sensitive_key";
+            var sensitiveValue = "sensitive_data_" + Guid.NewGuid().ToString();
+            var filePath = "";
+
+            // Act
+            await _cacheProvider.SetAsync(sensitiveKey, sensitiveValue);
+            
+            // Find the file where data is stored
+            filePath = Directory.GetFiles(_testDirectory, "*.json")
+                .First(f => File.ReadAllText(f).Contains(
+                    Convert.ToBase64String(SHA256.HashData(Encoding.UTF8.GetBytes(sensitiveKey)))));
+
+            // Read raw file content
+            var rawContent = await File.ReadAllTextAsync(filePath);
+
+            // Assert
+            // Verify sensitive data is not stored in plain text
+            Assert.DoesNotContain(sensitiveValue, rawContent);
+
+            // Cleanup
+            await _cacheProvider.RemoveAsync(sensitiveKey);
+
+            // Verify cleanup
+            Assert.False(File.Exists(filePath));
+
+            // Check WAL and backup files don't contain plaintext
+            var allFiles = Directory.GetFiles(_testDirectory, "*.*", SearchOption.AllDirectories);
+            foreach (var file in allFiles)
+            {
+                var content = await File.ReadAllTextAsync(file);
+                Assert.DoesNotContain(sensitiveValue, content);
+            }
+        }
+
+        [Fact]
+        public async Task CodeChange_CacheConsistency()
+        {
+            // Arrange
+            var codeVersions = new[] 
+            {
+                "v1_hash",
+                "v2_hash",
+                "v3_hash"
+            };
+
+            var testData = new Dictionary<string, string>
+            {
+                {"key1", "value1"},
+                {"key2", "value2"},
+                {"key3", "value3"}
+            };
+
+            // Act & Assert
+            foreach (var version in codeVersions)
+            {
+                // Add data for this version
+                foreach (var (key, value) in testData)
+                {
+                    await _cacheProvider.SetAsync(key, value);
+                }
+
+                // Simulate code change
+                await _cacheProvider.InvalidateOnCodeChangeAsync(version);
+
+                // Verify all cache entries are invalidated
+                foreach (var key in testData.Keys)
+                {
+                    var result = await _cacheProvider.GetAsync<string>(key);
+                    Assert.Null(result);
+                }
+
+                // Verify cache files are cleaned up
+                var jsonFiles = Directory.GetFiles(_testDirectory, "*.json");
+                Assert.Empty(jsonFiles);
+            }
+        }
+
+        [Fact]
+        public async Task ConcurrentDictionary_Operations()
+        {
+            // Arrange
+            var concurrentKeys = Enumerable.Range(0, 1000)
+                .Select(i => $"concurrent_key_{i}")
+                .ToArray();
+
+            // Act
+            // Test concurrent additions
+            await Task.WhenAll(concurrentKeys.Select(async key =>
+            {
+                await _cacheProvider.SetAsync(key, "value");
+                Assert.True(await _cacheProvider.ExistsAsync(key));
+            }));
+
+            // Test concurrent reads
+            await Task.WhenAll(concurrentKeys.Select(async key =>
+            {
+                var value = await _cacheProvider.GetAsync<string>(key);
+                Assert.Equal("value", value);
+            }));
+
+            // Test concurrent updates
+            await Task.WhenAll(concurrentKeys.Select(async key =>
+            {
+                await _cacheProvider.SetAsync(key, "updated");
+                var value = await _cacheProvider.GetAsync<string>(key);
+                Assert.Equal("updated", value);
+            }));
+
+            // Test concurrent removals
+            await Task.WhenAll(concurrentKeys.Select(async key =>
+            {
+                await _cacheProvider.RemoveAsync(key);
+                Assert.False(await _cacheProvider.ExistsAsync(key));
+            }));
+
+            // Assert
+            // Verify final state
+            foreach (var key in concurrentKeys)
+            {
+                Assert.False(await _cacheProvider.ExistsAsync(key));
+            }
+
+            // Verify no orphaned files
+            var remainingFiles = Directory.GetFiles(_testDirectory, "*.json");
+            Assert.Empty(remainingFiles);
+        }
+
         public void Dispose()
         {
             try
