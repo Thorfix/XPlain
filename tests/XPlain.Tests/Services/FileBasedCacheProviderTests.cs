@@ -872,6 +872,42 @@ namespace XPlain.Tests.Services
         }
 
         [Fact]
+        public async Task WALRecovery_HandlesCorruptedWALEntries()
+        {
+            // Arrange
+            var key = "corrupted_wal_key";
+            var value = "corrupted_wal_value";
+            var walDir = Path.Combine(_testDirectory, "wal");
+
+            // Act
+            await _cacheProvider.SetAsync(key, value);
+
+            // Corrupt WAL file but preserve structure
+            var walFiles = Directory.GetFiles(walDir);
+            Assert.NotEmpty(walFiles);
+            var walContent = await File.ReadAllTextAsync(walFiles[0]);
+            var corruptedWal = walContent.Replace(value, "corrupted_value");
+            await File.WriteAllTextAsync(walFiles[0], corruptedWal);
+
+            // Corrupt cache file to force WAL recovery
+            var cacheFile = Directory.GetFiles(_testDirectory, "*.json").First();
+            File.WriteAllText(cacheFile, "corrupted");
+
+            // Create new provider to trigger recovery
+            var newProvider = new FileBasedCacheProvider(
+                Options.Create(_defaultSettings),
+                _llmProviderMock.Object);
+
+            // Assert
+            var recoveredValue = await newProvider.GetAsync<string>(key);
+            // Should fail WAL recovery and fallback to backup or clean state
+            Assert.Null(recoveredValue);
+
+            // Verify WAL files are cleaned up
+            Assert.Empty(Directory.GetFiles(walDir));
+        }
+
+        [Fact]
         public async Task ErrorRecoveryChain_WALToBackupToClean()
         {
             // Arrange
@@ -1083,6 +1119,93 @@ namespace XPlain.Tests.Services
             // Verify cache state
             var cacheStats = _cacheProvider.GetCacheStats();
             Assert.Equal(totalOperations, cacheStats.Hits + cacheStats.Misses);
+        }
+
+        [Fact]
+        public async Task EncryptionTest_ValidatesKeySize()
+        {
+            // Arrange
+            var invalidKeySizes = new[] { 64, 96, 512 }; // Invalid AES key sizes
+            var validKeySizes = new[] { 128, 192, 256 }; // Valid AES key sizes
+
+            foreach (var keySize in invalidKeySizes)
+            {
+                var settings = _defaultSettings with
+                {
+                    EncryptionEnabled = true,
+                    EncryptionAlgorithm = "AES",
+                    EncryptionKeySize = keySize
+                };
+
+                // Act & Assert
+                var exception = await Assert.ThrowsAnyAsync<CryptographicException>(() =>
+                {
+                    var provider = new FileBasedCacheProvider(
+                        Options.Create(settings),
+                        _llmProviderMock.Object);
+                    return Task.CompletedTask;
+                });
+                Assert.Contains("key size", exception.Message.ToLower());
+            }
+
+            // Verify valid key sizes work
+            foreach (var keySize in validKeySizes)
+            {
+                var settings = _defaultSettings with
+                {
+                    EncryptionEnabled = true,
+                    EncryptionAlgorithm = "AES",
+                    EncryptionKeySize = keySize
+                };
+
+                var provider = new FileBasedCacheProvider(
+                    Options.Create(settings),
+                    _llmProviderMock.Object);
+
+                // Test encryption with this key size works
+                var testKey = $"key_size_{keySize}";
+                var testValue = "test_value";
+                await provider.SetAsync(testKey, testValue);
+                var result = await provider.GetAsync<string>(testKey);
+                Assert.Equal(testValue, result);
+            }
+        }
+
+        [Fact]
+        public async Task ConcurrencyTest_DeadlockPrevention()
+        {
+            // Arrange
+            var key1 = "deadlock_key_1";
+            var key2 = "deadlock_key_2";
+            var value1 = "value1";
+            var value2 = "value2";
+            var completedOperations = 0;
+
+            // Act - Simulate potential deadlock scenario
+            var task1 = Task.Run(async () =>
+            {
+                await _cacheProvider.SetAsync(key1, value1);
+                await Task.Delay(100); // Force delay to increase chance of deadlock
+                await _cacheProvider.GetAsync<string>(key2);
+                Interlocked.Increment(ref completedOperations);
+            });
+
+            var task2 = Task.Run(async () =>
+            {
+                await _cacheProvider.SetAsync(key2, value2);
+                await Task.Delay(100);
+                await _cacheProvider.GetAsync<string>(key1);
+                Interlocked.Increment(ref completedOperations);
+            });
+
+            // Assert
+            var completedInTime = Task.WaitAll(new[] { task1, task2 }, TimeSpan.FromSeconds(5));
+            Assert.True(completedInTime, "Operations timed out, possible deadlock");
+            Assert.Equal(2, completedOperations);
+
+            // Verify final state
+            Assert.Equal(value1, await _cacheProvider.GetAsync<string>(key1));
+            Assert.Equal(value2, await _cacheProvider.GetAsync<string>(key2));
         }
 
         [Fact]
@@ -1717,6 +1840,101 @@ namespace XPlain.Tests.Services
                 var writeNum = int.Parse(op.Split('_')[1]);
                 var corresponding = orderedOps.FirstOrDefault(o => o == $"read_{writeNum}");
                 Assert.NotNull(corresponding);
+            }
+        }
+
+        [Fact]
+        public async Task Performance_StressTest()
+        {
+            // Arrange
+            var iterationCounts = new[] { 100, 1000, 5000 };
+            var results = new List<(int iterations, double avgWrite, double avgRead, double avgConc)>();
+
+            foreach (var iterations in iterationCounts)
+            {
+                var writeResults = new ConcurrentBag<double>();
+                var readResults = new ConcurrentBag<double>();
+                var concurrentResults = new ConcurrentBag<double>();
+                
+                // Act
+                // Test sequential writes
+                for (int i = 0; i < iterations; i++)
+                {
+                    var sw = Stopwatch.StartNew();
+                    await _cacheProvider.SetAsync($"perf_key_{i}", $"value_{i}");
+                    sw.Stop();
+                    writeResults.Add(sw.ElapsedMilliseconds);
+                }
+
+                // Test sequential reads
+                for (int i = 0; i < iterations; i++)
+                {
+                    var sw = Stopwatch.StartNew();
+                    var result = await _cacheProvider.GetAsync<string>($"perf_key_{i}");
+                    sw.Stop();
+                    readResults.Add(sw.ElapsedMilliseconds);
+                    Assert.NotNull(result);
+                }
+
+                // Test concurrent operations
+                var tasks = new List<Task>();
+                for (int i = 0; i < iterations; i++)
+                {
+                    var current = i;
+                    tasks.Add(Task.Run(async () =>
+                    {
+                        var sw = Stopwatch.StartNew();
+                        if (current % 2 == 0)
+                        {
+                            await _cacheProvider.SetAsync($"conc_key_{current}", $"value_{current}");
+                        }
+                        else
+                        {
+                            var key = $"conc_key_{current - 1}";
+                            if (await _cacheProvider.ExistsAsync(key))
+                            {
+                                await _cacheProvider.GetAsync<string>(key);
+                            }
+                        }
+                        sw.Stop();
+                        concurrentResults.Add(sw.ElapsedMilliseconds);
+                    }));
+                }
+                await Task.WhenAll(tasks);
+
+                results.Add((
+                    iterations,
+                    writeResults.Average(),
+                    readResults.Average(),
+                    concurrentResults.Average()
+                ));
+            }
+
+            // Assert
+            foreach (var (iters, avgWrite, avgRead, avgConc) in results)
+            {
+                // Reads should be faster than writes
+                Assert.True(avgRead < avgWrite * 1.5);
+
+                // Performance should scale reasonably with load
+                var baselineWrite = results.First().avgWrite;
+                var baselineRead = results.First().avgRead;
+                var writeDegradation = avgWrite / baselineWrite;
+                var readDegradation = avgRead / baselineRead;
+
+                // Allow for some performance degradation at scale, but not exponential
+                Assert.True(writeDegradation < Math.Log10(iters));
+                Assert.True(readDegradation < Math.Log10(iters));
+
+                // Concurrent operations shouldn't be drastically slower
+                Assert.True(avgConc < avgWrite * 2);
+
+                // Log performance metrics
+                await _cacheProvider.LogQueryStatsAsync(
+                    $"stress_test_{iters}",
+                    "performance_test",
+                    avgWrite + avgRead + avgConc / 3,
+                    true);
             }
         }
 
