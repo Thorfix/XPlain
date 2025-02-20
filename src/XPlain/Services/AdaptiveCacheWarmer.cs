@@ -10,6 +10,7 @@ namespace XPlain.Services
 {
     public class AdaptiveCacheWarmer : IHostedService, IDisposable
     {
+        private bool _disposed;
         private readonly ICacheProvider _cacheProvider;
         private readonly MLPredictionService _mlPredictionService;
         private readonly MLModelTrainingService _mlModelTrainingService;
@@ -216,10 +217,15 @@ namespace XPlain.Services
             {
                 var startTime = DateTime.UtcNow;
                 var startMemory = GC.GetTotalMemory(false);
-                var baselineHitRate = _cacheProvider.GetCacheStats().HitRatio;
+                var stats = _cacheProvider.GetCacheStats();
+                var baselineHitRate = stats.HitRatio;
                 var resourceMetrics = await _resourceMonitor.GetResourceMetricsAsync();
 
-                // Check if system can handle pre-warming
+                // Get predictions for cache needs
+                var trainingData = await PrepareTrainingData(stats);
+                var predictions = await _mlModelTrainingService.PredictCacheValuesAsync(trainingData);
+                
+                // Get current system state
                 if (!resourceMetrics.CanHandleAdditionalLoad(100)) // Assume 100MB baseline
                 {
                     _logger.LogWarning(
@@ -228,8 +234,24 @@ namespace XPlain.Services
                         resourceMetrics.MemoryUsageMB);
                     return;
                 }
+                // Get optimized strategy and candidates
                 var strategy = await _cacheProvider.OptimizePreWarmingStrategyAsync();
                 var candidates = await _cacheProvider.GetPreWarmCandidatesAsync();
+                
+                // Enhance candidates with ML predictions
+                foreach (var (key, metrics) in candidates)
+                {
+                    if (predictions.TryGetValue(key, out var predictedValue))
+                    {
+                        // Adjust priority based on ML predictions
+                        var adjustedPriority = AdjustPriorityBasedOnPrediction(
+                            metrics.RecommendedPriority,
+                            predictedValue,
+                            stats.AverageResponseTimes.GetValueOrDefault(key));
+                        
+                        strategy.KeyPriorities[key] = adjustedPriority;
+                    }
+                }
                 
                 // Group candidates by priority
                 var priorityGroups = candidates
