@@ -215,6 +215,18 @@ file class Program
                 var serviceProvider = ConfigureServices(options);
                 var llmFactory = serviceProvider.GetRequiredService<LLMProviderFactory>();
                 var provider = llmFactory.CreateProvider(options.Provider);
+                var cacheProvider = serviceProvider.GetRequiredService<ICacheProvider>();
+
+                // Initialize cache with code hash and warm up
+                var codeHash = await CalculateCodeHashAsync(options.CodebasePath);
+                await cacheProvider.InvalidateOnCodeChangeAsync(codeHash);
+                
+                var cacheSettings = serviceProvider.GetRequiredService<IOptions<CacheSettings>>().Value;
+                if (cacheSettings.FrequentQuestions.Length > 0)
+                {
+                    var codeContext = BuildCodeContext(options.CodebasePath);
+                    await cacheProvider.WarmupCacheAsync(cacheSettings.FrequentQuestions, codeContext);
+                }
 
                 if (provider is IAnthropicClient anthropicClient && !await anthropicClient.ValidateApiConnection())
                 {
@@ -226,6 +238,10 @@ file class Program
                 {
                     Console.WriteLine($"Using LLM Provider: {provider.ProviderName} with model: {provider.ModelName}");
                     Console.WriteLine("Configuration loaded and API connection validated successfully!");
+                    
+                    var cacheProvider = serviceProvider.GetRequiredService<ICacheProvider>();
+                    var (hits, misses) = cacheProvider.GetCacheStats();
+                    Console.WriteLine($"Cache stats - Hits: {hits}, Misses: {misses}, Hit Rate: {(hits + misses == 0 ? 0 : hits * 100.0 / (hits + misses)):F1}%");
                 }
 
                 if (options.InteractiveMode)
@@ -638,6 +654,12 @@ file class Program
 
             // Create service collection
             IServiceCollection services = new ServiceCollection();
+
+            // Configure cache settings
+            var cacheSettings = new CacheSettings();
+            configuration.GetSection("Cache").Bind(cacheSettings);
+            services.AddSingleton(Options.Create(cacheSettings));
+            services.AddSingleton<ICacheProvider, FileBasedCacheProvider>();
 
             // Configure settings
             var llmSettings = new LLMSettings();
