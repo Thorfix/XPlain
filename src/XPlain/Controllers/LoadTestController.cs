@@ -83,6 +83,13 @@ namespace XPlain.Controllers
             var metrics = await _loadTestEngine.GetCurrentMetricsAsync();
             return Ok(metrics);
         }
+
+        [HttpGet("behavior-report")]
+        public async Task<ActionResult<BehaviorSummaryReport>> GetBehaviorReport()
+        {
+            var report = await _loadTestEngine.GetBehaviorReport();
+            return Ok(report);
+        }
     }
 
     public class LoadTestRequest

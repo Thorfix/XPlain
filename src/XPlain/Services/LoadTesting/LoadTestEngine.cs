@@ -15,13 +15,22 @@ namespace XPlain.Services.LoadTesting
         private readonly object _lock = new();
         private readonly MLModelTrainingService _mlTrainingService;
         private readonly ConcurrentQueue<TrainingDataPoint> _trainingData = new();
+        private readonly CacheBehaviorAnalyzer _behaviorAnalyzer;
 
         public LoadTestEngine(
             ILogger<LoadTestEngine> logger,
-            MLModelTrainingService mlTrainingService)
+            MLModelTrainingService mlTrainingService,
+            MLPredictionService mlPredictionService,
+            ICacheProvider cacheProvider)
         {
             _logger = logger;
             _mlTrainingService = mlTrainingService;
+            _behaviorAnalyzer = new CacheBehaviorAnalyzer(mlPredictionService, cacheProvider);
+        }
+
+        public async Task<BehaviorSummaryReport> GetBehaviorReport()
+        {
+            return await _behaviorAnalyzer.GenerateSummaryReport();
         }
 
         private void CollectTrainingData(string query, bool cacheHit, bool predictionCorrect, double responseTime)
