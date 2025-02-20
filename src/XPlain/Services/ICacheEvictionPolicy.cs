@@ -34,6 +34,9 @@ namespace XPlain.Services
         public DateTime LastAccess { get; init; }
         public DateTime CreationTime { get; init; }
         public int AccessCount { get; init; }
+        public long EvictionCount { get; init; }
+        public double AverageResponseTime { get; init; }
+        public string QueryComplexity { get; init; }
     }
 
     public record CacheAccessStats
@@ -42,5 +45,32 @@ namespace XPlain.Services
         public long TotalMisses { get; init; }
         public Dictionary<string, int> QueryTypeFrequency { get; init; } = new();
         public Dictionary<string, double> AverageResponseTimes { get; init; } = new();
+        public double ReadWriteRatio { get; init; }
+        public Dictionary<string, string> AccessPatterns { get; init; } = new();
+        public Dictionary<string, double> DataSizeDistribution { get; init; } = new();
+        public Dictionary<string, List<DateTime>> TemporalPatterns { get; init; } = new();
+        public Dictionary<string, double> PolicyPerformance { get; init; } = new();
+        public double MemoryUtilization { get; init; }
+        public double HitRateImpact { get; init; }
+        public int UnnecessaryEvictions { get; init; }
+    }
+
+    public interface IEvictionPolicyMetrics
+    {
+        double HitRate { get; }
+        double MemoryEfficiency { get; }
+        double AverageResponseTime { get; }
+        double ResourceUtilization { get; }
+        double EvictionAccuracy { get; }
+        Dictionary<string, double> CustomMetrics { get; }
+    }
+
+    public record PolicySwitchEvent
+    {
+        public string FromPolicy { get; init; }
+        public string ToPolicy { get; init; }
+        public DateTime Timestamp { get; init; }
+        public Dictionary<string, double> PerformanceImpact { get; init; }
+        public string Reason { get; init; }
     }
 }
