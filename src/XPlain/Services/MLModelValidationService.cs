@@ -1,8 +1,10 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using Microsoft.ML;
+using Microsoft.ML.Data;
 
 namespace XPlain.Services
 {
@@ -18,6 +20,14 @@ namespace XPlain.Services
     {
         public Dictionary<string, object> Features { get; set; } = new();
         public float ExpectedValue { get; set; }
+        public PredictionKind PredictionKind { get; set; }
+    }
+
+    public enum PredictionKind
+    {
+        BinaryClassification,
+        MulticlassClassification,
+        Regression
     }
 
     public class MLModelValidationService
@@ -212,28 +222,186 @@ namespace XPlain.Services
             }
         }
 
+        /// <summary>
+        /// Calculates the accuracy metric for the model using ML.NET evaluation APIs.
+        /// For binary and multiclass classification, this represents the ratio of correct predictions.
+        /// For regression, this represents R-squared score.
+        /// </summary>
         private double CalculateAccuracy(ITransformer model, TestData testData)
         {
-            // Simplified accuracy calculation
-            return 0.95; // TODO: Implement actual calculation
+            try
+            {
+                var mlContext = new MLContext();
+                
+                // Create IDataView from test data
+                var dataView = CreateDataView(mlContext, testData);
+                
+                // Transform data using the model
+                var transformedData = model.Transform(dataView);
+                
+                switch (testData.PredictionKind)
+                {
+                    case PredictionKind.BinaryClassification:
+                        var binaryMetrics = mlContext.BinaryClassification.Evaluate(transformedData);
+                        return binaryMetrics.Accuracy;
+                        
+                    case PredictionKind.MulticlassClassification:
+                        var multiMetrics = mlContext.MulticlassClassification.Evaluate(transformedData);
+                        return multiMetrics.MicroAccuracy;
+                        
+                    case PredictionKind.Regression:
+                        var regMetrics = mlContext.Regression.Evaluate(transformedData);
+                        return regMetrics.RSquared;
+                        
+                    default:
+                        throw new ArgumentException($"Unsupported prediction kind: {testData.PredictionKind}");
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error calculating accuracy metric");
+                throw new InvalidOperationException("Failed to calculate accuracy metric", ex);
+            }
         }
 
+        /// <summary>
+        /// Calculates the F1 score, which is the harmonic mean of precision and recall.
+        /// Only applicable for classification tasks.
+        /// </summary>
         private double CalculateF1Score(ITransformer model, TestData testData)
         {
-            // Simplified F1 score calculation
-            return 0.92; // TODO: Implement actual calculation
+            try
+            {
+                if (testData.PredictionKind == PredictionKind.Regression)
+                {
+                    throw new ArgumentException("F1 Score is not applicable for regression tasks");
+                }
+
+                var mlContext = new MLContext();
+                var dataView = CreateDataView(mlContext, testData);
+                var transformedData = model.Transform(dataView);
+
+                if (testData.PredictionKind == PredictionKind.BinaryClassification)
+                {
+                    var metrics = mlContext.BinaryClassification.Evaluate(transformedData);
+                    return metrics.F1Score;
+                }
+                else
+                {
+                    var metrics = mlContext.MulticlassClassification.Evaluate(transformedData);
+                    return metrics.MacroF1Score;
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error calculating F1 score metric");
+                throw new InvalidOperationException("Failed to calculate F1 score metric", ex);
+            }
         }
 
+        /// <summary>
+        /// Calculates precision, which is the ratio of true positives to total predicted positives.
+        /// Only applicable for classification tasks.
+        /// </summary>
         private double CalculatePrecision(ITransformer model, TestData testData)
         {
-            // Simplified precision calculation
-            return 0.94; // TODO: Implement actual calculation
+            try
+            {
+                if (testData.PredictionKind == PredictionKind.Regression)
+                {
+                    throw new ArgumentException("Precision is not applicable for regression tasks");
+                }
+
+                var mlContext = new MLContext();
+                var dataView = CreateDataView(mlContext, testData);
+                var transformedData = model.Transform(dataView);
+
+                if (testData.PredictionKind == PredictionKind.BinaryClassification)
+                {
+                    var metrics = mlContext.BinaryClassification.Evaluate(transformedData);
+                    return metrics.PositivePrecision;
+                }
+                else
+                {
+                    var metrics = mlContext.MulticlassClassification.Evaluate(transformedData);
+                    return metrics.MacroPrecision;
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error calculating precision metric");
+                throw new InvalidOperationException("Failed to calculate precision metric", ex);
+            }
         }
 
+        /// <summary>
+        /// Calculates recall, which is the ratio of true positives to total actual positives.
+        /// Only applicable for classification tasks.
+        /// </summary>
         private double CalculateRecall(ITransformer model, TestData testData)
         {
-            // Simplified recall calculation
-            return 0.91; // TODO: Implement actual calculation
+            try
+            {
+                if (testData.PredictionKind == PredictionKind.Regression)
+                {
+                    throw new ArgumentException("Recall is not applicable for regression tasks");
+                }
+
+                var mlContext = new MLContext();
+                var dataView = CreateDataView(mlContext, testData);
+                var transformedData = model.Transform(dataView);
+
+                if (testData.PredictionKind == PredictionKind.BinaryClassification)
+                {
+                    var metrics = mlContext.BinaryClassification.Evaluate(transformedData);
+                    return metrics.Recall;
+                }
+                else
+                {
+                    var metrics = mlContext.MulticlassClassification.Evaluate(transformedData);
+                    return metrics.MacroRecall;
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error calculating recall metric");
+                throw new InvalidOperationException("Failed to calculate recall metric", ex);
+            }
+        }
+
+        /// <summary>
+        /// Creates an IDataView from the test data for ML.NET evaluation.
+        /// </summary>
+        private IDataView CreateDataView(MLContext mlContext, TestData testData)
+        {
+            try
+            {
+                // Convert features dictionary to feature vector
+                var featureValues = testData.Features.Values.Select(v => Convert.ToSingle(v)).ToArray();
+                var data = new List<ModelTestData>
+                {
+                    new ModelTestData
+                    {
+                        Features = featureValues,
+                        Label = testData.ExpectedValue
+                    }
+                };
+
+                return mlContext.Data.LoadFromEnumerable(data);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error creating data view from test data");
+                throw new InvalidOperationException("Failed to create data view", ex);
+            }
+        }
+
+        private class ModelTestData
+        {
+            [VectorType(4)]
+            public float[] Features { get; set; } = Array.Empty<float>();
+            
+            public float Label { get; set; }
         }
 
         private class ModelValidationState
