@@ -40,18 +40,63 @@
         <section class="load-test-section">
             <h2>Load Test Control</h2>
             <div class="load-test-controls">
-                <select id="testProfile">
-                    <option value="LowLoad">Low Load</option>
-                    <option value="MediumLoad">Medium Load</option>
-                    <option value="HighLoad">High Load</option>
-                </select>
+                <select id="testProfile"></select>
                 <button id="startTest">Start Test</button>
                 <button id="stopTest">Stop Test</button>
+                <button id="generateReport">Generate Report</button>
             </div>
-            <div class="load-test-metrics">
-                <canvas id="loadTestChart"></canvas>
+
+            <div class="metrics-grid">
+                <div class="metric-card">
+                    <h3>Active Users</h3>
+                    <div id="activeUsers">0</div>
+                </div>
+                <div class="metric-card">
+                    <h3>Avg Response Time</h3>
+                    <div id="avgResponseTime">0ms</div>
+                </div>
+                <div class="metric-card">
+                    <h3>Error Rate</h3>
+                    <div id="errorRate">0%</div>
+                </div>
+                <div class="metric-card">
+                    <h3>Cache Hit Rate</h3>
+                    <div id="cacheHitRate">0%</div>
+                </div>
+                <div class="metric-card">
+                    <h3>Prediction Accuracy</h3>
+                    <div id="predictionAccuracy">0%</div>
+                </div>
+            </div>
+
+            <div class="charts-grid">
+                <div class="chart-container">
+                    <h3>Response Time Distribution</h3>
+                    <canvas id="responseTimeChart"></canvas>
+                </div>
+                <div class="chart-container">
+                    <h3>Cache Performance</h3>
+                    <canvas id="cacheChart"></canvas>
+                </div>
+                <div class="chart-container">
+                    <h3>Traffic Pattern</h3>
+                    <canvas id="trafficChart"></canvas>
+                </div>
+                <div class="chart-container">
+                    <h3>System Load</h3>
+                    <canvas id="systemChart"></canvas>
+                </div>
             </div>
         </section>
+
+        <div id="reportModal" class="modal">
+            <div class="modal-content">
+                <span class="close">&times;</span>
+                <div id="reportContent"></div>
+            </div>
+        </div>
+
+        <div id="notifications" class="notifications-container"></div>
 
         <section class="alerts-section">
             <h2>Active Alerts</h2>

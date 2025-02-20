@@ -10,6 +10,9 @@ namespace XPlain.Services.LoadTesting
         private readonly Dictionary<TimeSpan, QueryDistributionProfile> _timeBasedProfiles;
         private readonly Dictionary<string, double> _queryWeights;
         private readonly string[] _baseQueries;
+        private readonly Dictionary<string, QueryPattern> _queryPatterns;
+        private DateTime _lastPatternSwitch = DateTime.UtcNow;
+        private QueryPattern _currentPattern;
 
         public QueryDistributionGenerator(IDictionary<string, double> queryWeights, QueryDistributionSettings settings)
         {
@@ -135,5 +138,152 @@ namespace XPlain.Services.LoadTesting
         
         public Dictionary<string, double> DefaultQueryWeights { get; set; }
             = new Dictionary<string, double>();
+
+        public Dictionary<string, QueryPattern> QueryPatterns { get; set; }
+            = new Dictionary<string, QueryPattern>
+            {
+                ["BusinessHours"] = new QueryPattern
+                {
+                    Name = "Business Hours",
+                    StartTime = TimeSpan.FromHours(9),
+                    EndTime = TimeSpan.FromHours(17),
+                    QueryTypes = new Dictionary<string, double>
+                    {
+                        ["Technical"] = 0.6,
+                        ["Documentation"] = 0.3,
+                        ["General"] = 0.1
+                    },
+                    BurstProbability = 0.2,
+                    SessionDuration = TimeSpan.FromMinutes(30)
+                },
+                ["AfterHours"] = new QueryPattern
+                {
+                    Name = "After Hours",
+                    StartTime = TimeSpan.FromHours(17),
+                    EndTime = TimeSpan.FromHours(23),
+                    QueryTypes = new Dictionary<string, double>
+                    {
+                        ["General"] = 0.5,
+                        ["Technical"] = 0.3,
+                        ["Documentation"] = 0.2
+                    },
+                    BurstProbability = 0.1,
+                    SessionDuration = TimeSpan.FromMinutes(15)
+                },
+                ["NightTime"] = new QueryPattern
+                {
+                    Name = "Night Time",
+                    StartTime = TimeSpan.FromHours(23),
+                    EndTime = TimeSpan.FromHours(5),
+                    QueryTypes = new Dictionary<string, double>
+                    {
+                        ["Automated"] = 0.7,
+                        ["Technical"] = 0.2,
+                        ["General"] = 0.1
+                    },
+                    BurstProbability = 0.05,
+                    SessionDuration = TimeSpan.FromMinutes(5)
+                },
+                ["PeakLoad"] = new QueryPattern
+                {
+                    Name = "Peak Load",
+                    StartTime = TimeSpan.FromHours(11),
+                    EndTime = TimeSpan.FromHours(14),
+                    QueryTypes = new Dictionary<string, double>
+                    {
+                        ["Technical"] = 0.4,
+                        ["Documentation"] = 0.3,
+                        ["General"] = 0.2,
+                        ["Automated"] = 0.1
+                    },
+                    BurstProbability = 0.4,
+                    SessionDuration = TimeSpan.FromMinutes(45)
+                },
+                ["MaintenanceWindow"] = new QueryPattern
+                {
+                    Name = "Maintenance Window",
+                    StartTime = TimeSpan.FromHours(2),
+                    EndTime = TimeSpan.FromHours(4),
+                    QueryTypes = new Dictionary<string, double>
+                    {
+                        ["Automated"] = 0.9,
+                        ["Technical"] = 0.1
+                    },
+                    BurstProbability = 0.01,
+                    SessionDuration = TimeSpan.FromMinutes(120)
+                }
+            };
+
+        public Dictionary<string, Dictionary<string, string[]>> QueryTemplates { get; set; }
+            = new Dictionary<string, Dictionary<string, string[]>>
+            {
+                ["Technical"] = new Dictionary<string, string[]>
+                {
+                    ["Patterns"] = new[]
+                    {
+                        "How to implement {feature}",
+                        "Debug {error} in {context}",
+                        "Best practices for {topic}",
+                        "Performance optimization for {feature}",
+                        "Architecture of {component}"
+                    },
+                    ["Variables"] = new[]
+                    {
+                        "caching",
+                        "ML predictions",
+                        "load balancing",
+                        "error handling",
+                        "data persistence",
+                        "authentication",
+                        "API endpoints",
+                        "async operations",
+                        "memory management",
+                        "query optimization"
+                    }
+                },
+                ["Documentation"] = new Dictionary<string, string[]>
+                {
+                    ["Patterns"] = new[]
+                    {
+                        "Documentation for {topic}",
+                        "Example of {feature} usage",
+                        "API reference for {component}",
+                        "Configuration guide for {feature}",
+                        "Tutorial on {topic}"
+                    }
+                },
+                ["General"] = new Dictionary<string, string[]>
+                {
+                    ["Patterns"] = new[]
+                    {
+                        "What is {topic}",
+                        "Compare {feature} with {alternative}",
+                        "When to use {feature}",
+                        "Benefits of {topic}",
+                        "Introduction to {topic}"
+                    }
+                },
+                ["Automated"] = new Dictionary<string, string[]>
+                {
+                    ["Patterns"] = new[]
+                    {
+                        "Health check {component}",
+                        "Metrics for {feature}",
+                        "Status of {component}",
+                        "Validate {feature} configuration",
+                        "Monitor {component} performance"
+                    }
+                }
+            };
+    }
+
+    public class QueryPattern
+    {
+        public string Name { get; set; }
+        public TimeSpan StartTime { get; set; }
+        public TimeSpan EndTime { get; set; }
+        public Dictionary<string, double> QueryTypes { get; set; }
+        public double BurstProbability { get; set; }
+        public TimeSpan SessionDuration { get; set; }
     }
 }
