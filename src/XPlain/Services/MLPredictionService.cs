@@ -54,7 +54,7 @@ namespace XPlain.Services
         private async Task UpdateDegradationPatterns(string metric, double currentValue)
         {
             var history = _metricHistory[metric];
-            
+
             // Check if this is a degradation point
             bool isDegradation = IsPerformanceDegradation(metric, currentValue);
             if (isDegradation)
