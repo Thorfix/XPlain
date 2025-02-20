@@ -9,11 +9,37 @@ namespace XPlain.Controllers
     {
         private readonly ICacheMonitoringService _monitoringService;
         private readonly ICacheProvider _cacheProvider;
+        private readonly MLPredictionService _predictionService;
 
-        public CacheMonitoringController(ICacheMonitoringService monitoringService, ICacheProvider cacheProvider)
+        public CacheMonitoringController(
+            ICacheMonitoringService monitoringService, 
+            ICacheProvider cacheProvider,
+            MLPredictionService predictionService)
         {
             _monitoringService = monitoringService;
             _cacheProvider = cacheProvider;
+            _predictionService = predictionService;
+        }
+
+        [HttpGet("predictions")]
+        public async Task<IActionResult> GetPredictions()
+        {
+            var predictions = await _predictionService.PredictPerformanceMetrics();
+            return Ok(predictions);
+        }
+
+        [HttpGet("alerts/predicted")]
+        public async Task<IActionResult> GetPredictedAlerts()
+        {
+            var alerts = await _predictionService.GetPredictedAlerts();
+            return Ok(alerts);
+        }
+
+        [HttpGet("metrics/trends")]
+        public async Task<IActionResult> GetMetricTrends()
+        {
+            var trends = await _predictionService.AnalyzeTrends();
+            return Ok(trends);
         }
 
         [HttpGet("health")]
@@ -77,6 +103,31 @@ namespace XPlain.Controllers
         {
             var schedule = await _monitoringService.GetKeyRotationScheduleAsync();
             return Ok(schedule);
+        }
+
+        [HttpGet("mitigation/status")]
+        public async Task<IActionResult> GetMitigationStatus()
+        {
+            var predictions = await _monitoringService.GetPerformancePredictionsAsync();
+            var thresholds = await _monitoringService.GetCurrentThresholdsAsync();
+            var lastMitigations = await _monitoringService.GetMaintenanceLogsAsync(DateTime.UtcNow.AddHours(-1));
+
+            return Ok(new
+            {
+                Predictions = predictions,
+                Thresholds = thresholds,
+                RecentMitigations = lastMitigations.Where(log => 
+                    log.Operation == "CachePreWarming" || 
+                    log.Operation == "EvictionPolicyAdjustment" ||
+                    log.Operation == "ResourceAllocation")
+            });
+        }
+
+        [HttpPost("mitigation/thresholds")]
+        public async Task<IActionResult> UpdateMitigationThresholds([FromBody] MonitoringThresholds thresholds)
+        {
+            await _monitoringService.UpdateMonitoringThresholdsAsync(thresholds);
+            return Ok();
         }
 
         [HttpGet("maintenance/logs")]

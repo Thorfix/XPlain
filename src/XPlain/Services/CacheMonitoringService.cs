@@ -9,17 +9,192 @@ namespace XPlain.Services
     {
         private readonly ICacheProvider _cacheProvider;
         private readonly List<CacheAlert> _activeAlerts;
-        private readonly MonitoringThresholds _thresholds;
+        private MonitoringThresholds _thresholds;
         private readonly Dictionary<string, List<PolicySwitchEvent>> _policySwitchHistory;
         private readonly Dictionary<string, Dictionary<string, double>> _policyPerformanceHistory;
+        private readonly MLPredictionService _predictionService;
+        private readonly AutomaticMitigationService _mitigationService;
+        private readonly System.Timers.Timer _mitigationTimer;
+        private readonly Dictionary<string, PredictionThresholds> _predictionThresholds;
 
-        public CacheMonitoringService(ICacheProvider cacheProvider)
+        public CacheMonitoringService(
+            ICacheProvider cacheProvider,
+            MLPredictionService predictionService,
+            AutomaticMitigationService mitigationService)
         {
             _cacheProvider = cacheProvider;
             _activeAlerts = new List<CacheAlert>();
             _thresholds = new MonitoringThresholds();
+            _predictionThresholds = new Dictionary<string, PredictionThresholds>
+            {
+                ["CacheHitRate"] = new PredictionThresholds 
+                { 
+                    WarningThreshold = 0.75,
+                    CriticalThreshold = 0.6,
+                    MinConfidence = 0.7
+                },
+                ["MemoryUsage"] = new PredictionThresholds 
+                { 
+                    WarningThreshold = 85,
+                    CriticalThreshold = 95,
+                    MinConfidence = 0.8
+                },
+                ["AverageResponseTime"] = new PredictionThresholds 
+                { 
+                    WarningThreshold = 150,
+                    CriticalThreshold = 200,
+                    MinConfidence = 0.75
+                }
+            };
             _policySwitchHistory = new Dictionary<string, List<PolicySwitchEvent>>();
             _policyPerformanceHistory = new Dictionary<string, Dictionary<string, double>>();
+            _predictionService = predictionService;
+            _mitigationService = mitigationService;
+
+            // Setup automatic mitigation timer
+            _mitigationTimer = new System.Timers.Timer(30000); // Check every 30 seconds
+            _mitigationTimer.Elapsed += async (sender, e) => await CheckAndApplyMitigations();
+            _mitigationTimer.Start();
+        }
+
+        private async Task CheckAndApplyMitigations()
+        {
+            try
+            {
+                var predictions = await _predictionService.PredictPerformanceMetrics();
+                if (ShouldApplyMitigations(predictions))
+                {
+                    await _mitigationService.ApplyMitigations();
+                }
+            }
+            catch (Exception ex)
+            {
+                // Log error but don't stop monitoring
+                await CreateAlertAsync(
+                    "MitigationError",
+                    $"Error during automatic mitigation: {ex.Message}",
+                    "Warning");
+            }
+        }
+
+        private bool ShouldApplyMitigations(Dictionary<string, PredictionResult> predictions)
+        {
+            foreach (var (metric, prediction) in predictions)
+            {
+                if (prediction.Confidence < 0.7) continue; // Only act on high-confidence predictions
+
+                switch (metric.ToLower())
+                {
+                    case "cachehitrate" when prediction.Value < _thresholds.MinHitRatio:
+                    case "memoryusage" when prediction.Value > _thresholds.MaxMemoryUsageMB * 0.9:
+                    case "averageresponsetime" when prediction.Value > _thresholds.MaxResponseTimeMs * 0.9:
+                        return true;
+                }
+            }
+            return false;
+        }
+
+        public override void Dispose()
+        {
+            _mitigationTimer?.Dispose();
+            base.Dispose();
+        }
+
+        public async Task<Dictionary<string, PredictionResult>> GetPerformancePredictionsAsync()
+        {
+            return await _predictionService.PredictPerformanceMetrics();
+        }
+
+        public async Task<Dictionary<string, PredictionThresholds>> GetPredictionThresholdsAsync()
+        {
+            return _predictionThresholds;
+        }
+
+        public async Task UpdatePredictionThresholdsAsync(Dictionary<string, PredictionThresholds> newThresholds)
+        {
+            foreach (var (metric, threshold) in newThresholds)
+            {
+                if (_predictionThresholds.ContainsKey(metric))
+                {
+                    _predictionThresholds[metric] = threshold;
+                }
+            }
+        }
+
+        public async Task<List<PredictedAlert>> GetPredictedAlertsAsync()
+        {
+            var regularAlerts = await _predictionService.GetPredictedAlerts();
+            var precursorPatterns = _predictionService.GetActivePrecursorPatterns();
+            var predictions = await _predictionService.PredictPerformanceMetrics();
+
+            // Add alerts based on prediction thresholds
+            foreach (var (metric, prediction) in predictions)
+            {
+                if (_predictionThresholds.TryGetValue(metric, out var thresholds) &&
+                    prediction.Confidence >= thresholds.MinConfidence)
+                {
+                    if (prediction.Value <= thresholds.CriticalThreshold)
+                    {
+                        regularAlerts.Add(new PredictedAlert
+                        {
+                            Type = "ThresholdPrediction",
+                            Message = $"Predicted {metric} will reach critical level: {prediction.Value:F2}",
+                            Severity = "Critical",
+                            Confidence = prediction.Confidence,
+                            TimeToImpact = prediction.TimeToImpact,
+                            Metadata = new Dictionary<string, object>
+                            {
+                                ["metric"] = metric,
+                                ["predictedValue"] = prediction.Value,
+                                ["threshold"] = thresholds.CriticalThreshold
+                            }
+                        });
+                    }
+                    else if (prediction.Value <= thresholds.WarningThreshold)
+                    {
+                        regularAlerts.Add(new PredictedAlert
+                        {
+                            Type = "ThresholdPrediction",
+                            Message = $"Predicted {metric} will reach warning level: {prediction.Value:F2}",
+                            Severity = "Warning",
+                            Confidence = prediction.Confidence,
+                            TimeToImpact = prediction.TimeToImpact,
+                            Metadata = new Dictionary<string, object>
+                            {
+                                ["metric"] = metric,
+                                ["predictedValue"] = prediction.Value,
+                                ["threshold"] = thresholds.WarningThreshold
+                            }
+                        });
+                    }
+                }
+            }
+
+            // Add precursor pattern alerts
+            foreach (var pattern in precursorPatterns)
+            {
+                regularAlerts.Add(new PredictedAlert
+                {
+                    Type = "PrecursorPattern",
+                    Message = $"Detected pattern that typically precedes {pattern.TargetIssue} " +
+                             $"(Lead time: {pattern.LeadTime.TotalMinutes:F1} minutes)",
+                    Severity = pattern.Confidence > 0.9 ? "Warning" : "Info",
+                    Metadata = new Dictionary<string, object>
+                    {
+                        ["targetIssue"] = pattern.TargetIssue,
+                        ["leadTime"] = pattern.LeadTime,
+                        ["confidence"] = pattern.Confidence,
+                        ["precursorMetrics"] = pattern.Sequences.Select(s => s.MetricName).ToList()
+                    }
+                };
+            }
+
+            return regularAlerts.OrderByDescending(a => a.Severity).ToList();
+        }
+
+        public async Task<Dictionary<string, TrendAnalysis>> GetMetricTrendsAsync()
+        {
+            return await _predictionService.AnalyzeTrends();
         }
 
         public async Task<CircuitBreakerStatus> GetCircuitBreakerStatusAsync()
@@ -33,6 +208,7 @@ namespace XPlain.Services
             var hitRatio = await GetCurrentHitRatioAsync();
             var memoryUsage = await GetMemoryUsageAsync();
             var metrics = await GetPerformanceMetricsAsync();
+            var predictions = await _predictionService.PredictPerformanceMetrics();
 
             return new CacheHealthStatus
             {
@@ -42,7 +218,8 @@ namespace XPlain.Services
                 AverageResponseTimeMs = metrics.GetValueOrDefault("AverageResponseTime", 0),
                 ActiveAlerts = _activeAlerts.Count,
                 LastUpdate = DateTime.UtcNow,
-                PerformanceMetrics = metrics
+                PerformanceMetrics = metrics,
+                Predictions = predictions
             };
         }
 
