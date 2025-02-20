@@ -6,10 +6,29 @@
     <title>Incident Analysis Dashboard</title>
     <link rel="stylesheet" href="css/styles.css">
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.17.5/xlsx.full.min.js"></script>
 </head>
 <body>
     <div class="dashboard-container">
-        <h1>Incident Analysis Dashboard</h1>
+        <header class="dashboard-header">
+            <h1>Incident Analysis Dashboard</h1>
+            <div class="controls">
+                <div class="filter-controls">
+                    <select id="categoryFilter">
+                        <option value="">All Categories</option>
+                    </select>
+                    <select id="severityFilter">
+                        <option value="">All Severities</option>
+                    </select>
+                    <input type="date" id="dateFilter">
+                </div>
+                <div class="export-controls">
+                    <button id="exportPDF">Export PDF</button>
+                    <button id="exportCSV">Export CSV</button>
+                </div>
+            </div>
+        </header>
         
         <div class="metrics-panel">
             <div class="metric-card">
@@ -48,8 +67,44 @@
             </div>
             
             <div class="recommendations-section">
-                <h3>Recommendations</h3>
+                <h3>Real-time Recommendations</h3>
                 <div id="recommendationsList"></div>
+            </div>
+        </div>
+
+        <div class="timeline-section">
+            <h3>Incident Timeline</h3>
+            <div class="timeline-controls">
+                <button id="zoomIn">+</button>
+                <button id="zoomOut">-</button>
+                <select id="timelineRange">
+                    <option value="day">24 Hours</option>
+                    <option value="week">7 Days</option>
+                    <option value="month">30 Days</option>
+                </select>
+            </div>
+            <div id="timelineView"></div>
+        </div>
+
+        <div id="notificationPanel" class="notification-panel hidden">
+            <div class="notification-header">
+                <h4>Critical Incident Alert</h4>
+                <button class="close-btn">&times;</button>
+            </div>
+            <div class="notification-content"></div>
+        </div>
+
+        <div id="detailsModal" class="modal hidden">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h3>Incident Details</h3>
+                    <button class="close-btn">&times;</button>
+                </div>
+                <div class="modal-body">
+                    <div id="incidentDetails"></div>
+                    <div id="relatedIncidents"></div>
+                    <div id="mitigationHistory"></div>
+                </div>
             </div>
         </div>
     </div>
