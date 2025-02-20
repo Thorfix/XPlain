@@ -77,6 +77,33 @@ namespace XPlain.Services
             public double Severity { get; set; }
             public int OccurrenceCount { get; set; }
             public TimeSpan TimeToIssue { get; set; }
+            public List<double> Derivatives { get; set; } = new();
+            public Dictionary<string, double> Correlations { get; set; } = new();
+            public PatternCluster Cluster { get; set; }
+            public double Stability { get; set; } = 1.0;
+            public DateTime LastUpdated { get; set; } = DateTime.UtcNow;
+            public List<PatternMutation> Mutations { get; set; } = new();
+        }
+
+        private class PatternCluster
+        {
+            public string Name { get; set; }
+            public List<Pattern> Patterns { get; set; } = new();
+            public Pattern Centroid { get; set; }
+            public double Radius { get; set; }
+            public PatternCluster Parent { get; set; }
+            public List<PatternCluster> Children { get; set; } = new();
+            public int Level { get; set; }
+            public double Confidence { get; set; }
+        }
+
+        private class PatternMutation
+        {
+            public DateTime Timestamp { get; set; }
+            public List<double> PreviousSequence { get; set; }
+            public List<double> NewSequence { get; set; }
+            public double MutationMagnitude { get; set; }
+            public string MutationType { get; set; }
         }
 
         private async Task UpdateDegradationPatterns(string metric, double currentValue)
@@ -95,7 +122,23 @@ namespace XPlain.Services
                 // Normalize the pattern
                 var normalizedPattern = NormalizeSequence(pattern);
                 
-                // Store or update the pattern
+                // Calculate additional pattern features
+                var derivatives = CalculateDerivatives(pattern);
+                var correlations = CalculateCorrelations(metric, _metricHistory.Keys.ToList());
+
+                // Find or create the appropriate pattern cluster
+                var newPattern = new Pattern
+                {
+                    Sequence = normalizedPattern,
+                    IssueType = GetIssueType(metric, currentValue),
+                    Severity = CalculateIssueSeverity(metric, currentValue),
+                    OccurrenceCount = 1,
+                    TimeToIssue = TimeSpan.FromMinutes(5),
+                    Derivatives = derivatives,
+                    Correlations = correlations,
+                    LastUpdated = DateTime.UtcNow
+                };
+
                 if (!_degradationPatterns.ContainsKey(metric))
                 {
                     _degradationPatterns[metric] = new List<Pattern>();
@@ -106,26 +149,238 @@ namespace XPlain.Services
 
                 if (existingPattern != null)
                 {
+                    // Track pattern evolution
+                    var mutation = new PatternMutation
+                    {
+                        Timestamp = DateTime.UtcNow,
+                        PreviousSequence = existingPattern.Sequence.ToList(),
+                        NewSequence = normalizedPattern,
+                        MutationMagnitude = CalculatePatternDifference(existingPattern.Sequence, normalizedPattern),
+                        MutationType = DetermineMutationType(existingPattern.Sequence, normalizedPattern)
+                    };
+                    existingPattern.Mutations.Add(mutation);
+
+                    // Update pattern stability
+                    existingPattern.Stability = CalculatePatternStability(existingPattern);
+                    
+                    // Update pattern attributes
                     existingPattern.OccurrenceCount++;
-                    // Update the average time to issue
+                    existingPattern.LastUpdated = DateTime.UtcNow;
                     existingPattern.TimeToIssue = TimeSpan.FromTicks(
                         (existingPattern.TimeToIssue.Ticks * (existingPattern.OccurrenceCount - 1) +
                          TimeSpan.FromMinutes(5).Ticks) / existingPattern.OccurrenceCount);
+                    
+                    // Update pattern features
+                    existingPattern.Derivatives = derivatives;
+                    existingPattern.Correlations = correlations;
                 }
                 else
                 {
-                    _degradationPatterns[metric].Add(new Pattern
-                    {
-                        Sequence = normalizedPattern,
-                        IssueType = GetIssueType(metric, currentValue),
-                        Severity = CalculateIssueSeverity(metric, currentValue),
-                        OccurrenceCount = 1,
-                        TimeToIssue = TimeSpan.FromMinutes(5)
-                    });
+                    _degradationPatterns[metric].Add(newPattern);
                 }
+
+                // Update hierarchical clustering
+                await UpdatePatternClusters(metric);
             }
 
             await AnalyzePrecursorPatterns(metric, currentValue);
+        }
+
+        private double CalculatePatternStability(Pattern pattern)
+        {
+            if (pattern.Mutations.Count == 0) return 1.0;
+
+            // Calculate average mutation magnitude over time
+            var recentMutations = pattern.Mutations
+                .OrderByDescending(m => m.Timestamp)
+                .Take(10)
+                .ToList();
+
+            var avgMagnitude = recentMutations.Average(m => m.MutationMagnitude);
+            return Math.Max(0.1, 1.0 - avgMagnitude);
+        }
+
+        private async Task UpdatePatternClusters(string metric)
+        {
+            var patterns = _degradationPatterns[metric];
+            if (patterns.Count < 2) return;
+
+            // Calculate distance matrix between all patterns
+            var distances = new Dictionary<(Pattern, Pattern), double>();
+            for (int i = 0; i < patterns.Count; i++)
+            {
+                for (int j = i + 1; j < patterns.Count; j++)
+                {
+                    var distance = CalculatePatternDistance(patterns[i], patterns[j]);
+                    distances[(patterns[i], patterns[j])] = distance;
+                    distances[(patterns[j], patterns[i])] = distance;
+                }
+            }
+
+            // Perform hierarchical clustering
+            var clusters = patterns.Select(p => new PatternCluster
+            {
+                Patterns = new List<Pattern> { p },
+                Centroid = p,
+                Level = 0,
+                Confidence = p.Stability
+            }).ToList();
+
+            while (clusters.Count > 1)
+            {
+                // Find closest clusters
+                var minDistance = double.MaxValue;
+                PatternCluster cluster1 = null, cluster2 = null;
+
+                foreach (var c1 in clusters)
+                {
+                    foreach (var c2 in clusters)
+                    {
+                        if (c1 == c2) continue;
+                        var distance = CalculateClusterDistance(c1, c2, distances);
+                        if (distance < minDistance)
+                        {
+                            minDistance = distance;
+                            cluster1 = c1;
+                            cluster2 = c2;
+                        }
+                    }
+                }
+
+                // Merge clusters
+                if (cluster1 != null && cluster2 != null)
+                {
+                    var newCluster = new PatternCluster
+                    {
+                        Patterns = cluster1.Patterns.Concat(cluster2.Patterns).ToList(),
+                        Children = new List<PatternCluster> { cluster1, cluster2 },
+                        Level = Math.Max(cluster1.Level, cluster2.Level) + 1,
+                        Confidence = (cluster1.Confidence + cluster2.Confidence) / 2
+                    };
+
+                    // Set centroid as the pattern closest to cluster center
+                    newCluster.Centroid = CalculateClusterCentroid(newCluster.Patterns);
+                    
+                    // Set parent references
+                    cluster1.Parent = newCluster;
+                    cluster2.Parent = newCluster;
+
+                    clusters.Remove(cluster1);
+                    clusters.Remove(cluster2);
+                    clusters.Add(newCluster);
+                }
+                else
+                {
+                    break;
+                }
+            }
+
+            // Update pattern cluster references
+            foreach (var pattern in patterns)
+            {
+                pattern.Cluster = FindLowestClusterForPattern(pattern, clusters.First());
+            }
+        }
+
+        private double CalculatePatternDistance(Pattern p1, Pattern p2)
+        {
+            var sequenceDistance = CalculateDTW(p1.Sequence, p2.Sequence);
+            var derivativeDistance = CalculateDTW(p1.Derivatives, p2.Derivatives);
+            var correlationDistance = CalculateCorrelationDistance(p1.Correlations, p2.Correlations);
+
+            return (sequenceDistance * 0.5) + (derivativeDistance * 0.3) + (correlationDistance * 0.2);
+        }
+
+        private double CalculateCorrelationDistance(Dictionary<string, double> corr1, Dictionary<string, double> corr2)
+        {
+            var allMetrics = corr1.Keys.Union(corr2.Keys).ToList();
+            var sum = 0.0;
+            foreach (var metric in allMetrics)
+            {
+                var v1 = corr1.GetValueOrDefault(metric, 0);
+                var v2 = corr2.GetValueOrDefault(metric, 0);
+                sum += Math.Pow(v1 - v2, 2);
+            }
+            return Math.Sqrt(sum / allMetrics.Count);
+        }
+
+        private double CalculateClusterDistance(PatternCluster c1, PatternCluster c2, Dictionary<(Pattern, Pattern), double> distances)
+        {
+            var totalDistance = 0.0;
+            var count = 0;
+
+            foreach (var p1 in c1.Patterns)
+            {
+                foreach (var p2 in c2.Patterns)
+                {
+                    totalDistance += distances[(p1, p2)];
+                    count++;
+                }
+            }
+
+            return totalDistance / count;
+        }
+
+        private Pattern CalculateClusterCentroid(List<Pattern> patterns)
+        {
+            if (patterns.Count == 1) return patterns[0];
+
+            // Find the pattern with minimum average distance to all other patterns
+            var minAvgDistance = double.MaxValue;
+            Pattern centroid = null;
+
+            foreach (var pattern in patterns)
+            {
+                var avgDistance = patterns
+                    .Where(p => p != pattern)
+                    .Average(p => CalculatePatternDistance(pattern, p));
+
+                if (avgDistance < minAvgDistance)
+                {
+                    minAvgDistance = avgDistance;
+                    centroid = pattern;
+                }
+            }
+
+            return centroid;
+        }
+
+        private PatternCluster FindLowestClusterForPattern(Pattern pattern, PatternCluster root)
+        {
+            if (root.Children == null || root.Children.Count == 0)
+            {
+                return root;
+            }
+
+            foreach (var child in root.Children)
+            {
+                if (child.Patterns.Contains(pattern))
+                {
+                    return FindLowestClusterForPattern(pattern, child);
+                }
+            }
+
+            return root;
+        }
+
+        private double CalculatePatternDifference(List<double> oldPattern, List<double> newPattern)
+        {
+            return CalculateDTW(oldPattern, newPattern);
+        }
+
+        private string DetermineMutationType(List<double> oldPattern, List<double> newPattern)
+        {
+            var oldTrend = oldPattern.Last() - oldPattern.First();
+            var newTrend = newPattern.Last() - newPattern.First();
+            var magnitudeChange = Math.Abs(newPattern.Average() - oldPattern.Average());
+
+            if (Math.Sign(oldTrend) != Math.Sign(newTrend))
+                return "TrendReversal";
+            if (magnitudeChange > 0.5)
+                return "MagnitudeShift";
+            if (Math.Abs(newTrend - oldTrend) > 0.3)
+                return "TrendChange";
+            return "MinorVariation";
         }
 
         private async Task AnalyzePrecursorPatterns(string metric, double currentValue)
@@ -404,14 +659,71 @@ namespace XPlain.Services
 
         private bool IsSimilarPattern(List<double> pattern1, List<double> pattern2)
         {
-            if (pattern1.Count != pattern2.Count) return false;
+            if (pattern1 == null || pattern2 == null) return false;
+            
+            // Calculate multiple similarity metrics
+            var dtwDistance = CalculateDTW(pattern1, pattern2);
+            var shapeDistance = CalculateShapeSimilarity(pattern1, pattern2);
+            var trendDistance = CalculateTrendSimilarity(pattern1, pattern2);
+            
+            // Weighted combination of metrics
+            var weightedDistance = (dtwDistance * 0.5) + (shapeDistance * 0.3) + (trendDistance * 0.2);
+            
+            // Dynamic threshold based on pattern lengths
+            var threshold = 0.3 * Math.Max(pattern1.Count, pattern2.Count) / 10.0;
+            
+            return weightedDistance < threshold;
+        }
 
-            // Calculate Euclidean distance between patterns
-            var distance = Math.Sqrt(
-                pattern1.Zip(pattern2, (a, b) => Math.Pow(a - b, 2)).Sum()
-            );
+        private double CalculateDTW(List<double> sequence1, List<double> sequence2)
+        {
+            int n = sequence1.Count;
+            int m = sequence2.Count;
+            var dtw = new double[n + 1, m + 1];
 
-            return distance < 0.3; // Similarity threshold
+            // Initialize DTW matrix
+            for (int i = 0; i <= n; i++)
+                for (int j = 0; j <= m; j++)
+                    dtw[i, j] = double.PositiveInfinity;
+            dtw[0, 0] = 0;
+
+            // Fill DTW matrix
+            for (int i = 1; i <= n; i++)
+            {
+                for (int j = 1; j <= m; j++)
+                {
+                    var cost = Math.Abs(sequence1[i - 1] - sequence2[j - 1]);
+                    dtw[i, j] = cost + Math.Min(
+                        Math.Min(dtw[i - 1, j], dtw[i, j - 1]),
+                        dtw[i - 1, j - 1]);
+                }
+            }
+
+            return dtw[n, m] / Math.Max(n, m); // Normalize by max length
+        }
+
+        private double CalculateShapeSimilarity(List<double> sequence1, List<double> sequence2)
+        {
+            var derivatives1 = CalculateDerivatives(sequence1);
+            var derivatives2 = CalculateDerivatives(sequence2);
+            
+            // Compare shapes using second derivatives
+            var secondDerivatives1 = CalculateDerivatives(derivatives1);
+            var secondDerivatives2 = CalculateDerivatives(derivatives2);
+            
+            return CalculatePearsonCorrelation(secondDerivatives1, secondDerivatives2);
+        }
+
+        private double CalculateTrendSimilarity(List<double> sequence1, List<double> sequence2)
+        {
+            var trend1 = sequence1.Last() - sequence1.First();
+            var trend2 = sequence2.Last() - sequence2.First();
+            
+            // Normalize trends
+            var maxTrend = Math.Max(Math.Abs(trend1), Math.Abs(trend2));
+            if (maxTrend == 0) return 1.0; // Both sequences are flat
+            
+            return 1.0 - Math.Abs(trend1 - trend2) / maxTrend;
         }
 
         private string GetIssueType(string metric, double value)
@@ -615,12 +927,30 @@ namespace XPlain.Services
 
             var recentPattern = history.Skip(history.Count - _patternWindow).ToList();
             var normalizedRecent = NormalizeSequence(recentPattern);
+            var derivatives = CalculateDerivatives(recentPattern);
+            var correlations = CalculateCorrelations(metric, _metricHistory.Keys.ToList());
 
-            // Check for matching degradation patterns
-            var matchingPattern = _degradationPatterns.ContainsKey(metric)
-                ? _degradationPatterns[metric]
-                    .FirstOrDefault(p => IsSimilarPattern(p.Sequence, normalizedRecent))
-                : null;
+            // Find patterns in the hierarchy that match current behavior
+            var hierarchicalMatches = new List<(Pattern Pattern, double Similarity, PatternCluster Cluster)>();
+            
+            if (_degradationPatterns.ContainsKey(metric))
+            {
+                foreach (var pattern in _degradationPatterns[metric])
+                {
+                    var sequenceSimilarity = IsSimilarPattern(pattern.Sequence, normalizedRecent) ? 1.0 : 0.0;
+                    if (sequenceSimilarity > 0)
+                    {
+                        var derivativeSimilarity = CalculatePearsonCorrelation(pattern.Derivatives, derivatives);
+                        var correlationSimilarity = CalculateCorrelationSimilarity(pattern.Correlations, correlations);
+                        
+                        var overallSimilarity = (sequenceSimilarity * 0.5) + 
+                                              (derivativeSimilarity * 0.3) + 
+                                              (correlationSimilarity * 0.2);
+
+                        hierarchicalMatches.Add((pattern, overallSimilarity, pattern.Cluster));
+                    }
+                }
+            }
 
             double mlPrediction = 0;
             double mlConfidence = 0;
@@ -634,35 +964,64 @@ namespace XPlain.Services
                 mlConfidence = prediction.Confidence;
             }
 
-            // Fallback to statistical prediction if no ML model
-            var statisticalPrediction = CalculateStatisticalPrediction(history);
-
-            // If we have both ML and pattern predictions, blend them
-            if (matchingPattern != null && mlConfidence > 0)
+            // If we have hierarchical pattern matches
+            if (hierarchicalMatches.Any())
             {
-                var patternConfidence = Math.Min(1.0, matchingPattern.OccurrenceCount / 10.0);
-                var timeToImpact = matchingPattern.TimeToIssue;
+                var bestMatch = hierarchicalMatches.OrderByDescending(m => m.Similarity).First();
+                var pattern = bestMatch.Pattern;
+                var cluster = bestMatch.Cluster;
                 
-                // Blend all predictions based on their confidence
-                var totalConfidence = mlConfidence + patternConfidence;
-                var blendedPrediction = (mlPrediction * mlConfidence + 
-                    GetPatternBasedPrediction(history.Last(), matchingPattern) * patternConfidence) / totalConfidence;
+                // Calculate confidence based on pattern stability and cluster confidence
+                var patternConfidence = pattern.Stability * cluster.Confidence * bestMatch.Similarity;
+                var timeToImpact = pattern.TimeToIssue;
                 
-                var blendedConfidence = Math.Max(mlConfidence, patternConfidence);
+                // Calculate weighted prediction using all similar patterns in the cluster
+                var clusterPrediction = cluster.Patterns
+                    .Select(p => (GetPatternBasedPrediction(history.Last(), p), p.Stability))
+                    .Aggregate(
+                        (sum: 0.0, weight: 0.0),
+                        (acc, curr) => (acc.sum + curr.Item1 * curr.Item2, acc.weight + curr.Item2));
+                
+                var patternPrediction = clusterPrediction.sum / clusterPrediction.weight;
 
-                return new PredictionResult
+                // Blend predictions based on confidence
+                if (mlConfidence > 0)
                 {
-                    Value = blendedPrediction,
-                    Confidence = blendedConfidence,
-                    TimeToImpact = timeToImpact,
-                    DetectedPattern = new PredictionPattern
+                    var totalConfidence = mlConfidence + patternConfidence;
+                    var blendedPrediction = (mlPrediction * mlConfidence +
+                        patternPrediction * patternConfidence) / totalConfidence;
+                    var blendedConfidence = Math.Max(mlConfidence, patternConfidence);
+
+                    return new PredictionResult
                     {
-                        Type = matchingPattern.IssueType,
-                        Severity = matchingPattern.Severity,
+                        Value = blendedPrediction,
+                        Confidence = blendedConfidence,
+                        TimeToImpact = timeToImpact,
+                        DetectedPattern = new PredictionPattern
+                        {
+                            Type = pattern.IssueType,
+                            Severity = pattern.Severity,
+                            Confidence = patternConfidence,
+                            TimeToIssue = timeToImpact
+                        }
+                    };
+                }
+                else
+                {
+                    return new PredictionResult
+                    {
+                        Value = patternPrediction,
                         Confidence = patternConfidence,
-                        TimeToIssue = timeToImpact
-                    }
-                };
+                        TimeToImpact = timeToImpact,
+                        DetectedPattern = new PredictionPattern
+                        {
+                            Type = pattern.IssueType,
+                            Severity = pattern.Severity,
+                            Confidence = patternConfidence,
+                            TimeToIssue = timeToImpact
+                        }
+                    };
+                }
             }
             
             // If we have ML prediction with good confidence, use it
@@ -677,7 +1036,23 @@ namespace XPlain.Services
             }
 
             // Fallback to statistical prediction
-            return statisticalPrediction;
+            return CalculateStatisticalPrediction(history);
+        }
+
+        private double CalculateCorrelationSimilarity(Dictionary<string, double> corr1, Dictionary<string, double> corr2)
+        {
+            var allMetrics = corr1.Keys.Union(corr2.Keys).ToList();
+            var similarities = new List<double>();
+
+            foreach (var metric in allMetrics)
+            {
+                if (corr1.TryGetValue(metric, out var v1) && corr2.TryGetValue(metric, out var v2))
+                {
+                    similarities.Add(1.0 - Math.Abs(v1 - v2));
+                }
+            }
+
+            return similarities.Any() ? similarities.Average() : 0.0;
         }
 
         private PredictionResult CalculateStatisticalPrediction(List<double> history)
