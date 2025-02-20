@@ -68,4 +68,53 @@ namespace XPlain.Services
         public Dictionary<string, string> Observations { get; set; } = new();
         public bool IsCandidateBetter { get; set; }
         public string RecommendedAction { get; set; } = "";
+        public ValidationResults CrossValidation { get; set; } = new();
+    }
+
+    public class ValidationResults
+    {
+        public double AverageAccuracy { get; set; }
+        public double StandardDeviation { get; set; }
+        public List<FoldResult> FoldResults { get; set; } = new();
+    }
+
+    public class FoldResult
+    {
+        public int FoldNumber { get; set; }
+        public Dictionary<string, double> Metrics { get; set; } = new();
+        public Dictionary<string, double> FeatureImportance { get; set; } = new();
+    }
+
+    public class ModelHealthReport
+    {
+        public string ModelId { get; set; } = "";
+        public string Status { get; set; } = "";
+        public bool IsHealthy { get; set; }
+        public Dictionary<string, double> Metrics { get; set; } = new();
+        public string ErrorMessage { get; set; } = "";
+        public DateTime LastUpdated { get; set; }
+    }
+
+    public class PredictionMetrics
+    {
+        public double Accuracy { get; set; }
+        public double AverageLatency { get; set; }
+        public int TotalPredictions { get; set; }
+        public Dictionary<string, int> ErrorCounts { get; set; } = new();
+    }
+
+    public class DataDriftReport
+    {
+        public bool SignificantDriftDetected { get; set; }
+        public double DriftScore { get; set; }
+        public Dictionary<string, FeatureDrift> FeatureDrifts { get; set; } = new();
+        public DateTime AnalysisTime { get; set; }
+    }
+
+    public class FeatureDrift
+    {
+        public string FeatureName { get; set; } = "";
+        public double DriftMagnitude { get; set; }
+        public string DriftType { get; set; } = "";
+        public Dictionary<string, double> Statistics { get; set; } = new();
     }
