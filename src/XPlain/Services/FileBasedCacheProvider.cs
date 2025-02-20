@@ -15,6 +15,8 @@ namespace XPlain.Services
         private readonly CacheSettings _settings;
         private readonly string _cacheDirectory;
         private readonly string _analyticsDirectory;
+        private readonly string _walDirectory;
+        private readonly string _backupDirectory;
         private long _cacheHits;
         private long _cacheMisses;
         private int _invalidationCount;
@@ -35,11 +37,19 @@ namespace XPlain.Services
             _llmProvider = llmProvider;
             _cacheDirectory = _settings.CacheDirectory ?? Path.Combine(AppContext.BaseDirectory, "cache");
             _analyticsDirectory = Path.Combine(_cacheDirectory, "analytics");
+            _walDirectory = Path.Combine(_cacheDirectory, "wal");
+            _backupDirectory = Path.Combine(_cacheDirectory, "backups");
             _statsFilePath = Path.Combine(_cacheDirectory, "cache_stats.json");
             _analyticsFilePath = Path.Combine(_analyticsDirectory, "analytics.json");
             
             Directory.CreateDirectory(_cacheDirectory);
             Directory.CreateDirectory(_analyticsDirectory);
+            Directory.CreateDirectory(_walDirectory);
+            Directory.CreateDirectory(_backupDirectory);
+            
+            // Initialize cache state
+            InitializeCacheState();
+            StartPeriodicBackup();
             LoadStatsFromDisk();
 
             // Set up periodic analytics logging (every hour)
@@ -90,20 +100,242 @@ namespace XPlain.Services
             }
         }
 
+        private void StartPeriodicBackup()
+        {
+            var backupTimer = new Timer(async _ => await CreateBackupAsync(), 
+                null, TimeSpan.Zero, TimeSpan.FromHours(6));
+        }
+
+        private async Task CreateBackupAsync()
+        {
+            var backupFileName = $"cache_backup_{DateTime.UtcNow:yyyyMMdd_HHmmss}.zip";
+            var backupPath = Path.Combine(_backupDirectory, backupFileName);
+
+            try
+            {
+                // Create backup archive
+                using var archive = ZipFile.Open(backupPath, ZipArchiveMode.Create);
+                
+                // Add cache files
+                foreach (var file in Directory.GetFiles(_cacheDirectory, "*.json"))
+                {
+                    archive.CreateEntryFromFile(file, Path.GetFileName(file));
+                }
+
+                // Add WAL files
+                foreach (var file in Directory.GetFiles(_walDirectory))
+                {
+                    archive.CreateEntryFromFile(file, $"wal/{Path.GetFileName(file)}");
+                }
+
+                // Cleanup old backups (keep last 5)
+                var backups = Directory.GetFiles(_backupDirectory)
+                    .OrderByDescending(f => f)
+                    .Skip(5);
+                    
+                foreach (var oldBackup in backups)
+                {
+                    try { File.Delete(oldBackup); } catch { }
+                }
+            }
+            catch
+            {
+                // Log backup failure
+            }
+        }
+
+        private async Task<bool> RestoreFromBackupAsync()
+        {
+            var latestBackup = Directory.GetFiles(_backupDirectory)
+                .OrderByDescending(f => f)
+                .FirstOrDefault();
+
+            if (latestBackup == null) return false;
+
+            try
+            {
+                // Clear current cache
+                foreach (var file in Directory.GetFiles(_cacheDirectory, "*.json"))
+                {
+                    File.Delete(file);
+                }
+
+                // Restore from backup
+                using var archive = ZipFile.OpenRead(latestBackup);
+                foreach (var entry in archive.Entries)
+                {
+                    var targetPath = entry.FullName.StartsWith("wal/")
+                        ? Path.Combine(_walDirectory, Path.GetFileName(entry.FullName))
+                        : Path.Combine(_cacheDirectory, entry.FullName);
+
+                    entry.ExtractToFile(targetPath, true);
+                }
+
+                return true;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private void InitializeCacheState()
+        {
+            try
+            {
+                // Verify cache integrity
+                if (!VerifyCacheIntegrity())
+                {
+                    // Try to recover from WAL
+                    if (!RecoverFromWAL())
+                    {
+                        // If WAL recovery fails, try backup
+                        RestoreFromBackupAsync().Wait();
+                    }
+                }
+            }
+            catch
+            {
+                // If all recovery methods fail, start with empty cache
+                ClearCache();
+            }
+        }
+
+        private bool VerifyCacheIntegrity()
+        {
+            try
+            {
+                foreach (var file in Directory.GetFiles(_cacheDirectory, "*.json"))
+                {
+                    if (!VerifyFileIntegrity(file))
+                    {
+                        return false;
+                    }
+                }
+                return true;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private bool VerifyFileIntegrity(string filePath)
+        {
+            try
+            {
+                using var stream = File.OpenRead(filePath);
+                var cacheEntry = JsonSerializer.Deserialize<CacheEntryWithChecksum>(stream);
+                return cacheEntry?.VerifyChecksum() ?? false;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private bool RecoverFromWAL()
+        {
+            try
+            {
+                var walFiles = Directory.GetFiles(_walDirectory)
+                    .OrderBy(f => f)
+                    .ToList();
+
+                foreach (var walFile in walFiles)
+                {
+                    var walEntry = JsonSerializer.Deserialize<WALEntry>(
+                        File.ReadAllText(walFile));
+
+                    if (walEntry != null)
+                    {
+                        ApplyWALEntry(walEntry);
+                    }
+                }
+
+                return true;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private void ApplyWALEntry(WALEntry entry)
+        {
+            var targetPath = GetFilePath(entry.Key);
+            
+            switch (entry.Operation)
+            {
+                case WALOperation.Set:
+                    File.WriteAllText(targetPath, entry.Data);
+                    break;
+                case WALOperation.Delete:
+                    if (File.Exists(targetPath))
+                    {
+                        File.Delete(targetPath);
+                    }
+                    break;
+            }
+        }
+
+        private void ClearCache()
+        {
+            try
+            {
+                Directory.Delete(_cacheDirectory, true);
+                Directory.CreateDirectory(_cacheDirectory);
+                Directory.CreateDirectory(_analyticsDirectory);
+                Directory.CreateDirectory(_walDirectory);
+            }
+            catch
+            {
+                // Ignore cleanup errors
+            }
+        }
+
         public async Task SetAsync<T>(string key, T value, TimeSpan? expiration = null) where T : class
         {
             if (!_settings.CacheEnabled) return;
 
             var filePath = GetFilePath(key);
-            var cacheEntry = new CacheEntry<T>
+            var tempFilePath = filePath + ".tmp";
+            var cacheEntry = new CacheEntryWithChecksum<T>
             {
                 Value = value,
                 ExpirationTime = DateTime.UtcNow.Add(expiration ?? TimeSpan.FromHours(_settings.CacheExpirationHours)),
                 CodeHash = await CalculateCodeHashAsync()
             };
 
-            using var stream = File.Create(filePath);
-            await JsonSerializer.SerializeAsync(stream, cacheEntry);
+            // Write to temporary file first
+            using (var stream = File.Create(tempFilePath))
+            {
+                await JsonSerializer.SerializeAsync(stream, cacheEntry);
+            }
+
+            // Log the operation to WAL
+            var walEntry = new WALEntry
+            {
+                Key = key,
+                Operation = WALOperation.Set,
+                Data = await File.ReadAllTextAsync(tempFilePath),
+                Timestamp = DateTime.UtcNow
+            };
+
+            var walFile = Path.Combine(_walDirectory, 
+                $"wal_{DateTime.UtcNow:yyyyMMddHHmmssfff}_{Guid.NewGuid():N}.json");
+            await File.WriteAllTextAsync(walFile, 
+                JsonSerializer.Serialize(walEntry));
+
+            // Atomic replace
+            if (File.Exists(filePath))
+            {
+                File.Delete(filePath);
+            }
+            File.Move(tempFilePath, filePath);
+
+            // Cleanup WAL entry after successful write
+            try { File.Delete(walFile); } catch { }
         }
 
         public Task RemoveAsync(string key)
@@ -516,12 +748,48 @@ namespace XPlain.Services
             }
         }
 
-        private class CacheEntry<T>
+        private class CacheEntryWithChecksum<T> : CacheEntry<T>
         {
-            public T Value { get; set; } = default!;
-            public DateTime ExpirationTime { get; set; }
-            public string CodeHash { get; set; } = string.Empty;
-            public bool IsExpired => DateTime.UtcNow > ExpirationTime;
+            public string Checksum { get; private set; } = string.Empty;
+
+            public CacheEntryWithChecksum()
+            {
+                UpdateChecksum();
+            }
+
+            private void UpdateChecksum()
+            {
+                var data = JsonSerializer.Serialize(new
+                {
+                    Value,
+                    ExpirationTime,
+                    CodeHash
+                });
+                using var sha256 = SHA256.Create();
+                var hash = sha256.ComputeHash(Encoding.UTF8.GetBytes(data));
+                Checksum = Convert.ToBase64String(hash);
+            }
+
+            public bool VerifyChecksum()
+            {
+                var currentChecksum = Checksum;
+                UpdateChecksum();
+                return currentChecksum == Checksum;
+            }
+        }
+
+        private class WALEntry
+        {
+            public string Key { get; set; } = string.Empty;
+            public WALOperation Operation { get; set; }
+            public string Data { get; set; } = string.Empty;
+            public DateTime Timestamp { get; set; }
+        }
+
+        private enum WALOperation
+        {
+            Set,
+            Delete
         }
     }
 }
