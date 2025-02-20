@@ -39,6 +39,17 @@ namespace XPlain.Services
         public double PerformanceGain => NonCachedResponseTime == 0 ? 0 : (NonCachedResponseTime - CachedResponseTime) / NonCachedResponseTime * 100;
     }
 
+    public record PreWarmingMetrics
+    {
+        public int TotalAttempts { get; init; }
+        public int SuccessfulPreWarms { get; init; }
+        public double SuccessRate => TotalAttempts == 0 ? 0 : (double)SuccessfulPreWarms / TotalAttempts;
+        public double AverageResourceUsage { get; init; }
+        public double CacheHitImprovementPercent { get; init; }
+        public double AverageResponseTimeImprovement { get; init; }
+        public DateTime LastUpdate { get; init; }
+    }
+
     public record CacheStats
     {
         public long Hits { get; init; }

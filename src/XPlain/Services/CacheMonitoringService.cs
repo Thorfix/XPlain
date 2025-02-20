@@ -12,6 +12,7 @@ namespace XPlain.Services
         private MonitoringThresholds _thresholds;
         private readonly Dictionary<string, List<PolicySwitchEvent>> _policySwitchHistory;
         private readonly Dictionary<string, Dictionary<string, double>> _policyPerformanceHistory;
+        private readonly List<PreWarmingMonitoringMetrics> _preWarmingMetrics;
         private readonly MLPredictionService _predictionService;
         private readonly AutomaticMitigationService _mitigationService;
         private readonly System.Timers.Timer _mitigationTimer;
@@ -48,6 +49,7 @@ namespace XPlain.Services
             };
             _policySwitchHistory = new Dictionary<string, List<PolicySwitchEvent>>();
             _policyPerformanceHistory = new Dictionary<string, Dictionary<string, double>>();
+            _preWarmingMetrics = new List<PreWarmingMonitoringMetrics>();
             _predictionService = predictionService;
             _mitigationService = mitigationService;
 
@@ -234,6 +236,79 @@ namespace XPlain.Services
             return health.IsHealthy;
         }
 
+        public async Task RecordPreWarmingMetrics(
+            int batchSize,
+            PreWarmPriority priority,
+            DateTime timestamp,
+            PreWarmingMetrics metrics)
+        {
+            _preWarmingMetrics.Add(new PreWarmingMonitoringMetrics
+            {
+                BatchSize = batchSize,
+                Priority = priority,
+                Timestamp = timestamp,
+                Metrics = metrics
+            });
+
+            // If we have too many metrics, remove old ones
+            if (_preWarmingMetrics.Count > 1000)
+            {
+                _preWarmingMetrics.RemoveRange(0, _preWarmingMetrics.Count - 1000);
+            }
+
+            // Create alerts for significant changes
+            if (metrics.SuccessRate < 0.5)
+            {
+                await CreateAlertAsync(
+                    "PreWarming",
+                    $"Low pre-warming success rate ({metrics.SuccessRate:P2}) for priority {priority}",
+                    "Warning",
+                    new Dictionary<string, object>
+                    {
+                        ["success_rate"] = metrics.SuccessRate,
+                        ["priority"] = priority,
+                        ["batch_size"] = batchSize
+                    });
+            }
+
+            if (metrics.CacheHitImprovementPercent < 0)
+            {
+                await CreateAlertAsync(
+                    "PreWarming",
+                    $"Negative cache hit improvement ({metrics.CacheHitImprovementPercent:F2}%) detected",
+                    "Warning",
+                    new Dictionary<string, object>
+                    {
+                        ["improvement"] = metrics.CacheHitImprovementPercent,
+                        ["priority"] = priority
+                    });
+            }
+        }
+
+        public async Task<PreWarmingMetrics> GetAggregatePreWarmingMetrics(TimeSpan period)
+        {
+            var cutoff = DateTime.UtcNow - period;
+            var relevantMetrics = _preWarmingMetrics
+                .Where(m => m.Timestamp >= cutoff)
+                .Select(m => m.Metrics)
+                .ToList();
+
+            if (!relevantMetrics.Any())
+            {
+                return new PreWarmingMetrics();
+            }
+
+            return new PreWarmingMetrics
+            {
+                TotalAttempts = relevantMetrics.Sum(m => m.TotalAttempts),
+                SuccessfulPreWarms = relevantMetrics.Sum(m => m.SuccessfulPreWarms),
+                AverageResourceUsage = relevantMetrics.Average(m => m.AverageResourceUsage),
+                CacheHitImprovementPercent = relevantMetrics.Average(m => m.CacheHitImprovementPercent),
+                AverageResponseTimeImprovement = relevantMetrics.Average(m => m.AverageResponseTimeImprovement),
+                LastUpdate = relevantMetrics.Max(m => m.LastUpdate)
+            };
+        }
+
         public async Task<Dictionary<string, double>> GetPerformanceMetricsAsync()
         {
             var metrics = new Dictionary<string, double>();
@@ -245,6 +320,13 @@ namespace XPlain.Services
             
             metrics["CacheHitRate"] = await GetCurrentHitRatioAsync();
             metrics["MemoryUsage"] = await GetMemoryUsageAsync();
+            
+            // Add pre-warming metrics
+            var preWarmMetrics = await GetAggregatePreWarmingMetrics(TimeSpan.FromHours(24));
+            metrics["PreWarmSuccessRate"] = preWarmMetrics.SuccessRate;
+            metrics["PreWarmResourceUsage"] = preWarmMetrics.AverageResourceUsage;
+            metrics["PreWarmCacheHitImprovement"] = preWarmMetrics.CacheHitImprovementPercent;
+            metrics["PreWarmResponseTimeImprovement"] = preWarmMetrics.AverageResponseTimeImprovement;
             
             // Get adaptive policy metrics
             if (_cacheProvider is FileBasedCacheProvider provider)
