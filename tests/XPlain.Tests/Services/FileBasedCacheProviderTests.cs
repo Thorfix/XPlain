@@ -1500,6 +1500,363 @@ namespace XPlain.Tests.Services
             Assert.Equal(testCases.Length, encryptionStatus.EncryptedFileCount);
         }
 
+        [Fact]
+        public async Task WAL_PersistenceDuringProcessRestart()
+        {
+            // Arrange
+            var key = "wal_persistence_key";
+            var value = "wal_persistence_value";
+            var walDir = Path.Combine(_testDirectory, "wal");
+
+            // Act - Phase 1: Initial write with immediate process "termination"
+            var initialProvider = new FileBasedCacheProvider(
+                Options.Create(_defaultSettings),
+                _llmProviderMock.Object);
+
+            await initialProvider.SetAsync(key, value);
+
+            // Simulate process termination by forcing WAL file to remain
+            var walFiles = Directory.GetFiles(walDir);
+            Assert.NotEmpty(walFiles);
+
+            // Corrupt the main cache file to simulate partial write
+            var cacheFile = Directory.GetFiles(_testDirectory, "*.json")
+                .First(f => f.Contains(
+                    Convert.ToBase64String(SHA256.HashData(Encoding.UTF8.GetBytes(key)))));
+            File.WriteAllText(cacheFile, "corrupted during process termination");
+
+            // Act - Phase 2: New process startup
+            var newProvider = new FileBasedCacheProvider(
+                Options.Create(_defaultSettings),
+                _llmProviderMock.Object);
+
+            // Assert
+            var recoveredValue = await newProvider.GetAsync<string>(key);
+            Assert.Equal(value, recoveredValue);
+
+            // Verify WAL files are cleaned up after recovery
+            Assert.Empty(Directory.GetFiles(walDir));
+        }
+
+        [Fact]
+        public async Task CacheConsistency_PartialWriteFailures()
+        {
+            // Arrange
+            var key = "partial_write_key";
+            var value = "partial_write_value";
+            var tempFiles = new List<string>();
+
+            // Act - Simulate multiple partial write scenarios
+            for (int failurePoint = 0; failurePoint < 3; failurePoint++)
+            {
+                try
+                {
+                    var writeTask = _cacheProvider.SetAsync(key, value);
+
+                    // Capture temp files during write
+                    tempFiles.AddRange(Directory.GetFiles(_testDirectory, "*.tmp"));
+
+                    switch (failurePoint)
+                    {
+                        case 0: // Fail during temp file write
+                            foreach (var tmp in tempFiles)
+                            {
+                                File.WriteAllText(tmp, "corrupted temp");
+                            }
+                            break;
+
+                        case 1: // Fail during WAL write
+                            var walFiles = Directory.GetFiles(Path.Combine(_testDirectory, "wal"));
+                            foreach (var wal in walFiles)
+                            {
+                                File.WriteAllText(wal, "corrupted wal");
+                            }
+                            break;
+
+                        case 2: // Fail during final move
+                            var cacheFiles = Directory.GetFiles(_testDirectory, "*.json");
+                            foreach (var cache in cacheFiles)
+                            {
+                                File.WriteAllText(cache, "corrupted cache");
+                            }
+                            break;
+                    }
+
+                    await writeTask;
+                }
+                catch
+                {
+                    // Expected exceptions during simulated failures
+                }
+
+                // Verify cache state after each failure
+                var storedValue = await _cacheProvider.GetAsync<string>(key);
+                if (storedValue != null)
+                {
+                    Assert.Equal(value, storedValue);
+                }
+
+                // Verify no temp files remain
+                Assert.Empty(Directory.GetFiles(_testDirectory, "*.tmp"));
+            }
+        }
+
+        [Fact]
+        public async Task SensitiveData_CleanupAfterExpiration()
+        {
+            // Arrange
+            var key = "sensitive_expiring_key";
+            var sensitiveValue = "sensitive_data_" + Guid.NewGuid().ToString();
+            var shortExpiration = TimeSpan.FromMilliseconds(100);
+
+            // Act
+            await _cacheProvider.SetAsync(key, sensitiveValue, shortExpiration);
+            
+            // Get the cache file path
+            var cacheFile = Directory.GetFiles(_testDirectory, "*.json")
+                .First(f => f.Contains(
+                    Convert.ToBase64String(SHA256.HashData(Encoding.UTF8.GetBytes(key)))));
+
+            // Initial verification
+            Assert.True(File.Exists(cacheFile));
+            var initialContent = await File.ReadAllTextAsync(cacheFile);
+            Assert.DoesNotContain(sensitiveValue, initialContent);
+
+            // Wait for expiration
+            await Task.Delay(shortExpiration.Add(TimeSpan.FromMilliseconds(100)));
+
+            // Trigger cleanup by attempting to read
+            var expiredValue = await _cacheProvider.GetAsync<string>(key);
+            Assert.Null(expiredValue);
+
+            // Assert
+            // Verify the file is deleted
+            Assert.False(File.Exists(cacheFile));
+
+            // Check all files in cache directory for sensitive data
+            foreach (var file in Directory.GetFiles(_testDirectory, "*.*", SearchOption.AllDirectories))
+            {
+                var content = await File.ReadAllTextAsync(file);
+                Assert.DoesNotContain(sensitiveValue, content);
+            }
+
+            // Verify WAL and backup cleanup
+            var walFiles = Directory.GetFiles(Path.Combine(_testDirectory, "wal"));
+            var backupFiles = Directory.GetFiles(Path.Combine(_testDirectory, "backups"));
+
+            foreach (var file in walFiles.Concat(backupFiles))
+            {
+                var content = await File.ReadAllTextAsync(file);
+                Assert.DoesNotContain(sensitiveValue, content);
+            }
+
+            // Verify new cache operations work after cleanup
+            await _cacheProvider.SetAsync(key, "new value");
+            var newValue = await _cacheProvider.GetAsync<string>(key);
+            Assert.Equal("new value", newValue);
+        }
+
+        [Fact]
+        public async Task AtomicOperations_ConcurrentFileSystemAccess()
+        {
+            // Arrange
+            const int concurrentOperations = 100;
+            var key = "atomic_test_key";
+            var tasks = new List<Task>();
+            var successfulOperations = 0;
+            var operations = new ConcurrentBag<string>();
+
+            // Act
+            // Multiple concurrent file operations
+            for (int i = 0; i < concurrentOperations; i++)
+            {
+                tasks.Add(Task.Run(async () =>
+                {
+                    try
+                    {
+                        // Perform write operation
+                        await _cacheProvider.SetAsync(key, $"value_{i}");
+                        operations.Add($"write_{i}");
+
+                        // Immediately try to read
+                        var value = await _cacheProvider.GetAsync<string>(key);
+                        Assert.NotNull(value);
+                        Assert.StartsWith("value_", value);
+                        operations.Add($"read_{i}");
+
+                        Interlocked.Increment(ref successfulOperations);
+                    }
+                    catch (Exception ex)
+                    {
+                        operations.Add($"error_{i}_{ex.GetType().Name}");
+                    }
+                }));
+            }
+
+            await Task.WhenAll(tasks);
+
+            // Assert
+            Assert.Equal(concurrentOperations, successfulOperations);
+
+            // Verify file system state
+            var tempFiles = Directory.GetFiles(_testDirectory, "*.tmp");
+            Assert.Empty(tempFiles);
+
+            var walFiles = Directory.GetFiles(Path.Combine(_testDirectory, "wal"));
+            Assert.Empty(walFiles);
+
+            // Verify final cache state is consistent
+            var finalValue = await _cacheProvider.GetAsync<string>(key);
+            Assert.NotNull(finalValue);
+            Assert.StartsWith("value_", finalValue);
+
+            // Check operation order
+            var orderedOps = operations.OrderBy(op => op).ToList();
+            foreach (var op in orderedOps.Where(o => o.StartsWith("write_")))
+            {
+                var writeNum = int.Parse(op.Split('_')[1]);
+                var corresponding = orderedOps.FirstOrDefault(o => o == $"read_{writeNum}");
+                Assert.NotNull(corresponding);
+            }
+        }
+
+        [Fact]
+        public async Task CacheInvalidation_DetailedMechanisms()
+        {
+            // Arrange
+            var testData = new List<(string key, string value, TimeSpan? expiration)>
+            {
+                ("key1", "value1", TimeSpan.FromMilliseconds(100)),  // Short expiration
+                ("key2", "value2", TimeSpan.FromDays(1)),            // Long expiration
+                ("key3", "value3", null),                            // Default expiration
+                ("key4", "value4", TimeSpan.FromMilliseconds(50))    // Very short expiration
+            };
+
+            // Act - Phase 1: Initial data population
+            foreach (var (key, value, expiration) in testData)
+            {
+                await _cacheProvider.SetAsync(key, value, expiration);
+            }
+
+            // Wait for short expirations
+            await Task.Delay(150);
+
+            // Phase 2: Verify expiration-based invalidation
+            Assert.Null(await _cacheProvider.GetAsync<string>("key1"));
+            Assert.Null(await _cacheProvider.GetAsync<string>("key4"));
+            Assert.NotNull(await _cacheProvider.GetAsync<string>("key2"));
+            Assert.NotNull(await _cacheProvider.GetAsync<string>("key3"));
+
+            // Phase 3: Code change invalidation
+            await _cacheProvider.InvalidateOnCodeChangeAsync("new_code_hash");
+
+            // Verify all entries are invalidated
+            foreach (var (key, _, _) in testData)
+            {
+                Assert.Null(await _cacheProvider.GetAsync<string>(key));
+            }
+
+            // Phase 4: Test selective invalidation
+            await _cacheProvider.SetAsync("test_key", "test_value");
+            var cacheStats = _cacheProvider.GetCacheStats();
+            var initialInvalidationCount = cacheStats.InvalidationCount;
+
+            // Corrupt specific cache entry
+            var cacheFile = Directory.GetFiles(_testDirectory, "*.json").First();
+            File.WriteAllText(cacheFile, "corrupted_data");
+
+            // Try to read corrupted entry
+            var result = await _cacheProvider.GetAsync<string>("test_key");
+            Assert.Null(result);
+
+            // Verify only the corrupted entry was invalidated
+            cacheStats = _cacheProvider.GetCacheStats();
+            Assert.Equal(initialInvalidationCount + 1, cacheStats.InvalidationCount);
+        }
+
+        [Fact]
+        public async Task FileLock_HandlingDuringOperations()
+        {
+            // Arrange
+            var key = "lock_test_key";
+            var value = "lock_test_value";
+            var filePath = Path.Combine(_testDirectory, 
+                Convert.ToBase64String(SHA256.HashData(Encoding.UTF8.GetBytes(key))) + ".json");
+
+            // Act & Assert
+            // Test 1: Write operation with file lock
+            using (var fileLock = File.Open(filePath, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None))
+            {
+                // Attempt write while file is locked
+                await Assert.ThrowsAnyAsync<IOException>(async () =>
+                    await _cacheProvider.SetAsync(key, value));
+            }
+
+            // Test 2: Concurrent lock attempts
+            var tasks = new List<Task>();
+            var successCount = 0;
+            var failCount = 0;
+
+            for (int i = 0; i < 10; i++)
+            {
+                tasks.Add(Task.Run(async () =>
+                {
+                    try
+                    {
+                        using var fs = File.Open(filePath, FileMode.OpenOrCreate, 
+                            FileAccess.ReadWrite, FileShare.None);
+                        await Task.Delay(100); // Hold the lock
+                        Interlocked.Increment(ref successCount);
+                    }
+                    catch (IOException)
+                    {
+                        Interlocked.Increment(ref failCount);
+                    }
+                }));
+            }
+
+            await Task.WhenAll(tasks);
+
+            // Verify lock contention
+            Assert.True(successCount > 0);
+            Assert.True(failCount > 0);
+            Assert.Equal(10, successCount + failCount);
+
+            // Test 3: Lock release and recovery
+            await _cacheProvider.SetAsync(key, value);
+            var result = await _cacheProvider.GetAsync<string>(key);
+            Assert.Equal(value, result);
+
+            // Test 4: Lock timeout behavior
+            var longRunningTask = Task.Run(async () =>
+            {
+                using var fs = File.Open(filePath, FileMode.OpenOrCreate, 
+                    FileAccess.ReadWrite, FileShare.None);
+                await Task.Delay(5000); // Hold lock for 5 seconds
+            });
+
+            // Attempt operations while lock is held
+            var timeoutTask = Task.Run(async () =>
+            {
+                await Task.Delay(100); // Give time for lock to be acquired
+                var sw = Stopwatch.StartNew();
+                try
+                {
+                    await _cacheProvider.SetAsync(key, "timeout_test");
+                }
+                catch (IOException)
+                {
+                    sw.Stop();
+                    return sw.ElapsedMilliseconds;
+                }
+                return 0L;
+            });
+
+            var timeoutMs = await timeoutTask;
+            Assert.True(timeoutMs > 0, "Operation should timeout or fail when lock is held");
+            Assert.True(timeoutMs < 5000, "Operation should not wait for full lock duration");
+        }
+
         public void Dispose()
         {
             try
