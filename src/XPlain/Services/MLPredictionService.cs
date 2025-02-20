@@ -55,7 +55,47 @@ namespace XPlain.Services
         {
             var history = _metricHistory[metric];
             
+            // Check if this is a degradation point
+            bool isDegradation = IsPerformanceDegradation(metric, currentValue);
+            if (isDegradation)
+            {
+                // Extract the pattern that led to this degradation
+                var pattern = history.Skip(Math.Max(0, history.Count - _patternWindow - 1))
+                                   .Take(_patternWindow)
+                                   .ToList();
 
+                // Normalize the pattern
+                var normalizedPattern = NormalizeSequence(pattern);
+                
+                // Store or update the pattern
+                if (!_degradationPatterns.ContainsKey(metric))
+                {
+                    _degradationPatterns[metric] = new List<Pattern>();
+                }
+
+                var existingPattern = _degradationPatterns[metric]
+                    .FirstOrDefault(p => IsSimilarPattern(p.Sequence, normalizedPattern));
+
+                if (existingPattern != null)
+                {
+                    existingPattern.OccurrenceCount++;
+                    // Update the average time to issue
+                    existingPattern.TimeToIssue = TimeSpan.FromTicks(
+                        (existingPattern.TimeToIssue.Ticks * (existingPattern.OccurrenceCount - 1) +
+                         TimeSpan.FromMinutes(5).Ticks) / existingPattern.OccurrenceCount);
+                }
+                else
+                {
+                    _degradationPatterns[metric].Add(new Pattern
+                    {
+                        Sequence = normalizedPattern,
+                        IssueType = GetIssueType(metric, currentValue),
+                        Severity = CalculateIssueSeverity(metric, currentValue),
+                        OccurrenceCount = 1,
+                        TimeToIssue = TimeSpan.FromMinutes(5)
+                    });
+                }
+            }
 
             await AnalyzePrecursorPatterns(metric, currentValue);
         }
@@ -280,7 +320,6 @@ namespace XPlain.Services
                 "cachehitrate" => currentValue < baseline * 0.8,
                 "memoryusage" => currentValue > baseline * 1.2,
                 "averageresponsetime" => currentValue > baseline * 1.5,
-                _ => false
                 _ => false
             };
         }
@@ -515,11 +554,13 @@ namespace XPlain.Services
                 };
             }
 
+            var regressionTimeToImpact = EstimateTimeToImpact(slope, history.Last(), regressionPrediction);
+            
             return new PredictionResult
             {
-                Value = predictedValue,
+                Value = regressionPrediction,
                 Confidence = confidence,
-                TimeToImpact = timeToImpact
+                TimeToImpact = regressionTimeToImpact
             };
         }
 
@@ -614,11 +655,20 @@ namespace XPlain.Services
         }
     }
 
+    public class PredictionPattern
+    {
+        public string Type { get; set; }
+        public double Severity { get; set; }
+        public double Confidence { get; set; }
+        public TimeSpan TimeToIssue { get; set; }
+    }
+
     public class PredictionResult
     {
         public double Value { get; set; }
         public double Confidence { get; set; }
         public TimeSpan TimeToImpact { get; set; }
+        public PredictionPattern DetectedPattern { get; set; }
     }
 
     public class PredictedAlert
