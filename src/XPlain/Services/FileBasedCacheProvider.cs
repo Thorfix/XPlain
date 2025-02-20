@@ -30,6 +30,9 @@ namespace XPlain.Services
         private readonly string _statsFilePath;
         private readonly string _analyticsFilePath;
         private readonly Timer _analyticsTimer;
+        private readonly string _keyStorePath;
+        private readonly byte[] _encryptionKey;
+        private readonly object _encryptionLock = new object();
 
         public FileBasedCacheProvider(IOptions<CacheSettings> settings, ILLMProvider llmProvider)
         {
@@ -41,11 +44,18 @@ namespace XPlain.Services
             _backupDirectory = Path.Combine(_cacheDirectory, "backups");
             _statsFilePath = Path.Combine(_cacheDirectory, "cache_stats.json");
             _analyticsFilePath = Path.Combine(_analyticsDirectory, "analytics.json");
+            _keyStorePath = Path.Combine(_cacheDirectory, "keystore.dat");
             
             Directory.CreateDirectory(_cacheDirectory);
             Directory.CreateDirectory(_analyticsDirectory);
             Directory.CreateDirectory(_walDirectory);
             Directory.CreateDirectory(_backupDirectory);
+
+            // Initialize encryption
+            if (_settings.EncryptionEnabled)
+            {
+                _encryptionKey = InitializeEncryption();
+            }
             
             // Initialize cache state
             InitializeCacheState();
@@ -79,8 +89,23 @@ namespace XPlain.Services
 
             try
             {
+                byte[] fileData = await File.ReadAllBytesAsync(filePath);
+                
+                // Try to decrypt if encryption is enabled
+                if (_settings.EncryptionEnabled)
+                {
+                    try
+                    {
+                        fileData = DecryptData(fileData);
+                    }
+                    catch when (_settings.AllowUnencryptedLegacyFiles)
+                    {
+                        // If decryption fails and legacy files are allowed, try using the data as-is
+                    }
+                }
+
                 var cacheEntry = await JsonSerializer.DeserializeAsync<CacheEntry<T>>(
-                    File.OpenRead(filePath));
+                    new MemoryStream(fileData));
 
                 if (cacheEntry == null || cacheEntry.IsExpired)
                 {
@@ -308,10 +333,20 @@ namespace XPlain.Services
             };
 
             // Write to temporary file first
-            using (var stream = File.Create(tempFilePath))
+            byte[] serializedData;
+            using (var ms = new MemoryStream())
             {
-                await JsonSerializer.SerializeAsync(stream, cacheEntry);
+                await JsonSerializer.SerializeAsync(ms, cacheEntry);
+                serializedData = ms.ToArray();
             }
+
+            // Encrypt if enabled
+            if (_settings.EncryptionEnabled)
+            {
+                serializedData = EncryptData(serializedData);
+            }
+
+            await File.WriteAllBytesAsync(tempFilePath, serializedData);
 
             // Log the operation to WAL
             var walEntry = new WALEntry
@@ -453,6 +488,13 @@ namespace XPlain.Services
                     CachedItemCount = Directory.GetFiles(_cacheDirectory, "*.json").Length,
                     QueryTypeStats = new Dictionary<string, int>(_queryTypeStats),
                     TopQueries = GetTopQueries(),
+                    EncryptionStatus = new CacheEncryptionStatus
+                    {
+                        Enabled = _settings.EncryptionEnabled,
+                        Algorithm = _settings.EncryptionAlgorithm,
+                        LastKeyRotation = File.GetLastWriteTimeUtc(_keyStorePath),
+                        EncryptedFileCount = GetEncryptedFileCount()
+                    },
                     AverageResponseTimes = _queryResponseStats.ToDictionary(
                         kv => kv.Key,
                         kv => (kv.Value.TotalTimeCached + kv.Value.TotalTimeNonCached) / kv.Value.Count
@@ -748,6 +790,27 @@ namespace XPlain.Services
             }
         }
 
+        private int GetEncryptedFileCount()
+        {
+            if (!_settings.EncryptionEnabled) return 0;
+
+            int count = 0;
+            foreach (var file in Directory.GetFiles(_cacheDirectory, "*.json"))
+            {
+                try
+                {
+                    var data = File.ReadAllBytes(file);
+                    DecryptData(data);
+                    count++;
+                }
+                catch
+                {
+                    // Not an encrypted file
+                }
+            }
+            return count;
+        }
+
         private class CacheEntryWithChecksum<T> : CacheEntry<T>
         {
             public string Checksum { get; private set; } = string.Empty;
@@ -790,6 +853,134 @@ namespace XPlain.Services
         {
             Set,
             Delete
+        }
+
+        private byte[] InitializeEncryption()
+        {
+            if (string.IsNullOrEmpty(_settings.EncryptionKey))
+            {
+                // Generate new key if none provided
+                using var aes = Aes.Create();
+                aes.KeySize = 256;
+                aes.GenerateKey();
+                var key = aes.Key;
+                SaveEncryptionKey(key);
+                return key;
+            }
+            else if (File.Exists(_keyStorePath))
+            {
+                // Load existing key
+                return File.ReadAllBytes(_keyStorePath);
+            }
+            else
+            {
+                // Use provided key
+                var key = Convert.FromBase64String(_settings.EncryptionKey);
+                SaveEncryptionKey(key);
+                return key;
+            }
+        }
+
+        private void SaveEncryptionKey(byte[] key)
+        {
+            // In a production environment, this should use a secure key storage mechanism
+            // like Windows DPAPI or a Hardware Security Module (HSM)
+            File.WriteAllBytes(_keyStorePath, key);
+        }
+
+        private byte[] EncryptData(byte[] data)
+        {
+            if (!_settings.EncryptionEnabled) return data;
+
+            using var aes = Aes.Create();
+            aes.Key = _encryptionKey;
+            aes.GenerateIV();
+
+            using var encryptor = aes.CreateEncryptor();
+            using var ms = new MemoryStream();
+            
+            // Write IV first
+            ms.Write(aes.IV, 0, aes.IV.Length);
+
+            using (var cs = new CryptoStream(ms, encryptor, CryptoStreamMode.Write))
+            using (var bw = new BinaryWriter(cs))
+            {
+                bw.Write(data);
+            }
+
+            return ms.ToArray();
+        }
+
+        private byte[] DecryptData(byte[] encryptedData)
+        {
+            if (!_settings.EncryptionEnabled) return encryptedData;
+
+            using var aes = Aes.Create();
+            aes.Key = _encryptionKey;
+
+            // Read IV from the beginning of the encrypted data
+            var iv = new byte[aes.BlockSize / 8];
+            Array.Copy(encryptedData, iv, iv.Length);
+            aes.IV = iv;
+
+            using var decryptor = aes.CreateDecryptor();
+            using var ms = new MemoryStream();
+            
+            using (var cs = new CryptoStream(
+                new MemoryStream(encryptedData, iv.Length, encryptedData.Length - iv.Length),
+                decryptor,
+                CryptoStreamMode.Read))
+            {
+                cs.CopyTo(ms);
+            }
+
+            return ms.ToArray();
+        }
+
+        private async Task RotateEncryptionKeyAsync()
+        {
+            if (!_settings.EncryptionEnabled) return;
+
+            lock (_encryptionLock)
+            {
+                // Generate new key
+                using var aes = Aes.Create();
+                aes.KeySize = 256;
+                aes.GenerateKey();
+                var newKey = aes.Key;
+
+                // Store old key for re-encryption
+                var oldKey = _encryptionKey;
+
+                // Re-encrypt all cache files with new key
+                var files = Directory.GetFiles(_cacheDirectory, "*.json");
+                foreach (var file in files)
+                {
+                    try
+                    {
+                        var content = File.ReadAllBytes(file);
+                        var decrypted = DecryptData(content);
+                        
+                        // Update encryption key and re-encrypt
+                        _encryptionKey = newKey;
+                        var reencrypted = EncryptData(decrypted);
+                        
+                        File.WriteAllBytes(file, reencrypted);
+                    }
+                    catch
+                    {
+                        // If decryption fails, file might be unencrypted legacy file
+                        if (_settings.AllowUnencryptedLegacyFiles)
+                        {
+                            continue;
+                        }
+                        File.Delete(file);
+                    }
+                }
+
+                // Save new key
+                SaveEncryptionKey(newKey);
+            }
         }
     }
 }
