@@ -14,6 +14,7 @@ namespace XPlain.Services
         private readonly Dictionary<string, List<Pattern>> _degradationPatterns;
         private readonly Dictionary<string, List<PrecursorPattern>> _precursorPatterns;
         private readonly int _historyWindow = 100;  // Number of data points to keep
+        private readonly object _modelsLock = new object();  // Lock for thread-safe model updates
         private readonly double _confidenceThreshold = 0.85;
         private readonly int _patternWindow = 10;   // Window size for pattern detection
         private readonly int _precursorWindow = 20; // Window size for precursor detection
@@ -33,6 +34,22 @@ namespace XPlain.Services
             _degradationPatterns = new Dictionary<string, List<Pattern>>();
             _precursorPatterns = new Dictionary<string, List<PrecursorPattern>>();
             _activeModels = new Dictionary<string, MLModel>();
+        }
+
+        public async Task UpdateModelAsync(string actionType, MLModel newModel)
+        {
+            if (string.IsNullOrEmpty(actionType) || newModel == null)
+                throw new ArgumentNullException(actionType == null ? nameof(actionType) : nameof(newModel));
+
+            if (_activeModels.ContainsKey(actionType))
+            {
+                _activeModels[actionType] = newModel;
+                _logger.LogInformation("Successfully updated ML model for {ActionType}", actionType);
+            }
+            else
+            {
+                _logger.LogWarning("Attempted to update non-existent model for {ActionType}", actionType);
+            }
         }
 
         private class PrecursorPattern

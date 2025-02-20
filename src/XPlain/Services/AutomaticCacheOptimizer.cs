@@ -1,7 +1,9 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Text.Json;
 using System.Threading.Tasks;
+using System.IO;
 using Microsoft.Extensions.Logging;
 
 namespace XPlain.Services
@@ -14,6 +16,8 @@ namespace XPlain.Services
         private readonly MLPredictionService _predictionService;
         private readonly ILogger<AutomaticCacheOptimizer> _logger;
         private readonly Dictionary<string, double> _baselineThresholds;
+        private readonly string _strategyHistoryPath = "optimization_strategies.json";
+        private readonly string _auditTrailPath = "optimization_audit.json";
         private readonly double _maxThresholdAdjustment = 0.2; // Maximum 20% adjustment
         private readonly TimeSpan _optimizationCooldown = TimeSpan.FromMinutes(5);
         private readonly TimeSpan _rollbackCheckPeriod = TimeSpan.FromMinutes(1);
@@ -36,12 +40,93 @@ namespace XPlain.Services
             _logger = logger;
             _modelTrainingService = modelTrainingService;
             _baselineThresholds = new Dictionary<string, double>();
-            _optimizationStrategies = new Dictionary<string, OptimizationStrategy>();
+            _optimizationStrategies = LoadStrategies();
             _activeOptimizations = new Dictionary<string, OptimizationAction>();
-            _auditTrail = new Queue<OptimizationAction>();
+            _auditTrail = LoadAuditTrail();
 
             // Start optimization monitoring
             _ = MonitorOptimizationsAsync();
+            _ = PeriodicStrategyPersistenceAsync();
+        }
+
+        private Dictionary<string, OptimizationStrategy> LoadStrategies()
+        {
+            try
+            {
+                if (File.Exists(_strategyHistoryPath))
+                {
+                    var json = File.ReadAllText(_strategyHistoryPath);
+                    return JsonSerializer.Deserialize<Dictionary<string, OptimizationStrategy>>(json) 
+                           ?? new Dictionary<string, OptimizationStrategy>();
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error loading optimization strategies");
+            }
+            return new Dictionary<string, OptimizationStrategy>();
+        }
+
+        private Queue<OptimizationAction> LoadAuditTrail()
+        {
+            try
+            {
+                if (File.Exists(_auditTrailPath))
+                {
+                    var json = File.ReadAllText(_auditTrailPath);
+                    var list = JsonSerializer.Deserialize<List<OptimizationAction>>(json) ?? new List<OptimizationAction>();
+                    return new Queue<OptimizationAction>(list);
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error loading audit trail");
+            }
+            return new Queue<OptimizationAction>();
+        }
+
+        private async Task PeriodicStrategyPersistenceAsync()
+        {
+            while (true)
+            {
+                await Task.Delay(TimeSpan.FromMinutes(5)); // Save every 5 minutes
+                await SaveStrategiesAsync();
+                await SaveAuditTrailAsync();
+            }
+        }
+
+        private async Task SaveStrategiesAsync()
+        {
+            try
+            {
+                var json = JsonSerializer.Serialize(_optimizationStrategies, new JsonSerializerOptions 
+                { 
+                    WriteIndented = true 
+                });
+                await File.WriteAllTextAsync(_strategyHistoryPath, json);
+                _logger.LogInformation("Saved optimization strategies to disk");
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error saving optimization strategies");
+            }
+        }
+
+        private async Task SaveAuditTrailAsync()
+        {
+            try
+            {
+                var json = JsonSerializer.Serialize(_auditTrail.ToList(), new JsonSerializerOptions 
+                { 
+                    WriteIndented = true 
+                });
+                await File.WriteAllTextAsync(_auditTrailPath, json);
+                _logger.LogInformation("Saved audit trail to disk");
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error saving audit trail");
+            }
         }
 
         public async Task OptimizeAsync(PredictionResult prediction)
@@ -444,11 +529,25 @@ namespace XPlain.Services
                     }
                 };
 
-                // Add to training dataset
+                // Add to training dataset and force retraining
                 await _modelTrainingService.AddTrainingDataAsync(trainingData);
-
-                // If we have enough new data, retrain the model
-                if (ShouldRetrainModel(action.ActionType))
+                
+                // Always retrain after successful optimizations to quickly adapt
+                if (wasSuccessful)
+                {
+                    await _modelTrainingService.TrainModelAsync(action.ActionType);
+                    _logger.LogInformation("Retrained ML model for {ActionType} based on successful optimization", action.ActionType);
+                    
+                    // Update prediction models immediately
+                    var newModel = await _modelTrainingService.GetLatestModel(action.ActionType);
+                    if (newModel != null && await _modelTrainingService.ValidateModel(newModel, action.ActionType))
+                    {
+                        await _predictionService.UpdateModelAsync(action.ActionType, newModel);
+                        _logger.LogInformation("Updated prediction model for {ActionType} with newly trained version", action.ActionType);
+                    }
+                }
+                // For failed optimizations, retrain periodically to adapt to changing patterns
+                else if (ShouldRetrainModel(action.ActionType))
                 {
                     await _modelTrainingService.TrainModelAsync(action.ActionType);
                     _logger.LogInformation("Retrained ML model for {ActionType} based on optimization outcomes", action.ActionType);
