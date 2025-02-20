@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Cache Monitoring Dashboard</title>
+    <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@microsoft/signalr@6.0.1/dist/browser/signalr.min.js"></script>
+</head>
+<body class="bg-gray-100">
+    <div class="container mx-auto px-4 py-8">
+        <h1 class="text-3xl font-bold mb-8">Cache Monitoring Dashboard</h1>
+
+        <!-- Health Status Section -->
+        <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
+            <div class="bg-white p-4 rounded-lg shadow">
+                <h3 class="text-lg font-semibold mb-2">Hit Ratio</h3>
+                <p id="hitRatio" class="text-2xl font-bold text-blue-600">-</p>
+            </div>
+            <div class="bg-white p-4 rounded-lg shadow">
+                <h3 class="text-lg font-semibold mb-2">Memory Usage</h3>
+                <p id="memoryUsage" class="text-2xl font-bold text-green-600">-</p>
+            </div>
+            <div class="bg-white p-4 rounded-lg shadow">
+                <h3 class="text-lg font-semibold mb-2">Response Time</h3>
+                <p id="responseTime" class="text-2xl font-bold text-purple-600">-</p>
+            </div>
+            <div class="bg-white p-4 rounded-lg shadow">
+                <h3 class="text-lg font-semibold mb-2">Cached Items</h3>
+                <p id="itemCount" class="text-2xl font-bold text-gray-600">-</p>
+            </div>
+        </div>
+
+        <!-- Charts Section -->
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-8 mb-8">
+            <div class="bg-white p-4 rounded-lg shadow">
+                <h3 class="text-lg font-semibold mb-4">Health Status</h3>
+                <canvas id="healthChart" height="200"></canvas>
+            </div>
+            <div class="bg-white p-4 rounded-lg shadow">
+                <h3 class="text-lg font-semibold mb-4">Performance Metrics</h3>
+                <canvas id="metricsChart" height="200"></canvas>
+            </div>
+        </div>
+
+        <!-- Analytics Section -->
+        <div class="grid grid-cols-1 mb-8">
+            <div class="bg-white p-4 rounded-lg shadow">
+                <h3 class="text-lg font-semibold mb-4">Historical Analytics</h3>
+                <canvas id="analyticsChart" height="200"></canvas>
+            </div>
+        </div>
+
+        <!-- Alerts Section -->
+        <div class="bg-white p-4 rounded-lg shadow mb-8">
+            <h3 class="text-lg font-semibold mb-4">Active Alerts</h3>
+            <div id="alertsList" class="space-y-4">
+                <!-- Alerts will be populated here -->
+            </div>
+        </div>
+
+        <!-- Status Footer -->
+        <div class="text-center text-gray-600">
+            <p>Last Updated: <span id="lastUpdate">-</span></p>
+        </div>
+    </div>
+
+    <script src="/js/dashboard.js"></script>
+</body>
+</html>

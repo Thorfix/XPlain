@@ -959,6 +959,8 @@ file class Program
             // Add ASP.NET Core services
             services.AddEndpointsApiExplorer();
             services.AddSwaggerGen();
+            services.AddControllers();
+            services.AddSignalR(); // For real-time updates
             services.AddCors(options =>
             {
                 options.AddDefaultPolicy(builder =>
