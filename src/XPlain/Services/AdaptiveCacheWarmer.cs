@@ -4,13 +4,16 @@ using System.Collections.Generic;
 using System.Linq;
 using Microsoft.Extensions.Logging;
 
+using Microsoft.Extensions.Hosting;
+
 namespace XPlain.Services
 {
-    public class AdaptiveCacheWarmer : IHostedService
+    public class AdaptiveCacheWarmer : IHostedService, IDisposable
     {
         private readonly ICacheProvider _cacheProvider;
         private readonly MLPredictionService _mlPredictionService;
         private readonly MLModelTrainingService _mlModelTrainingService;
+        private readonly ResourceMonitor _resourceMonitor;
         private readonly ILogger<AdaptiveCacheWarmer> _logger;
         private readonly CacheMonitoringService _monitoringService;
         private Timer? _warmupTimer;
@@ -21,12 +24,14 @@ namespace XPlain.Services
             ICacheProvider cacheProvider,
             MLPredictionService mlPredictionService,
             MLModelTrainingService mlModelTrainingService,
+            ResourceMonitor resourceMonitor,
             CacheMonitoringService monitoringService,
             ILogger<AdaptiveCacheWarmer> logger)
         {
             _cacheProvider = cacheProvider;
             _mlPredictionService = mlPredictionService;
             _mlModelTrainingService = mlModelTrainingService;
+            _resourceMonitor = resourceMonitor;
             _monitoringService = monitoringService;
             _logger = logger;
             _metrics = new PreWarmingMetrics();
@@ -67,23 +72,53 @@ namespace XPlain.Services
             try
             {
                 var stats = _cacheProvider.GetCacheStats();
+                var resourceMetrics = await _resourceMonitor.GetResourceMetricsAsync();
                 var trainingData = await PrepareTrainingData(stats);
                 
+                // Get user activity patterns
+                var userPatterns = stats.TopQueries
+                    .GroupBy(q => GetTimeSlot(q.Query))
+                    .ToDictionary(
+                        g => g.Key,
+                        g => g.Sum(q => q.Frequency)
+                    );
+
+                // Create enhanced training parameters
+                var parameters = new ModelTrainingParameters
+                {
+                    IncludeTimeFeatures = true,
+                    IncludeUserActivityPatterns = true,
+                    IncludeQueryPatterns = true,
+                    OptimizeForResourceUsage = true,
+                    Features = new Dictionary<string, object>
+                    {
+                        ["user_patterns"] = userPatterns,
+                        ["system_load"] = resourceMetrics.SystemLoad,
+                        ["available_memory"] = resourceMetrics.AvailableMemoryMB,
+                        ["cpu_usage"] = resourceMetrics.CpuUsagePercent,
+                        ["io_operations"] = resourceMetrics.IoOperationsPerSecond
+                    },
+                    Weights = new Dictionary<string, double>
+                    {
+                        ["access_frequency"] = 0.4,
+                        ["performance_impact"] = 0.3,
+                        ["resource_usage"] = 0.2,
+                        ["time_pattern"] = 0.1
+                    }
+                };
+
                 await _mlModelTrainingService.TrainModelAsync(
                     trainingData,
-                    new ModelTrainingParameters
-                    {
-                        IncludeTimeFeatures = true,
-                        IncludeUserActivityPatterns = true,
-                        IncludeQueryPatterns = true,
-                        OptimizeForResourceUsage = true
-                    }
+                    parameters
                 );
 
                 // Update the prediction service with the new model
                 await _mlPredictionService.UpdateModelAsync("cache_prediction_model.zip");
                 
-                _logger.LogInformation("Successfully trained and updated ML model");
+                _logger.LogInformation(
+                    "Successfully trained and updated ML model with {QueryCount} queries and {PatternCount} time patterns",
+                    trainingData.Count,
+                    userPatterns.Count);
             }
             catch (Exception ex)
             {
@@ -114,6 +149,14 @@ namespace XPlain.Services
             return trainingData;
         }
 
+        private string GetTimeSlot(string query)
+        {
+            // Extract or derive time-based patterns from query
+            var hash = query.GetHashCode();
+            var hour = Math.Abs(hash % 24);
+            return $"{hour:D2}:00";
+        }
+
         private async Task ExecuteWarmingCycle(CancellationToken cancellationToken)
         {
             try
@@ -121,6 +164,17 @@ namespace XPlain.Services
                 var startTime = DateTime.UtcNow;
                 var startMemory = GC.GetTotalMemory(false);
                 var baselineHitRate = _cacheProvider.GetCacheStats().HitRatio;
+                var resourceMetrics = await _resourceMonitor.GetResourceMetricsAsync();
+
+                // Check if system can handle pre-warming
+                if (!resourceMetrics.CanHandleAdditionalLoad(100)) // Assume 100MB baseline
+                {
+                    _logger.LogWarning(
+                        "Skipping pre-warming cycle due to high system load: CPU {CpuUsage}%, Memory {MemoryUsage}MB",
+                        resourceMetrics.CpuUsagePercent,
+                        resourceMetrics.MemoryUsageMB);
+                    return;
+                }
                 var strategy = await _cacheProvider.OptimizePreWarmingStrategyAsync();
                 var candidates = await _cacheProvider.GetPreWarmCandidatesAsync();
                 
@@ -140,6 +194,18 @@ namespace XPlain.Services
                     
                     for (int i = 0; i < keys.Count; i += batchSize)
                     {
+                        // Check resource metrics before each batch
+                        resourceMetrics = await _resourceMonitor.GetResourceMetricsAsync();
+                        if (!resourceMetrics.CanHandleAdditionalLoad(50)) // 50MB per batch estimate
+                        {
+                            _logger.LogInformation(
+                                "Pausing pre-warming due to resource constraints. Completed {CompletedCount}/{TotalCount} items",
+                                i,
+                                keys.Count);
+                            await Task.Delay(TimeSpan.FromMinutes(1), cancellationToken);
+                            continue;
+                        }
+
                         var batch = keys.Skip(i).Take(batchSize);
                         var success = await _cacheProvider.PreWarmBatchAsync(batch, group.Key);
                         
