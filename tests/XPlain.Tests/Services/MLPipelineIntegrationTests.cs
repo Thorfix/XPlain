@@ -208,5 +208,171 @@ namespace XPlain.Tests.Services
                 await _monitoringService.RecordMetrics(metrics);
             }
         }
+
+        [Fact]
+        public async Task ModelTraining_WithDifferentFeatureCombinations_ProducesValidModels()
+        {
+            // Arrange
+            var trainingData = GenerateTrainingData();
+            await SeedTrainingData(trainingData);
+
+            // Act - Train with different feature combinations
+            var featureSets = new[]
+            {
+                new[] { "CacheHitRate", "MemoryUsage" },
+                new[] { "CacheHitRate", "AverageResponseTime", "ActiveConnections" },
+                new[] { "CacheHitRate", "SystemCpuUsage", "SystemMemoryUsage", "MemoryUsage" }
+            };
+
+            var models = new List<MLModel>();
+            foreach (var features in featureSets)
+            {
+                await _modelTrainingService.TrainModels(features);
+                var model = await _modelTrainingService.GetLatestModel("CacheHitRate");
+                models.Add(model);
+            }
+
+            // Assert
+            foreach (var model in models)
+            {
+                Assert.NotNull(model);
+                Assert.True(model.Metadata.SelectedFeatures.Length > 1);
+                var validation = await _modelValidationService.ValidateModel(model);
+                Assert.True(validation, "Model should be valid with different feature combinations");
+            }
+        }
+
+        [Fact]
+        public async Task TrainingDataSplitting_ValidatesCorrectProportions()
+        {
+            // Arrange
+            var trainingData = GenerateTrainingData();
+            await SeedTrainingData(trainingData);
+
+            // Act
+            await _modelTrainingService.TrainModels();
+            var model = await _modelTrainingService.GetLatestModel("CacheHitRate");
+            var metrics = await _modelValidationService.GetModelHealthMetrics(model);
+
+            // Assert
+            Assert.True(metrics.ContainsKey("TrainTestSplit"));
+            Assert.True(metrics.ContainsKey("ValidationSetSize"));
+            Assert.True(metrics["TrainTestSplit"] >= 0.7, "Training set should be at least 70% of data");
+            Assert.True(metrics["ValidationSetSize"] >= 0.1, "Validation set should be at least 10% of data");
+        }
+
+        [Fact]
+        public async Task CrossValidation_EnsuresModelStability()
+        {
+            // Arrange
+            var trainingData = GenerateTrainingData();
+            await SeedTrainingData(trainingData);
+
+            // Act
+            await _modelTrainingService.TrainModels();
+            var model = await _modelTrainingService.GetLatestModel("CacheHitRate");
+            var crossValidationMetrics = await _modelValidationService.PerformCrossValidation(model);
+
+            // Assert
+            Assert.True(crossValidationMetrics.ContainsKey("CrossValidationScore"));
+            Assert.True(crossValidationMetrics["CrossValidationScore"] >= 0.7, 
+                "Cross-validation score should indicate stable performance");
+            Assert.True(crossValidationMetrics.ContainsKey("StandardDeviation"));
+            Assert.True(crossValidationMetrics["StandardDeviation"] <= 0.1, 
+                "Cross-validation results should be consistent");
+        }
+
+        [Fact]
+        public async Task CacheIntegration_OptimizesUnderDifferentScenarios()
+        {
+            // Arrange
+            var scenarios = new[]
+            {
+                (name: "HighLoad", data: GenerateHighLoadTrainingData()),
+                (name: "LowMemory", data: GenerateLowMemoryTrainingData()),
+                (name: "VariableLatency", data: GenerateVariableLatencyTrainingData())
+            };
+
+            foreach (var (name, data) in scenarios)
+            {
+                // Act
+                await SeedTrainingData(data);
+                await _modelTrainingService.TrainModels();
+                var optimization = await _cacheOptimizer.OptimizeCache();
+
+                // Assert
+                Assert.True(optimization.Success, $"Cache optimization should succeed in {name} scenario");
+                Assert.True(optimization.OptimizationMetrics["CacheHitRate"] > 0.6,
+                    $"Should maintain acceptable hit rate in {name} scenario");
+                Assert.True(optimization.OptimizationMetrics.ContainsKey("Stability"),
+                    "Should track optimization stability");
+            }
+        }
+
+        private List<PerformanceMetrics> GenerateHighLoadTrainingData()
+        {
+            var data = new List<PerformanceMetrics>();
+            var baseTime = DateTime.UtcNow.AddHours(-24);
+            var random = new Random(42);
+
+            for (int i = 0; i < 300; i++)
+            {
+                data.Add(new PerformanceMetrics
+                {
+                    Timestamp = baseTime.AddMinutes(i * 5),
+                    CacheHitRate = 0.7 + random.NextDouble() * 0.2,
+                    MemoryUsage = 2000 + random.Next(0, 500),
+                    AverageResponseTime = 150 + random.Next(0, 50),
+                    SystemCpuUsage = 0.8 + random.NextDouble() * 0.2,
+                    SystemMemoryUsage = 0.8 + random.NextDouble() * 0.2,
+                    ActiveConnections = 500 + random.Next(0, 100)
+                });
+            }
+            return data;
+        }
+
+        private List<PerformanceMetrics> GenerateLowMemoryTrainingData()
+        {
+            var data = new List<PerformanceMetrics>();
+            var baseTime = DateTime.UtcNow.AddHours(-24);
+            var random = new Random(42);
+
+            for (int i = 0; i < 300; i++)
+            {
+                data.Add(new PerformanceMetrics
+                {
+                    Timestamp = baseTime.AddMinutes(i * 5),
+                    CacheHitRate = 0.6 + random.NextDouble() * 0.2,
+                    MemoryUsage = 500 + random.Next(0, 200),
+                    AverageResponseTime = 120 + random.Next(0, 50),
+                    SystemCpuUsage = 0.6 + random.NextDouble() * 0.2,
+                    SystemMemoryUsage = 0.9 + random.NextDouble() * 0.1,
+                    ActiveConnections = 200 + random.Next(0, 50)
+                });
+            }
+            return data;
+        }
+
+        private List<PerformanceMetrics> GenerateVariableLatencyTrainingData()
+        {
+            var data = new List<PerformanceMetrics>();
+            var baseTime = DateTime.UtcNow.AddHours(-24);
+            var random = new Random(42);
+
+            for (int i = 0; i < 300; i++)
+            {
+                data.Add(new PerformanceMetrics
+                {
+                    Timestamp = baseTime.AddMinutes(i * 5),
+                    CacheHitRate = 0.75 + random.NextDouble() * 0.2,
+                    MemoryUsage = 1500 + random.Next(0, 500),
+                    AverageResponseTime = 100 + random.Next(0, 200),
+                    SystemCpuUsage = 0.7 + random.NextDouble() * 0.2,
+                    SystemMemoryUsage = 0.7 + random.NextDouble() * 0.2,
+                    ActiveConnections = 300 + random.Next(0, 100)
+                });
+            }
+            return data;
+        }
     }
 }
