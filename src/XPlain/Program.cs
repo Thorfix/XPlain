@@ -200,6 +200,96 @@ file class Program
             return await rootCommand.InvokeAsync(args);
         }
 
+        internal static async Task ShowCacheStats(ICacheProvider cacheProvider, OutputFormat format)
+        {
+            var stats = cacheProvider.GetCacheStats();
+            var chart = await cacheProvider.GeneratePerformanceChartAsync(format);
+            var recommendations = await cacheProvider.GetCacheWarmingRecommendationsAsync();
+            
+            var output = new
+            {
+                HitRatio = $"{stats.HitRatio:P2}",
+                Hits = stats.Hits,
+                Misses = stats.Misses,
+                CachedItems = stats.CachedItemCount,
+                StorageUsage = $"{stats.StorageUsageBytes / 1024.0 / 1024.0:F2} MB",
+                TopQueries = stats.TopQueries,
+                QueryTypes = stats.QueryTypeStats,
+                PerformanceByQueryType = stats.PerformanceByQueryType.ToDictionary(
+                    kvp => kvp.Key,
+                    kvp => $"{kvp.Value.PerformanceGain:F1}% faster (cached: {kvp.Value.CachedResponseTime:F2}ms, non-cached: {kvp.Value.NonCachedResponseTime:F2}ms)"
+                ),
+                InvalidationStats = new
+                {
+                    TotalInvalidations = stats.InvalidationCount,
+                    RecentInvalidations = stats.InvalidationHistory.TakeLast(5).ToList()
+                },
+                Recommendations = recommendations,
+                LastUpdate = stats.LastStatsUpdate,
+                PerformanceCharts = chart
+            };
+
+            switch (format)
+            {
+                case OutputFormat.Json:
+                    Console.WriteLine(JsonSerializer.Serialize(output, new JsonSerializerOptions { WriteIndented = true }));
+                    break;
+                case OutputFormat.Markdown:
+                    Console.WriteLine("# Cache Statistics");
+                    Console.WriteLine($"## Performance");
+                    Console.WriteLine($"- Hit Ratio: {output.HitRatio}");
+                    Console.WriteLine($"- Cache Hits: {output.Hits}");
+                    Console.WriteLine($"- Cache Misses: {output.Misses}");
+                    Console.WriteLine($"\n## Storage");
+                    Console.WriteLine($"- Cached Items: {output.CachedItems}");
+                    Console.WriteLine($"- Storage Usage: {output.StorageUsage}");
+                    Console.WriteLine($"\n## Top Queries");
+                    foreach (var (query, freq) in output.TopQueries)
+                    {
+                        Console.WriteLine($"- {query}: {freq} times");
+                    }
+                    Console.WriteLine($"\n## Query Types");
+                    foreach (var (type, count) in output.QueryTypes)
+                    {
+                        Console.WriteLine($"- {type}: {count} queries");
+                    }
+                    Console.WriteLine($"\n## Average Response Times");
+                    foreach (var (type, time) in output.AverageResponseTimes)
+                    {
+                        Console.WriteLine($"- {type}: {time}");
+                    }
+                    Console.WriteLine($"\nLast Updated: {output.LastUpdate:yyyy-MM-dd HH:mm:ss UTC}");
+                    break;
+                default:
+                    Console.WriteLine("Cache Statistics");
+                    Console.WriteLine("================");
+                    Console.WriteLine($"Performance:");
+                    Console.WriteLine($"  Hit Ratio: {output.HitRatio}");
+                    Console.WriteLine($"  Cache Hits: {output.Hits}");
+                    Console.WriteLine($"  Cache Misses: {output.Misses}");
+                    Console.WriteLine($"\nStorage:");
+                    Console.WriteLine($"  Cached Items: {output.CachedItems}");
+                    Console.WriteLine($"  Storage Usage: {output.StorageUsage}");
+                    Console.WriteLine($"\nTop Queries:");
+                    foreach (var (query, freq) in output.TopQueries)
+                    {
+                        Console.WriteLine($"  {query}: {freq} times");
+                    }
+                    Console.WriteLine($"\nQuery Types:");
+                    foreach (var (type, count) in output.QueryTypes)
+                    {
+                        Console.WriteLine($"  {type}: {count} queries");
+                    }
+                    Console.WriteLine($"\nAverage Response Times:");
+                    foreach (var (type, time) in output.AverageResponseTimes)
+                    {
+                        Console.WriteLine($"  {type}: {time}");
+                    }
+                    Console.WriteLine($"\nLast Updated: {output.LastUpdate:yyyy-MM-dd HH:mm:ss UTC}");
+                    break;
+            }
+        }
+
         internal static async Task<int> ExecuteWithOptions(CommandLineOptions options)
         {
             try
@@ -244,7 +334,12 @@ file class Program
                     Console.WriteLine($"Cache stats - Hits: {hits}, Misses: {misses}, Hit Rate: {(hits + misses == 0 ? 0 : hits * 100.0 / (hits + misses)):F1}%");
                 }
 
-                if (options.InteractiveMode)
+                if (options.ShowCacheStats)
+                {
+                    ShowCacheStats(cacheProvider, options.OutputFormat);
+                    return 0;
+                }
+                else if (options.InteractiveMode)
                 {
                     if (options.VerbosityLevel >= 1)
                     {
@@ -329,6 +424,89 @@ file class Program
                         case "version":
                             Console.WriteLine($"XPlain version {Version}");
                             break;
+                            
+                        case "stats":
+                            var cacheProvider = provider.GetType().Assembly
+                                .GetTypes()
+                                .FirstOrDefault(t => typeof(ICacheProvider)
+                                .IsAssignableFrom(t) && !t.IsInterface)?
+                                .GetProperty("CacheProvider")?.GetValue(provider) as ICacheProvider;
+                                
+                            if (cacheProvider != null)
+                            {
+                                await ShowCacheStats(cacheProvider, options.OutputFormat);
+                            }
+                            else
+                            {
+                                Console.WriteLine("Cache provider not available");
+                            }
+                            break;
+
+                        case "trends":
+                            cacheProvider = provider.GetType().Assembly
+                                .GetTypes()
+                                .FirstOrDefault(t => typeof(ICacheProvider)
+                                .IsAssignableFrom(t) && !t.IsInterface)?
+                                .GetProperty("CacheProvider")?.GetValue(provider) as ICacheProvider;
+                                
+                            if (cacheProvider != null)
+                            {
+                                var recommendations = await cacheProvider.GetCacheWarmingRecommendationsAsync();
+                                Console.WriteLine("\nCache Usage Trends and Recommendations:");
+                                foreach (var rec in recommendations)
+                                {
+                                    Console.WriteLine($"- {rec}");
+                                }
+                            }
+                            else
+                            {
+                                Console.WriteLine("Cache provider not available");
+                            }
+                            break;
+
+                        case "history":
+                            cacheProvider = provider.GetType().Assembly
+                                .GetTypes()
+                                .FirstOrDefault(t => typeof(ICacheProvider)
+                                .IsAssignableFrom(t) && !t.IsInterface)?
+                                .GetProperty("CacheProvider")?.GetValue(provider) as ICacheProvider;
+                                
+                            if (cacheProvider != null)
+                            {
+                                var history = await cacheProvider.GetAnalyticsHistoryAsync(DateTime.UtcNow.AddDays(-7));
+                                Console.WriteLine("\nCache Performance History (Last 7 Days):");
+                                foreach (var entry in history)
+                                {
+                                    Console.WriteLine($"\n[{entry.Timestamp:yyyy-MM-dd HH:mm:ss UTC}]");
+                                    Console.WriteLine($"Hit Ratio: {entry.Stats.HitRatio:P2}");
+                                    Console.WriteLine($"Memory Usage: {entry.MemoryUsageMB:F2} MB");
+                                    Console.WriteLine($"Cached Items: {entry.Stats.CachedItemCount}");
+                                }
+                            }
+                            else
+                            {
+                                Console.WriteLine("Cache provider not available");
+                            }
+                            break;
+
+                        case "chart":
+                            cacheProvider = provider.GetType().Assembly
+                                .GetTypes()
+                                .FirstOrDefault(t => typeof(ICacheProvider)
+                                .IsAssignableFrom(t) && !t.IsInterface)?
+                                .GetProperty("CacheProvider")?.GetValue(provider) as ICacheProvider;
+                                
+                            if (cacheProvider != null)
+                            {
+                                var chart = await cacheProvider.GeneratePerformanceChartAsync(options.OutputFormat);
+                                Console.WriteLine("\nPerformance Comparison Charts:");
+                                Console.WriteLine(chart);
+                            }
+                            else
+                            {
+                                Console.WriteLine("Cache provider not available");
+                            }
+                            break;
 
                         default:
                             if (options.VerbosityLevel >= 1)
@@ -396,6 +574,10 @@ file class Program
             Console.WriteLine("Help and Information:");
             Console.WriteLine("  help     - Show this help message");
             Console.WriteLine("  version  - Show version information");
+            Console.WriteLine("  stats    - Show current cache statistics");
+            Console.WriteLine("  history  - Show cache performance history");
+            Console.WriteLine("  trends   - Show cache usage trends and recommendations");
+            Console.WriteLine("  chart    - Display performance comparison charts");
             Console.WriteLine();
             Console.WriteLine("Navigation:");
             Console.WriteLine("  exit     - Exit the application");

@@ -1,8 +1,40 @@
 using System;
 using System.Threading.Tasks;
+using System.Collections.Generic;
 
 namespace XPlain.Services
 {
+    public record CachePerformanceMetrics
+    {
+        public double CachedResponseTime { get; init; }
+        public double NonCachedResponseTime { get; init; }
+        public double PerformanceGain => NonCachedResponseTime == 0 ? 0 : (NonCachedResponseTime - CachedResponseTime) / NonCachedResponseTime * 100;
+    }
+
+    public record CacheStats
+    {
+        public long Hits { get; init; }
+        public long Misses { get; init; }
+        public double HitRatio => Hits + Misses == 0 ? 0 : (double)Hits / (Hits + Misses);
+        public long StorageUsageBytes { get; init; }
+        public int CachedItemCount { get; init; }
+        public Dictionary<string, int> QueryTypeStats { get; init; } = new();
+        public List<(string Query, int Frequency)> TopQueries { get; init; } = new();
+        public Dictionary<string, double> AverageResponseTimes { get; init; } = new();
+        public Dictionary<string, CachePerformanceMetrics> PerformanceByQueryType { get; init; } = new();
+        public int InvalidationCount { get; init; }
+        public List<(DateTime Time, int ItemsInvalidated)> InvalidationHistory { get; init; } = new();
+        public DateTime LastStatsUpdate { get; init; }
+    }
+
+    public record CacheAnalytics
+    {
+        public DateTime Timestamp { get; init; }
+        public CacheStats Stats { get; init; } = default!;
+        public double MemoryUsageMB { get; init; }
+        public List<string> RecommendedOptimizations { get; init; } = new();
+    }
+
     public interface ICacheProvider
     {
         Task<T?> GetAsync<T>(string key) where T : class;
@@ -11,6 +43,11 @@ namespace XPlain.Services
         Task<bool> ExistsAsync(string key);
         Task InvalidateOnCodeChangeAsync(string codeHash);
         Task WarmupCacheAsync(string[] frequentQuestions, string codeContext);
-        (long hits, long misses) GetCacheStats();
+        CacheStats GetCacheStats();
+        Task LogQueryStatsAsync(string queryType, string query, double responseTime, bool wasCached);
+        Task<List<CacheAnalytics>> GetAnalyticsHistoryAsync(DateTime since);
+        Task LogAnalyticsAsync();
+        Task<List<string>> GetCacheWarmingRecommendationsAsync();
+        Task<string> GeneratePerformanceChartAsync(OutputFormat format);
     }
 }
