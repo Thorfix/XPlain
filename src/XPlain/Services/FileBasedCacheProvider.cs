@@ -10,6 +10,7 @@ namespace XPlain.Services
     {
         private ICacheEvictionPolicy _evictionPolicy;
         private readonly CircuitBreaker _circuitBreaker;
+        private readonly MLPredictionService _mlPredictionService;
         private Dictionary<string, double> _resourceLimits;
         private readonly object _resourceLock = new object();
         private readonly Dictionary<string, CacheEntry> _cache;
@@ -20,10 +21,12 @@ namespace XPlain.Services
 
         public FileBasedCacheProvider(
             ICacheEvictionPolicy evictionPolicy,
-            IEncryptionProvider encryptionProvider)
+            IEncryptionProvider encryptionProvider,
+            MLPredictionService mlPredictionService)
         {
             _evictionPolicy = evictionPolicy;
             EncryptionProvider = encryptionProvider;
+            _mlPredictionService = mlPredictionService;
             _circuitBreaker = new CircuitBreaker();
             MaintenanceLogs = new List<MaintenanceLogEntry>();
             _cache = new Dictionary<string, CacheEntry>();
@@ -237,6 +240,152 @@ namespace XPlain.Services
         public IEnumerable<CacheEvictionEvent> GetRecentEvictions(int count)
         {
             return _evictionPolicy.GetRecentEvictions(count);
+        }
+
+        public async Task<Dictionary<string, PreWarmMetrics>> GetPreWarmCandidatesAsync()
+        {
+            var result = new Dictionary<string, PreWarmMetrics>();
+            var stats = GetCacheStats();
+
+            foreach (var (key, accessStat) in _accessStats)
+            {
+                var metrics = new PreWarmMetrics
+                {
+                    UsageFrequency = accessStat.AccessCount,
+                    LastAccessed = accessStat.LastAccess,
+                    AverageResponseTime = stats.AverageResponseTimes.GetValueOrDefault(key, 0),
+                    PerformanceImpact = stats.PerformanceByQueryType
+                        .GetValueOrDefault(key, new CachePerformanceMetrics())?.PerformanceGain ?? 0,
+                    ResourceCost = _cache.ContainsKey(key) ? _cache[key].Size : 0,
+                    PredictedValue = await _mlPredictionService.PredictQueryValueAsync(key),
+                    RecommendedPriority = DeterminePreWarmPriority(
+                        accessStat.AccessCount,
+                        accessStat.LastAccess,
+                        stats.AverageResponseTimes.GetValueOrDefault(key, 0))
+                };
+
+                result[key] = metrics;
+            }
+
+            return result;
+        }
+
+        public async Task<bool> PreWarmBatchAsync(IEnumerable<string> keys, PreWarmPriority priority)
+        {
+            try
+            {
+                int successCount = 0;
+                foreach (var key in keys)
+                {
+                    if (await PreWarmKey(key, priority))
+                        successCount++;
+                }
+
+                // Consider batch successful if at least 70% of keys were pre-warmed
+                return successCount >= keys.Count() * 0.7;
+            }
+            catch (Exception ex)
+            {
+                MaintenanceLogs.Add(new MaintenanceLogEntry
+                {
+                    Operation = "PreWarmBatch",
+                    Status = "Error",
+                    Metadata = new Dictionary<string, object>
+                    {
+                        ["error"] = ex.Message,
+                        ["priority"] = priority,
+                        ["keyCount"] = keys.Count()
+                    }
+                });
+                return false;
+            }
+        }
+
+        public async Task<PreWarmingStrategy> OptimizePreWarmingStrategyAsync()
+        {
+            var candidates = await GetPreWarmCandidatesAsync();
+            var stats = GetCacheStats();
+            
+            // Calculate optimal batch size based on system resources
+            int batchSize = CalculateOptimalBatchSize(stats);
+            
+            // Determine interval based on access patterns
+            var interval = CalculateOptimalInterval(stats);
+            
+            // Get ML predictions for optimal timing
+            var timingPredictions = await _mlPredictionService.PredictOptimalTimingsAsync(
+                candidates.Keys.ToList()
+            );
+
+            return new PreWarmingStrategy
+            {
+                KeyPriorities = candidates.ToDictionary(
+                    c => c.Key,
+                    c => c.Value.RecommendedPriority
+                ),
+                BatchSize = batchSize,
+                PreWarmInterval = interval,
+                ResourceThreshold = CalculateResourceThreshold(),
+                OptimalTimings = timingPredictions
+            };
+        }
+
+        private PreWarmPriority DeterminePreWarmPriority(
+            long accessCount,
+            DateTime lastAccess,
+            double averageResponseTime)
+        {
+            var recency = DateTime.UtcNow - lastAccess;
+            var frequencyScore = accessCount / (recency.TotalHours + 1);
+            var performanceScore = averageResponseTime / 1000.0; // Convert to seconds
+
+            var score = frequencyScore * performanceScore;
+
+            return score switch
+            {
+                > 100 => PreWarmPriority.Critical,
+                > 50 => PreWarmPriority.High,
+                > 20 => PreWarmPriority.Medium,
+                _ => PreWarmPriority.Low
+            };
+        }
+
+        private int CalculateOptimalBatchSize(CacheStats stats)
+        {
+            var availableMemory = GetAvailableMemory();
+            var averageEntrySize = stats.StorageUsageBytes / Math.Max(1, stats.CachedItemCount);
+            
+            // Calculate how many items we can safely pre-warm at once
+            var maxBatchSize = (int)(availableMemory * 0.1 / averageEntrySize); // Use max 10% of available memory
+            
+            return Math.Max(1, Math.Min(maxBatchSize, 100)); // Cap between 1 and 100
+        }
+
+        private TimeSpan CalculateOptimalInterval(CacheStats stats)
+        {
+            var averageInvalidationInterval = stats.InvalidationHistory.Count > 1
+                ? stats.InvalidationHistory.Zip(
+                    stats.InvalidationHistory.Skip(1),
+                    (a, b) => b.Time - a.Time
+                ).Average(ts => ts.TotalMinutes)
+                : 15;
+
+            return TimeSpan.FromMinutes(Math.Max(5, Math.Min(averageInvalidationInterval * 0.5, 60)));
+        }
+
+        private double CalculateResourceThreshold()
+        {
+            return Math.Min(
+                _resourceLimits.GetValueOrDefault("memory", 100),
+                _resourceLimits.GetValueOrDefault("cpu", 100)
+            ) * 0.8; // 80% of the most constrained resource
+        }
+
+        private long GetAvailableMemory()
+        {
+            var total = GC.GetGCMemoryInfo().TotalAvailableMemoryBytes;
+            var used = GC.GetTotalMemory(false);
+            return total - used;
         }
 
         private class CacheEntry
