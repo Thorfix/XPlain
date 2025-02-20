@@ -90,19 +90,27 @@ namespace XPlain.Services
                     }
 
                     using var cts = new CancellationTokenSource(_timeout);
-                    var result = await Task.WhenAny(action(), Task.Delay(_timeout, cts.Token));
+                    using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cts.Token);
                     
-                    if (result.IsFaulted)
-                    {
-                        throw await result;
-                    }
+                    var timeoutTask = Task.Delay(_timeout, linkedCts.Token);
+                    var actionTask = action();
                     
-                    if (result.IsCanceled)
+                    var completedTask = await Task.WhenAny(actionTask, timeoutTask);
+                    
+                    if (completedTask == timeoutTask)
                     {
+                        linkedCts.Cancel(); // Cancel the action task
                         throw new TimeoutException($"Request timed out after {_timeout.TotalSeconds} seconds");
                     }
 
-                    var finalResult = await result as T;
+                    linkedCts.Cancel(); // Cancel the timeout task
+                    
+                    if (actionTask.IsFaulted)
+                    {
+                        throw await actionTask;
+                    }
+
+                    var finalResult = await actionTask;
                     _circuitBreaker.OnSuccess();
                     _metrics.RecordSuccess(ProviderName, DateTime.UtcNow - startTime);
                     return finalResult;
@@ -115,8 +123,12 @@ namespace XPlain.Services
                     
                     if (attempt < maxRetries - 1 && lastException.IsTransient)
                     {
-                        var delay = TimeSpan.FromSeconds(Math.Pow(2, attempt)); // Exponential backoff
-                        await Task.Delay(delay);
+                        var baseDelay = TimeSpan.FromSeconds(Math.Pow(2, attempt)); // Exponential backoff
+                        var jitter = TimeSpan.FromMilliseconds(Random.Shared.Next(-500, 500)); // Add jitter
+                        var finalDelay = baseDelay + jitter;
+                        
+                        _logger.LogInformation($"Waiting {finalDelay.TotalSeconds:F1}s before retry {attempt + 1} for {ProviderName}");
+                        await Task.Delay(finalDelay);
                     }
                 }
             }

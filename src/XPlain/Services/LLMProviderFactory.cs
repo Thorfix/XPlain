@@ -118,7 +118,12 @@ namespace XPlain.Services
                 throw new InvalidOperationException("No providers could be initialized for fallback chain");
             }
 
-            return new FallbackLLMProvider(providers, _fallbackSettings, _serviceProvider.GetRequiredService<ILogger<FallbackLLMProvider>>());
+            return new FallbackLLMProvider(
+                providers,
+                _fallbackSettings,
+                _serviceProvider.GetRequiredService<ILogger<FallbackLLMProvider>>(),
+                _serviceProvider.GetRequiredService<LLMProviderMetrics>(),
+                _serviceProvider.GetRequiredService<IRateLimitingService>());
         }
 
         private void ValidateProvider(ILLMProvider provider)

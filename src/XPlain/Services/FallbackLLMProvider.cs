@@ -81,9 +81,12 @@ namespace XPlain.Services
                     continue;
                 }
 
+                var providerConfig = _settings.Providers.First(p => p.Name == providerName);
+                var maxAttempts = providerConfig.RetryAttempts ?? _settings.RetryAttempts;
+
                 try
                 {
-                    for (int attempt = 0; attempt < _settings.RetryAttempts; attempt++)
+                    for (int attempt = 0; attempt < maxAttempts; attempt++)
                     {
                         try
                         {
