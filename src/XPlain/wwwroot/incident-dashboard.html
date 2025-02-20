@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Incident Analysis Dashboard</title>
+    <link rel="stylesheet" href="css/styles.css">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body>
+    <div class="dashboard-container">
+        <h1>Incident Analysis Dashboard</h1>
+        
+        <div class="metrics-panel">
+            <div class="metric-card">
+                <h3>System Health</h3>
+                <div id="systemMetrics">
+                    <p>MTBF: <span id="mtbf">Loading...</span></p>
+                    <p>MTTR: <span id="mttr">Loading...</span></p>
+                    <p>Availability: <span id="availability">Loading...</span></p>
+                </div>
+            </div>
+            
+            <div class="metric-card">
+                <h3>Recent Incidents</h3>
+                <div id="recentIncidents">
+                    <div id="incidentsList"></div>
+                </div>
+            </div>
+        </div>
+
+        <div class="chart-container">
+            <div class="chart-panel">
+                <h3>Incident Trends</h3>
+                <canvas id="trendsChart"></canvas>
+            </div>
+            
+            <div class="chart-panel">
+                <h3>Mitigation Success Rate</h3>
+                <canvas id="mitigationChart"></canvas>
+            </div>
+        </div>
+
+        <div class="analysis-panel">
+            <div class="patterns-section">
+                <h3>Identified Patterns</h3>
+                <div id="patternsList"></div>
+            </div>
+            
+            <div class="recommendations-section">
+                <h3>Recommendations</h3>
+                <div id="recommendationsList"></div>
+            </div>
+        </div>
+    </div>
+
+    <script src="js/incident-dashboard.js"></script>
+</body>
+</html>
