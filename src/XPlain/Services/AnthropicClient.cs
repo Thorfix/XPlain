@@ -305,6 +305,114 @@ public class RequestQueue
         public DateTime EnqueueTime { get; init; } = DateTime.UtcNow;
         public int Priority { get; init; }
         public string RequestKey { get; init; }
+        public int StarvationCounter { get; set; } = 0;
+        public double Similarity { get; init; } // Similarity score with other requests
+    }
+
+    private readonly Dictionary<string, WeakReference<QueueItem>> _activeRequests = new();
+    private readonly PriorityQueue<QueueItem, double> _queue = new();
+    private readonly SemaphoreSlim _queueLock = new(1, 1);
+    private readonly TokenBucket _tokenBucket;
+    private readonly int _requestTimeout;
+    private readonly CancellationTokenSource _processingCts = new();
+    private Task _processingTask;
+    private readonly Dictionary<string, DateTime> _lastProcessedRequests = new();
+    private const int MaxQueuedRequestsPerType = 10;
+    private const double SimilarityThreshold = 0.85;
+    private const int MaxQueueSize = 1000;
+    private readonly object _coalescenceLock = new();
+
+    // LRU cache for recent requests to help with coalescence
+    private readonly LinkedList<(string Key, string Content, DateTime Time)> _recentRequests = new();
+    private const int MaxRecentRequests = 100;
+
+    private double CalculateSimilarity(string text1, string text2)
+    {
+        if (string.IsNullOrEmpty(text1) || string.IsNullOrEmpty(text2)) return 0;
+        
+        // Convert to lowercase for comparison
+        text1 = text1.ToLowerInvariant();
+        text2 = text2.ToLowerInvariant();
+
+        // Use Levenshtein distance for similarity
+        int[,] matrix = new int[text1.Length + 1, text2.Length + 1];
+
+        for (int i = 0; i <= text1.Length; i++) matrix[i, 0] = i;
+        for (int j = 0; j <= text2.Length; j++) matrix[0, j] = j;
+
+        for (int i = 1; i <= text1.Length; i++)
+        {
+            for (int j = 1; j <= text2.Length; j++)
+            {
+                int cost = (text1[i - 1] == text2[j - 1]) ? 0 : 1;
+                matrix[i, j] = Math.Min(
+                    Math.Min(matrix[i - 1, j] + 1, matrix[i, j - 1] + 1),
+                    matrix[i - 1, j - 1] + cost);
+            }
+        }
+
+        int distance = matrix[text1.Length, text2.Length];
+        double maxLength = Math.Max(text1.Length, text2.Length);
+        return 1.0 - (distance / maxLength);
+    }
+
+    private async Task<QueueItem> FindOrCreateCoalescedRequest(string content, Func<CancellationToken, Task<string>> operation, int priority, CancellationToken cancellationToken)
+    {
+        QueueItem existingItem = null;
+        double highestSimilarity = 0;
+
+        lock (_coalescenceLock)
+        {
+            // Clean up expired recent requests
+            var cutoff = DateTime.UtcNow.AddSeconds(-30); // Only consider requests from last 30 seconds
+            while (_recentRequests.Count > 0 && _recentRequests.First.Value.Time < cutoff)
+            {
+                _recentRequests.RemoveFirst();
+            }
+
+            // Find similar request
+            foreach (var (key, recentContent, _) in _recentRequests)
+            {
+                var similarity = CalculateSimilarity(content, recentContent);
+                if (similarity > SimilarityThreshold && similarity > highestSimilarity)
+                {
+                    if (_activeRequests.TryGetValue(key, out var weakRef) && 
+                        weakRef.TryGetTarget(out var item))
+                    {
+                        existingItem = item;
+                        highestSimilarity = similarity;
+                    }
+                }
+            }
+
+            // Add to recent requests
+            var requestKey = Guid.NewGuid().ToString();
+            _recentRequests.AddLast((requestKey, content, DateTime.UtcNow));
+            while (_recentRequests.Count > MaxRecentRequests)
+            {
+                _recentRequests.RemoveFirst();
+            }
+
+            if (existingItem != null)
+            {
+                Debug.WriteLine($"Coalesced request with similarity {highestSimilarity:F2}");
+                return existingItem;
+            }
+
+            // Create new request
+            var newItem = new QueueItem
+            {
+                Operation = operation,
+                TaskCompletion = new TaskCompletionSource<string>(),
+                CancellationToken = cancellationToken,
+                Priority = priority,
+                RequestKey = requestKey,
+                Similarity = 1.0
+            };
+
+            _activeRequests[requestKey] = new WeakReference<QueueItem>(newItem);
+            return newItem;
+        }
     }
 
     private readonly PriorityQueue<QueueItem, int> _queue = new();
@@ -557,6 +665,105 @@ public class AnthropicClient : BaseLLMProvider, IAnthropicClient, IDisposable
         _requestQueue = new RequestQueue(_tokenBucket, RequestTimeoutMs);
     }
 
+    private double CalculateEffectivePriority(QueueItem item)
+    {
+        var waitingTime = (DateTime.UtcNow - item.EnqueueTime).TotalSeconds;
+        var starvationBonus = Math.Min(5, item.StarvationCounter) * 2;
+        var waitingBonus = Math.Min(10, waitingTime / 30.0) * 3; // Bonus for waiting, max 10 points
+        var similarityBonus = (1.0 - item.Similarity) * 2; // Prioritize less similar requests
+        
+        return -(item.Priority + starvationBonus + waitingBonus + similarityBonus); // Negative for PriorityQueue ordering
+    }
+
+    private async Task ProcessQueueAsync()
+    {
+        while (!_processingCts.Token.IsCancellationRequested)
+        {
+            try
+            {
+                await _queueLock.WaitAsync(_processingCts.Token);
+                QueueItem item = null;
+                
+                try
+                {
+                    // Update priorities and remove cancelled/timeout requests
+                    var itemsToRequeue = new List<QueueItem>();
+                    while (_queue.Count > 0)
+                    {
+                        var currentItem = _queue.Dequeue();
+                        
+                        if (currentItem.CancellationToken.IsCancellationRequested ||
+                            (DateTime.UtcNow - currentItem.EnqueueTime).TotalMilliseconds > _requestTimeout)
+                        {
+                            currentItem.TaskCompletion.TrySetCanceled();
+                            continue;
+                        }
+
+                        currentItem.StarvationCounter++;
+                        var effectivePriority = CalculateEffectivePriority(currentItem);
+                        
+                        if (item == null)
+                        {
+                            item = currentItem;
+                        }
+                        else
+                        {
+                            itemsToRequeue.Add(currentItem);
+                        }
+                    }
+
+                    // Requeue items with updated priorities
+                    foreach (var requeueItem in itemsToRequeue)
+                    {
+                        _queue.Enqueue(requeueItem, CalculateEffectivePriority(requeueItem));
+                    }
+                }
+                finally
+                {
+                    _queueLock.Release();
+                }
+
+                if (item != null)
+                {
+                    try
+                    {
+                        var result = await item.Operation(item.CancellationToken);
+                        item.TaskCompletion.TrySetResult(result);
+                        
+                        lock (_coalescenceLock)
+                        {
+                            _lastProcessedRequests[item.RequestKey] = DateTime.UtcNow;
+                            // Cleanup old processed requests
+                            var cutoff = DateTime.UtcNow.AddMinutes(-5);
+                            var keysToRemove = _lastProcessedRequests.Where(kvp => kvp.Value < cutoff).Select(kvp => kvp.Key).ToList();
+                            foreach (var key in keysToRemove)
+                            {
+                                _lastProcessedRequests.Remove(key);
+                            }
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        item.TaskCompletion.TrySetException(ex);
+                    }
+                }
+                else
+                {
+                    await Task.Delay(50, _processingCts.Token);
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                break;
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"Error in queue processing: {ex.Message}");
+                await Task.Delay(1000, _processingCts.Token); // Brief delay on error
+            }
+        }
+    }
+
     private async Task ProcessBatchAsync(BatchKey key, List<PendingRequest> requests, CancellationToken cancellationToken)
     {
         try
@@ -690,12 +897,48 @@ public class AnthropicClient : BaseLLMProvider, IAnthropicClient, IDisposable
         var cts = new CancellationTokenSource(RequestTimeoutMs);
         try
         {
-            // Try to batch similar requests
-            return await _requestBatcher.EnqueueRequest(
-                _settings.DefaultModel,
-                prompt,
-                _settings.MaxTokenLimit,
-                cts.Token);
+            // First try to find similar existing request
+            var operation = new Func<CancellationToken, Task<string>>(async (ct) =>
+            {
+                var requestBody = new AnthropicRequest
+                {
+                    Model = _settings.DefaultModel,
+                    Messages = [new AnthropicMessage
+                    {
+                        Role = "user",
+                        Content = [new AnthropicMessageContent { Type = "text", Text = prompt }]
+                    }],
+                    MaxTokens = _settings.MaxTokenLimit,
+                    Temperature = 0.7,
+                };
+
+                return await ProcessRequestWithRateLimiting(requestBody, ct);
+            });
+
+            var queueItem = await FindOrCreateCoalescedRequest(prompt, operation, 0, cts.Token);
+            
+            // Use existing request if found, otherwise queue new request
+            if (queueItem.TaskCompletion.Task.IsCompleted)
+            {
+                Debug.WriteLine("Using existing completed request");
+                return await queueItem.TaskCompletion.Task;
+            }
+
+            await _queueLock.WaitAsync(cts.Token);
+            try
+            {
+                if (_queue.Count >= MaxQueueSize)
+                {
+                    throw new InvalidOperationException("Request queue is full");
+                }
+                _queue.Enqueue(queueItem, CalculateEffectivePriority(queueItem));
+            }
+            finally
+            {
+                _queueLock.Release();
+            }
+
+            return await queueItem.TaskCompletion.Task;
         }
         catch (OperationCanceledException)
         {
@@ -705,6 +948,16 @@ public class AnthropicClient : BaseLLMProvider, IAnthropicClient, IDisposable
         {
             cts.Dispose();
         }
+    }
+
+    private async Task<string> ProcessRequestWithRateLimiting(AnthropicRequest request, CancellationToken ct)
+    {
+        HttpResponseMessage response = await _httpClient.PostAsJsonAsync("/v1/messages", request, ct);
+        _tokenBucket.UpdateRateLimits(response.Headers);
+        response.EnsureSuccessStatusCode();
+
+        var result = await response.Content.ReadFromJsonAsync<AnthropicResponse>(cancellationToken: ct);
+        return result?.Content.FirstOrDefault()?.Text.Trim() ?? "No response received from the API.";
     }
 
     public async Task<string> AskQuestion(string question, string codeContext)
