@@ -20,6 +20,7 @@ namespace XPlain.Services
         private Timer? _warmupTimer;
         private Timer? _trainingTimer;
         private readonly PreWarmingMetrics _metrics;
+        private readonly SemaphoreSlim _syncLock = new SemaphoreSlim(1, 1);
 
         public AdaptiveCacheWarmer(
             ICacheProvider cacheProvider,
@@ -40,32 +41,100 @@ namespace XPlain.Services
 
         public async Task StartAsync(CancellationToken cancellationToken)
         {
-            _logger.LogInformation("Starting Adaptive Cache Warmer");
-            await UpdateWarmingStrategy(cancellationToken);
-            
-            // Initialize timer for periodic strategy updates
-            _warmupTimer = new Timer(
-                async _ => await ExecuteWarmingCycle(cancellationToken),
-                null,
-                TimeSpan.FromMinutes(5),
-                TimeSpan.FromMinutes(15)
-            );
+            if (_disposed)
+            {
+                throw new ObjectDisposedException(nameof(AdaptiveCacheWarmer));
+            }
 
-            // Initialize timer for ML model training
-            _trainingTimer = new Timer(
-                async _ => await TrainMLModel(cancellationToken),
-                null,
-                TimeSpan.FromHours(1), // Initial delay
-                TimeSpan.FromHours(24) // Train daily
-            );
+            await _syncLock.WaitAsync(cancellationToken);
+            try
+            {
+                _logger.LogInformation("Starting Adaptive Cache Warmer");
+                await UpdateWarmingStrategy(cancellationToken);
+                
+                // Initialize timer for periodic strategy updates
+                _warmupTimer = new Timer(
+                    async _ => 
+                    {
+                        try 
+                        {
+                            await ExecuteWarmingCycle(cancellationToken);
+                        }
+                        catch (Exception ex)
+                        {
+                            _logger.LogError(ex, "Error during warming cycle");
+                        }
+                    },
+                    null,
+                    TimeSpan.FromMinutes(5),
+                    TimeSpan.FromMinutes(15)
+                );
+
+                // Initialize timer for ML model training
+                _trainingTimer = new Timer(
+                    async _ => 
+                    {
+                        try 
+                        {
+                            await TrainMLModel(cancellationToken);
+                        }
+                        catch (Exception ex)
+                        {
+                            _logger.LogError(ex, "Error during ML model training");
+                        }
+                    },
+                    null,
+                    TimeSpan.FromHours(1), // Initial delay
+                    TimeSpan.FromHours(24) // Train daily
+                );
+            }
+            finally
+            {
+                _syncLock.Release();
+            }
         }
 
-        public Task StopAsync(CancellationToken cancellationToken)
+        public async Task StopAsync(CancellationToken cancellationToken)
         {
             _logger.LogInformation("Stopping Adaptive Cache Warmer");
-            _warmupTimer?.Change(Timeout.Infinite, 0);
-            _trainingTimer?.Change(Timeout.Infinite, 0);
-            return Task.CompletedTask;
+            await _syncLock.WaitAsync(cancellationToken);
+            try
+            {
+                if (_warmupTimer != null)
+                {
+                    await _warmupTimer.DisposeAsync();
+                    _warmupTimer = null;
+                }
+                if (_trainingTimer != null)
+                {
+                    await _trainingTimer.DisposeAsync();
+                    _trainingTimer = null;
+                }
+            }
+            finally
+            {
+                _syncLock.Release();
+            }
+        }
+
+        public void Dispose()
+        {
+            Dispose(true);
+            GC.SuppressFinalize(this);
+        }
+
+        protected virtual void Dispose(bool disposing)
+        {
+            if (!_disposed)
+            {
+                if (disposing)
+                {
+                    _warmupTimer?.Dispose();
+                    _trainingTimer?.Dispose();
+                    _syncLock.Dispose();
+                }
+                _disposed = true;
+            }
         }
 
         private async Task TrainMLModel(CancellationToken cancellationToken)
