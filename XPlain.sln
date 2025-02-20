@@ -4,6 +4,8 @@ VisualStudioVersion = 17.0.31903.59
 MinimumVisualStudioVersion = 10.0.40219.1
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "XPlain", "src\XPlain\XPlain.csproj", "{D95E0FA6-3E4E-4A44-B659-8A23F705C804}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "XPlain.Tests", "tests\XPlain.Tests\XPlain.Tests.csproj", "{F7A9AAD5-CC14-4C0C-9F4E-A0F234AE4C2F}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -17,5 +19,9 @@ Global
 		{D95E0FA6-3E4E-4A44-B659-8A23F705C804}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{D95E0FA6-3E4E-4A44-B659-8A23F705C804}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{D95E0FA6-3E4E-4A44-B659-8A23F705C804}.Release|Any CPU.Build.0 = Release|Any CPU
+		{F7A9AAD5-CC14-4C0C-9F4E-A0F234AE4C2F}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{F7A9AAD5-CC14-4C0C-9F4E-A0F234AE4C2F}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{F7A9AAD5-CC14-4C0C-9F4E-A0F234AE4C2F}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{F7A9AAD5-CC14-4C0C-9F4E-A0F234AE4C2F}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 EndGlobal
