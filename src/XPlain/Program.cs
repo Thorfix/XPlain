@@ -424,6 +424,89 @@ file class Program
                         case "version":
                             Console.WriteLine($"XPlain version {Version}");
                             break;
+                            
+                        case "stats":
+                            var cacheProvider = provider.GetType().Assembly
+                                .GetTypes()
+                                .FirstOrDefault(t => typeof(ICacheProvider)
+                                .IsAssignableFrom(t) && !t.IsInterface)?
+                                .GetProperty("CacheProvider")?.GetValue(provider) as ICacheProvider;
+                                
+                            if (cacheProvider != null)
+                            {
+                                await ShowCacheStats(cacheProvider, options.OutputFormat);
+                            }
+                            else
+                            {
+                                Console.WriteLine("Cache provider not available");
+                            }
+                            break;
+
+                        case "trends":
+                            cacheProvider = provider.GetType().Assembly
+                                .GetTypes()
+                                .FirstOrDefault(t => typeof(ICacheProvider)
+                                .IsAssignableFrom(t) && !t.IsInterface)?
+                                .GetProperty("CacheProvider")?.GetValue(provider) as ICacheProvider;
+                                
+                            if (cacheProvider != null)
+                            {
+                                var recommendations = await cacheProvider.GetCacheWarmingRecommendationsAsync();
+                                Console.WriteLine("\nCache Usage Trends and Recommendations:");
+                                foreach (var rec in recommendations)
+                                {
+                                    Console.WriteLine($"- {rec}");
+                                }
+                            }
+                            else
+                            {
+                                Console.WriteLine("Cache provider not available");
+                            }
+                            break;
+
+                        case "history":
+                            cacheProvider = provider.GetType().Assembly
+                                .GetTypes()
+                                .FirstOrDefault(t => typeof(ICacheProvider)
+                                .IsAssignableFrom(t) && !t.IsInterface)?
+                                .GetProperty("CacheProvider")?.GetValue(provider) as ICacheProvider;
+                                
+                            if (cacheProvider != null)
+                            {
+                                var history = await cacheProvider.GetAnalyticsHistoryAsync(DateTime.UtcNow.AddDays(-7));
+                                Console.WriteLine("\nCache Performance History (Last 7 Days):");
+                                foreach (var entry in history)
+                                {
+                                    Console.WriteLine($"\n[{entry.Timestamp:yyyy-MM-dd HH:mm:ss UTC}]");
+                                    Console.WriteLine($"Hit Ratio: {entry.Stats.HitRatio:P2}");
+                                    Console.WriteLine($"Memory Usage: {entry.MemoryUsageMB:F2} MB");
+                                    Console.WriteLine($"Cached Items: {entry.Stats.CachedItemCount}");
+                                }
+                            }
+                            else
+                            {
+                                Console.WriteLine("Cache provider not available");
+                            }
+                            break;
+
+                        case "chart":
+                            cacheProvider = provider.GetType().Assembly
+                                .GetTypes()
+                                .FirstOrDefault(t => typeof(ICacheProvider)
+                                .IsAssignableFrom(t) && !t.IsInterface)?
+                                .GetProperty("CacheProvider")?.GetValue(provider) as ICacheProvider;
+                                
+                            if (cacheProvider != null)
+                            {
+                                var chart = await cacheProvider.GeneratePerformanceChartAsync(options.OutputFormat);
+                                Console.WriteLine("\nPerformance Comparison Charts:");
+                                Console.WriteLine(chart);
+                            }
+                            else
+                            {
+                                Console.WriteLine("Cache provider not available");
+                            }
+                            break;
 
                         default:
                             if (options.VerbosityLevel >= 1)
