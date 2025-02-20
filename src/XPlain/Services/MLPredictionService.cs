@@ -9,19 +9,162 @@ namespace XPlain.Services
     {
         private readonly ICacheMonitoringService _monitoringService;
         private readonly Dictionary<string, List<double>> _metricHistory;
+        private readonly Dictionary<string, List<Pattern>> _degradationPatterns;
         private readonly int _historyWindow = 100;  // Number of data points to keep
         private readonly double _confidenceThreshold = 0.85;
+        private readonly int _patternWindow = 10;   // Window size for pattern detection
 
         public MLPredictionService(ICacheMonitoringService monitoringService)
         {
             _monitoringService = monitoringService;
             _metricHistory = new Dictionary<string, List<double>>();
+            _degradationPatterns = new Dictionary<string, List<Pattern>>();
+        }
+
+        private class Pattern
+        {
+            public List<double> Sequence { get; set; } = new();
+            public string IssueType { get; set; }
+            public double Severity { get; set; }
+            public int OccurrenceCount { get; set; }
+            public TimeSpan TimeToIssue { get; set; }
+        }
+
+        private async Task UpdateDegradationPatterns(string metric, double currentValue)
+        {
+            if (!_metricHistory.ContainsKey(metric)) return;
+
+            var history = _metricHistory[metric];
+            if (history.Count < _patternWindow + 1) return;
+
+            // Check if this is a degradation point
+            bool isDegradation = IsPerformanceDegradation(metric, currentValue);
+            if (isDegradation)
+            {
+                // Extract the pattern that led to this degradation
+                var pattern = history.Skip(history.Count - _patternWindow - 1)
+                                   .Take(_patternWindow)
+                                   .ToList();
+
+                // Normalize the pattern
+                var normalizedPattern = NormalizeSequence(pattern);
+                
+                // Store or update the pattern
+                if (!_degradationPatterns.ContainsKey(metric))
+                {
+                    _degradationPatterns[metric] = new List<Pattern>();
+                }
+
+                var existingPattern = _degradationPatterns[metric]
+                    .FirstOrDefault(p => IsSimilarPattern(p.Sequence, normalizedPattern));
+
+                if (existingPattern != null)
+                {
+                    existingPattern.OccurrenceCount++;
+                    // Update the average time to issue
+                    existingPattern.TimeToIssue = TimeSpan.FromTicks(
+                        (existingPattern.TimeToIssue.Ticks * (existingPattern.OccurrenceCount - 1) +
+                         TimeSpan.FromMinutes(5).Ticks) / existingPattern.OccurrenceCount);
+                }
+                else
+                {
+                    _degradationPatterns[metric].Add(new Pattern
+                    {
+                        Sequence = normalizedPattern,
+                        IssueType = GetIssueType(metric, currentValue),
+                        Severity = CalculateIssueSeverity(metric, currentValue),
+                        OccurrenceCount = 1,
+                        TimeToIssue = TimeSpan.FromMinutes(5)
+                    });
+                }
+            }
+        }
+
+        private bool IsPerformanceDegradation(string metric, double currentValue)
+        {
+            var history = _metricHistory[metric];
+            var baseline = history.Skip(history.Count - _patternWindow).Average();
+
+            return metric.ToLower() switch
+            {
+                "cachehitrate" => currentValue < baseline * 0.8,
+                "memoryusage" => currentValue > baseline * 1.2,
+                "averageresponsetime" => currentValue > baseline * 1.5,
+                _ => false
+                DetectedPattern = null
+            };
+        }
+
+        private double GetPatternBasedPrediction(double currentValue, Pattern pattern)
+        {
+            // Predict based on pattern's typical progression
+            return pattern.IssueType.ToLower() switch
+            {
+                "lowhitrate" => currentValue * 0.8, // Predict 20% degradation
+                "highmemoryusage" => currentValue * 1.2, // Predict 20% increase
+                "slowresponse" => currentValue * 1.5, // Predict 50% slowdown
+                _ => currentValue
+            };
+        }
+
+        private List<double> NormalizeSequence(List<double> sequence)
+        {
+            var min = sequence.Min();
+            var max = sequence.Max();
+            var range = max - min;
+            
+            return range == 0 
+                ? sequence.Select(_ => 0.0).ToList() 
+                : sequence.Select(v => (v - min) / range).ToList();
+        }
+
+        private bool IsSimilarPattern(List<double> pattern1, List<double> pattern2)
+        {
+            if (pattern1.Count != pattern2.Count) return false;
+
+            // Calculate Euclidean distance between patterns
+            var distance = Math.Sqrt(
+                pattern1.Zip(pattern2, (a, b) => Math.Pow(a - b, 2)).Sum()
+            );
+
+            return distance < 0.3; // Similarity threshold
+        }
+
+        private string GetIssueType(string metric, double value)
+        {
+            return metric.ToLower() switch
+            {
+                "cachehitrate" => "LowHitRate",
+                "memoryusage" => "HighMemoryUsage",
+                "averageresponsetime" => "SlowResponse",
+                _ => "Unknown"
+            };
+        }
+
+        private double CalculateIssueSeverity(string metric, double value)
+        {
+            var history = _metricHistory[metric];
+            var baseline = history.Skip(history.Count - _patternWindow).Average();
+            
+            return metric.ToLower() switch
+            {
+                "cachehitrate" => Math.Max(0, (baseline - value) / baseline),
+                "memoryusage" => Math.Max(0, (value - baseline) / baseline),
+                "averageresponsetime" => Math.Max(0, (value - baseline) / baseline),
+                _ => 0
+            };
         }
 
         public async Task<Dictionary<string, PredictionResult>> PredictPerformanceMetrics()
         {
             var currentMetrics = await _monitoringService.GetPerformanceMetricsAsync();
             UpdateMetricHistory(currentMetrics);
+
+            // Update degradation patterns for each metric
+            foreach (var (metric, value) in currentMetrics)
+            {
+                await UpdateDegradationPatterns(metric, value);
+            }
 
             var predictions = new Dictionary<string, PredictionResult>();
             foreach (var metric in currentMetrics.Keys)
@@ -100,7 +243,17 @@ namespace XPlain.Services
 
         private PredictionResult CalculatePrediction(List<double> history)
         {
-            // Simple linear regression for prediction
+            var metric = _metricHistory.FirstOrDefault(x => x.Value == history).Key;
+            var recentPattern = history.Skip(history.Count - _patternWindow).ToList();
+            var normalizedRecent = NormalizeSequence(recentPattern);
+
+            // Check for matching degradation patterns
+            var matchingPattern = metric != null && _degradationPatterns.ContainsKey(metric)
+                ? _degradationPatterns[metric]
+                    .FirstOrDefault(p => IsSimilarPattern(p.Sequence, normalizedRecent))
+                : null;
+
+            // Combine pattern-based and regression-based predictions
             var n = history.Count;
             var x = Enumerable.Range(0, n).ToList();
             var y = history;
@@ -114,9 +267,36 @@ namespace XPlain.Services
             var slope = covariance / varianceX;
             var intercept = meanY - slope * meanX;
 
-            var predictedValue = slope * (n + 5) + intercept; // Predict 5 steps ahead
+            var regressionPrediction = slope * (n + 5) + intercept;
             var confidence = CalculateConfidence(history, x, slope, intercept);
-            var timeToImpact = EstimateTimeToImpact(slope, history.Last(), predictedValue);
+
+            // If we have a matching pattern, adjust the prediction
+            if (matchingPattern != null)
+            {
+                var patternConfidence = Math.Min(1.0, matchingPattern.OccurrenceCount / 10.0);
+                var timeToImpact = matchingPattern.TimeToIssue;
+                
+                // Blend predictions based on pattern confidence
+                var blendedPrediction = (regressionPrediction * (1 - patternConfidence)) +
+                                      (GetPatternBasedPrediction(history.Last(), matchingPattern) * patternConfidence);
+                
+                // Increase confidence if pattern matches
+                confidence = (confidence + patternConfidence) / 2;
+
+                return new PredictionResult
+                {
+                    Value = blendedPrediction,
+                    Confidence = confidence,
+                    TimeToImpact = timeToImpact,
+                    DetectedPattern = new PredictionPattern
+                    {
+                        Type = matchingPattern.IssueType,
+                        Severity = matchingPattern.Severity,
+                        Confidence = patternConfidence,
+                        TimeToIssue = timeToImpact
+                    }
+                };
+            }
 
             return new PredictionResult
             {
