@@ -653,14 +653,15 @@ file class Program
                                     {
                                         await using var responseStream = provider.GetCompletionStreamAsync(prompt);
                                         var isFirstChunk = true;
-                                        var progressTimer = new Timer(_ => UpdateProgressIndicator(), null, 0, 100);
+                                        
+                                        using var progress = new ProgressIndicator();
+                                        progress.Start();
                                         
                                         await foreach (var chunk in responseStream.WithCancellation(cts.Token))
                                         {
                                             if (isFirstChunk)
                                             {
-                                                progressTimer.Dispose();
-                                                Console.Write("\b \b"); // Clear progress indicator
+                                                progress.Stop();
                                                 isFirstChunk = false;
                                             }
                                             Console.Write(chunk);

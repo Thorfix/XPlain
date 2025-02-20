@@ -41,7 +41,11 @@ public class AnthropicClient : BaseLLMProvider, IAnthropicClient, IDisposable
         _settings = settings.Value;
         _rateLimitingService = rateLimitingService;
         
-        _httpClient = new HttpClient
+        _httpClient = new HttpClient(
+            new StreamingHttpHandler(
+                timeout: TimeSpan.FromSeconds(30),
+                maxRetries: 3,
+                initialRetryDelay: TimeSpan.FromSeconds(1)))
         {
             BaseAddress = new Uri(_settings.ApiEndpoint)
         };
@@ -166,7 +170,7 @@ public class AnthropicClient : BaseLLMProvider, IAnthropicClient, IDisposable
         try
         {
             using var response = await _httpClient.PostAsJsonAsync(
-                "/v1/messages",
+                "/v1/messages/stream",
                 request,
                 cancellationToken);
 

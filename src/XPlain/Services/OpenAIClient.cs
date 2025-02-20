@@ -41,7 +41,11 @@ public class OpenAIClient : BaseLLMProvider, IOpenAIClient, IDisposable
         _settings = settings.Value;
         _rateLimitingService = rateLimitingService;
 
-        _httpClient = new HttpClient
+        _httpClient = new HttpClient(
+            new StreamingHttpHandler(
+                timeout: TimeSpan.FromSeconds(30),
+                maxRetries: 3,
+                initialRetryDelay: TimeSpan.FromSeconds(1)))
         {
             BaseAddress = new Uri(_settings.ApiEndpoint)
         };
@@ -164,8 +168,9 @@ public class OpenAIClient : BaseLLMProvider, IOpenAIClient, IDisposable
         await _rateLimitingService.AcquirePermitAsync(ProviderName, 0, cancellationToken);
         try
         {
+            var streamingEndpoint = request.Stream ? "/v1/chat/completions/stream" : "/v1/chat/completions";
             using var response = await _httpClient.PostAsJsonAsync(
-                "/v1/chat/completions",
+                streamingEndpoint,
                 request,
                 cancellationToken);
 
