@@ -1025,6 +1025,7 @@ file class Program
             // Configure ML model settings
             services.AddSingleton<IMLModelTrainingService, MLModelTrainingService>();
             services.AddSingleton<MLPredictionService>();
+            services.AddSingleton<IAutomaticCacheOptimizer, AutomaticCacheOptimizer>();
             
             // Configure settings
             var llmSettings = new LLMSettings();

@@ -9,6 +9,7 @@ namespace XPlain.Services
     {
         private readonly ICacheMonitoringService _monitoringService;
         private readonly IMLModelTrainingService _modelTrainingService;
+        private readonly IAutomaticCacheOptimizer _cacheOptimizer;
         private readonly Dictionary<string, List<double>> _metricHistory;
         private readonly Dictionary<string, List<Pattern>> _degradationPatterns;
         private readonly Dictionary<string, List<PrecursorPattern>> _precursorPatterns;
@@ -22,10 +23,12 @@ namespace XPlain.Services
 
         public MLPredictionService(
             ICacheMonitoringService monitoringService,
-            IMLModelTrainingService modelTrainingService)
+            IMLModelTrainingService modelTrainingService,
+            IAutomaticCacheOptimizer cacheOptimizer)
         {
             _monitoringService = monitoringService;
             _modelTrainingService = modelTrainingService;
+            _cacheOptimizer = cacheOptimizer;
             _metricHistory = new Dictionary<string, List<double>>();
             _degradationPatterns = new Dictionary<string, List<Pattern>>();
             _precursorPatterns = new Dictionary<string, List<PrecursorPattern>>();
@@ -500,7 +503,29 @@ namespace XPlain.Services
                     var history = _metricHistory[metric];
                     var prediction = await CalculatePrediction(history, metric);
                     predictions[metric] = prediction;
+                    
+                    // Apply automatic optimization based on predictions
+                    await _cacheOptimizer.OptimizeAsync(prediction);
                 }
+            }
+
+            // Apply optimizations based on trends
+            var trends = await AnalyzeTrends();
+            foreach (var (metric, trend) in trends)
+            {
+                await _cacheOptimizer.AdjustEvictionPolicyAsync(trend);
+            }
+
+            // Update warning thresholds based on predictions
+            var alerts = await GetPredictedAlerts();
+            await _cacheOptimizer.UpdateCacheWarningThresholdsAsync(alerts);
+
+            // Optimize cache for frequently accessed items
+            if (_metricHistory.ContainsKey("CacheHitRate"))
+            {
+                var hitRates = _metricHistory
+                    .ToDictionary(kv => kv.Key, kv => kv.Value.Last());
+                await _cacheOptimizer.PrewarmFrequentItemsAsync(hitRates);
             }
 
             return predictions;
