@@ -13,6 +13,53 @@ namespace XPlain.Services.LoadTesting
         private readonly ConcurrentDictionary<string, int> _counters = new();
         private volatile int _activeUsers;
         private readonly object _lock = new();
+        private readonly MLModelTrainingService _mlTrainingService;
+        private readonly ConcurrentQueue<TrainingDataPoint> _trainingData = new();
+
+        public LoadTestEngine(
+            ILogger<LoadTestEngine> logger,
+            MLModelTrainingService mlTrainingService)
+        {
+            _logger = logger;
+            _mlTrainingService = mlTrainingService;
+        }
+
+        private void CollectTrainingData(string query, bool cacheHit, bool predictionCorrect, double responseTime)
+        {
+            _trainingData.Enqueue(new TrainingDataPoint
+            {
+                Query = query,
+                Timestamp = DateTime.UtcNow,
+                CacheHit = cacheHit,
+                PredictionCorrect = predictionCorrect,
+                ResponseTime = responseTime,
+                LoadLevel = _activeUsers
+            });
+
+            // Periodically save training data
+            if (_trainingData.Count >= 1000)
+            {
+                _ = Task.Run(async () =>
+                {
+                    var dataPoints = new List<TrainingDataPoint>();
+                    while (_trainingData.Count > 0 && _trainingData.TryDequeue(out var point))
+                    {
+                        dataPoints.Add(point);
+                    }
+                    await _mlTrainingService.AddTrainingDataAsync(dataPoints);
+                });
+            }
+        }
+
+        private class TrainingDataPoint
+        {
+            public string Query { get; set; }
+            public DateTime Timestamp { get; set; }
+            public bool CacheHit { get; set; }
+            public bool PredictionCorrect { get; set; }
+            public double ResponseTime { get; set; }
+            public int LoadLevel { get; set; }
+        }
 
         public LoadTestEngine(ILogger<LoadTestEngine> logger)
         {
