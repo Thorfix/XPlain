@@ -200,6 +200,86 @@ file class Program
             return await rootCommand.InvokeAsync(args);
         }
 
+        internal static void ShowCacheStats(ICacheProvider cacheProvider, OutputFormat format)
+        {
+            var stats = cacheProvider.GetCacheStats();
+            var output = new
+            {
+                HitRatio = $"{stats.HitRatio:P2}",
+                Hits = stats.Hits,
+                Misses = stats.Misses,
+                CachedItems = stats.CachedItemCount,
+                StorageUsage = $"{stats.StorageUsageBytes / 1024.0 / 1024.0:F2} MB",
+                TopQueries = stats.TopQueries,
+                QueryTypes = stats.QueryTypeStats,
+                AverageResponseTimes = stats.AverageResponseTimes.ToDictionary(
+                    kvp => kvp.Key,
+                    kvp => $"{kvp.Value:F2}ms"
+                ),
+                LastUpdate = stats.LastStatsUpdate
+            };
+
+            switch (format)
+            {
+                case OutputFormat.Json:
+                    Console.WriteLine(JsonSerializer.Serialize(output, new JsonSerializerOptions { WriteIndented = true }));
+                    break;
+                case OutputFormat.Markdown:
+                    Console.WriteLine("# Cache Statistics");
+                    Console.WriteLine($"## Performance");
+                    Console.WriteLine($"- Hit Ratio: {output.HitRatio}");
+                    Console.WriteLine($"- Cache Hits: {output.Hits}");
+                    Console.WriteLine($"- Cache Misses: {output.Misses}");
+                    Console.WriteLine($"\n## Storage");
+                    Console.WriteLine($"- Cached Items: {output.CachedItems}");
+                    Console.WriteLine($"- Storage Usage: {output.StorageUsage}");
+                    Console.WriteLine($"\n## Top Queries");
+                    foreach (var (query, freq) in output.TopQueries)
+                    {
+                        Console.WriteLine($"- {query}: {freq} times");
+                    }
+                    Console.WriteLine($"\n## Query Types");
+                    foreach (var (type, count) in output.QueryTypes)
+                    {
+                        Console.WriteLine($"- {type}: {count} queries");
+                    }
+                    Console.WriteLine($"\n## Average Response Times");
+                    foreach (var (type, time) in output.AverageResponseTimes)
+                    {
+                        Console.WriteLine($"- {type}: {time}");
+                    }
+                    Console.WriteLine($"\nLast Updated: {output.LastUpdate:yyyy-MM-dd HH:mm:ss UTC}");
+                    break;
+                default:
+                    Console.WriteLine("Cache Statistics");
+                    Console.WriteLine("================");
+                    Console.WriteLine($"Performance:");
+                    Console.WriteLine($"  Hit Ratio: {output.HitRatio}");
+                    Console.WriteLine($"  Cache Hits: {output.Hits}");
+                    Console.WriteLine($"  Cache Misses: {output.Misses}");
+                    Console.WriteLine($"\nStorage:");
+                    Console.WriteLine($"  Cached Items: {output.CachedItems}");
+                    Console.WriteLine($"  Storage Usage: {output.StorageUsage}");
+                    Console.WriteLine($"\nTop Queries:");
+                    foreach (var (query, freq) in output.TopQueries)
+                    {
+                        Console.WriteLine($"  {query}: {freq} times");
+                    }
+                    Console.WriteLine($"\nQuery Types:");
+                    foreach (var (type, count) in output.QueryTypes)
+                    {
+                        Console.WriteLine($"  {type}: {count} queries");
+                    }
+                    Console.WriteLine($"\nAverage Response Times:");
+                    foreach (var (type, time) in output.AverageResponseTimes)
+                    {
+                        Console.WriteLine($"  {type}: {time}");
+                    }
+                    Console.WriteLine($"\nLast Updated: {output.LastUpdate:yyyy-MM-dd HH:mm:ss UTC}");
+                    break;
+            }
+        }
+
         internal static async Task<int> ExecuteWithOptions(CommandLineOptions options)
         {
             try
@@ -244,7 +324,12 @@ file class Program
                     Console.WriteLine($"Cache stats - Hits: {hits}, Misses: {misses}, Hit Rate: {(hits + misses == 0 ? 0 : hits * 100.0 / (hits + misses)):F1}%");
                 }
 
-                if (options.InteractiveMode)
+                if (options.ShowCacheStats)
+                {
+                    ShowCacheStats(cacheProvider, options.OutputFormat);
+                    return 0;
+                }
+                else if (options.InteractiveMode)
                 {
                     if (options.VerbosityLevel >= 1)
                     {
@@ -396,6 +481,7 @@ file class Program
             Console.WriteLine("Help and Information:");
             Console.WriteLine("  help     - Show this help message");
             Console.WriteLine("  version  - Show version information");
+            Console.WriteLine("  stats    - Show cache statistics");
             Console.WriteLine();
             Console.WriteLine("Navigation:");
             Console.WriteLine("  exit     - Exit the application");

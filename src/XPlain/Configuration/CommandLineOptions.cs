@@ -26,7 +26,10 @@ public enum OptionGroup
     Output,
 
     [Description("Options for configuring the LLM model")]
-    Model
+    Model,
+
+    [Description("Options for cache management")]
+    Cache
 }
 
 public enum OutputFormat
@@ -74,7 +77,11 @@ public class CommandLineOptions
     [Description("API key for the selected provider")]
     public string? ApiKey { get; set; }
 
-    public bool InteractiveMode => string.IsNullOrEmpty(DirectQuestion);
+    [OptionGroup(OptionGroup.Cache)]
+    [Description("Display cache statistics")]
+    public bool ShowCacheStats { get; set; }
+
+    public bool InteractiveMode => string.IsNullOrEmpty(DirectQuestion) && !ShowCacheStats;
 
     public void Validate()
     {

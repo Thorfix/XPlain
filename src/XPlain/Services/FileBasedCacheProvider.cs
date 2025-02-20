@@ -19,13 +19,19 @@ namespace XPlain.Services
         private readonly object _statsLock = new();
         private readonly ConcurrentDictionary<string, string> _keyToFileMap = new();
         private readonly ILLMProvider _llmProvider;
+        private readonly ConcurrentDictionary<string, int> _queryTypeStats = new();
+        private readonly ConcurrentDictionary<string, (int Count, double TotalTime)> _queryResponseStats = new();
+        private readonly ConcurrentDictionary<string, int> _queryFrequency = new();
+        private readonly string _statsFilePath;
 
         public FileBasedCacheProvider(IOptions<CacheSettings> settings, ILLMProvider llmProvider)
         {
             _settings = settings.Value;
             _llmProvider = llmProvider;
             _cacheDirectory = _settings.CacheDirectory ?? Path.Combine(AppContext.BaseDirectory, "cache");
+            _statsFilePath = Path.Combine(_cacheDirectory, "cache_stats.json");
             Directory.CreateDirectory(_cacheDirectory);
+            LoadStatsFromDisk();
         }
 
         private string GetFilePath(string key)
@@ -174,11 +180,93 @@ namespace XPlain.Services
             return Convert.ToBase64String(SHA256.HashData(Encoding.UTF8.GetBytes(hashBuilder.ToString())));
         }
 
-        public (long hits, long misses) GetCacheStats()
+        public CacheStats GetCacheStats()
         {
             lock (_statsLock)
             {
-                return (_cacheHits, _cacheMisses);
+                var stats = new CacheStats
+                {
+                    Hits = _cacheHits,
+                    Misses = _cacheMisses,
+                    StorageUsageBytes = GetCacheStorageUsage(),
+                    CachedItemCount = Directory.GetFiles(_cacheDirectory, "*.json").Length,
+                    QueryTypeStats = new Dictionary<string, int>(_queryTypeStats),
+                    TopQueries = GetTopQueries(),
+                    AverageResponseTimes = GetAverageResponseTimes(),
+                    LastStatsUpdate = DateTime.UtcNow
+                };
+
+                return stats;
+            }
+        }
+
+        public async Task LogQueryStatsAsync(string queryType, string query, double responseTime, bool wasCached)
+        {
+            _queryTypeStats.AddOrUpdate(queryType, 1, (_, count) => count + 1);
+            _queryFrequency.AddOrUpdate(query, 1, (_, count) => count + 1);
+            
+            _queryResponseStats.AddOrUpdate(
+                queryType,
+                (1, responseTime),
+                (_, stats) => (stats.Count + 1, stats.TotalTime + responseTime)
+            );
+
+            await SaveStatsToDiskAsync();
+        }
+
+        private List<(string Query, int Frequency)> GetTopQueries(int count = 10)
+        {
+            return _queryFrequency
+                .OrderByDescending(kv => kv.Value)
+                .Take(count)
+                .Select(kv => (kv.Key, kv.Value))
+                .ToList();
+        }
+
+        private Dictionary<string, double> GetAverageResponseTimes()
+        {
+            return _queryResponseStats.ToDictionary(
+                kv => kv.Key,
+                kv => kv.Value.TotalTime / kv.Value.Count
+            );
+        }
+
+        private long GetCacheStorageUsage()
+        {
+            return Directory.GetFiles(_cacheDirectory, "*.json")
+                .Sum(file => new FileInfo(file).Length);
+        }
+
+        private async Task SaveStatsToDiskAsync()
+        {
+            var stats = GetCacheStats();
+            await File.WriteAllTextAsync(_statsFilePath, 
+                JsonSerializer.Serialize(stats, new JsonSerializerOptions { WriteIndented = true }));
+        }
+
+        private void LoadStatsFromDisk()
+        {
+            if (!File.Exists(_statsFilePath)) return;
+
+            try
+            {
+                var stats = JsonSerializer.Deserialize<CacheStats>(
+                    File.ReadAllText(_statsFilePath));
+
+                if (stats != null)
+                {
+                    _cacheHits = stats.Hits;
+                    _cacheMisses = stats.Misses;
+
+                    foreach (var (type, count) in stats.QueryTypeStats)
+                    {
+                        _queryTypeStats.TryAdd(type, count);
+                    }
+                }
+            }
+            catch
+            {
+                // Ignore errors loading stats
             }
         }
 
