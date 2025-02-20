@@ -129,24 +129,77 @@ namespace XPlain.Services
         private async Task<List<CacheTrainingData>> PrepareTrainingData(CacheStats stats)
         {
             var trainingData = new List<CacheTrainingData>();
+            var resourceMetrics = await _resourceMonitor.GetResourceMetricsAsync();
+            var now = DateTime.UtcNow;
             
             foreach (var query in stats.TopQueries)
             {
                 var performanceMetrics = stats.PerformanceByQueryType.GetValueOrDefault(query.Query);
+                var accessStats = stats.QueryTypeStats.GetValueOrDefault(query.Query, 0);
+                var timePatterns = AnalyzeTimePatterns(query.Query, stats);
                 
                 trainingData.Add(new CacheTrainingData
                 {
-                    Query = query.Query,
-                    Frequency = query.Frequency,
-                    TimeOfDay = query.Query.GetHashCode() % 24, // Simplified for example
-                    DayOfWeek = (int)DateTime.UtcNow.DayOfWeek,
+                    Key = query.Query,
+                    AccessFrequency = query.Frequency,
+                    TimeOfDay = timePatterns.HourOfDay,
+                    DayOfWeek = timePatterns.DayOfWeek,
+                    UserActivityLevel = CalculateUserActivityLevel(accessStats, stats.CachedItemCount),
                     ResponseTime = stats.AverageResponseTimes.GetValueOrDefault(query.Query),
                     CacheHitRate = performanceMetrics?.CachedResponseTime ?? 0,
-                    ResourceUsage = _metrics.AverageResourceUsage
+                    ResourceUsage = _metrics.AverageResourceUsage,
+                    PerformanceGain = performanceMetrics?.PerformanceGain ?? 0,
+                    Label = CalculateCacheValue(query.Frequency, performanceMetrics?.PerformanceGain ?? 0)
                 });
             }
 
             return trainingData;
+        }
+
+        private (float HourOfDay, float DayOfWeek) AnalyzeTimePatterns(string query, CacheStats stats)
+        {
+            // Analyze historical access patterns to determine most frequent access times
+            var history = stats.InvalidationHistory
+                .Where(h => h.Time > DateTime.UtcNow.AddDays(-7))
+                .ToList();
+
+            if (history.Count > 0)
+            {
+                var mostFrequentHour = history
+                    .GroupBy(h => h.Time.Hour)
+                    .OrderByDescending(g => g.Count())
+                    .First()
+                    .Key;
+
+                var mostFrequentDay = history
+                    .GroupBy(h => h.Time.DayOfWeek)
+                    .OrderByDescending(g => g.Count())
+                    .First()
+                    .Key;
+
+                return (mostFrequentHour, (float)mostFrequentDay);
+            }
+
+            // Fallback to hash-based distribution if no history
+            return (
+                query.GetHashCode() % 24,
+                Math.Abs((query.GetHashCode() / 24) % 7)
+            );
+        }
+
+        private float CalculateUserActivityLevel(int queryCount, int totalItems)
+        {
+            if (totalItems == 0) return 0;
+            return (float)queryCount / totalItems * 100;
+        }
+
+        private float CalculateCacheValue(int frequency, double performanceGain)
+        {
+            // Normalize and combine frequency and performance impact
+            var normalizedFrequency = Math.Min(frequency / 1000.0f, 1.0f);
+            var normalizedGain = (float)Math.Min(performanceGain / 100.0, 1.0);
+            
+            return (normalizedFrequency * 0.6f) + (normalizedGain * 0.4f);
         }
 
         private string GetTimeSlot(string query)
