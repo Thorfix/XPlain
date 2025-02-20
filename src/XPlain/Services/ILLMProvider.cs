@@ -28,5 +28,11 @@ namespace XPlain.Services
         /// Gets the model being used by this provider
         /// </summary>
         string ModelName { get; }
+
+        /// <summary>
+        /// Checks if the provider is currently healthy and available
+        /// </summary>
+        /// <returns>True if the provider is healthy, false otherwise</returns>
+        bool IsHealthy();
     }
 }

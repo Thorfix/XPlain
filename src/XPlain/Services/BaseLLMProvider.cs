@@ -1,135 +1,74 @@
-using System.Collections.Generic;
-using System.Security.Cryptography;
-using System.Text;
-using System.Runtime.CompilerServices;
+using System;
+using System.Net.Http;
+using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
+using XPlain.Configuration;
 
-namespace XPlain.Services;
-
-public abstract class BaseLLMProvider : ILLMProvider
+namespace XPlain.Services
 {
-    protected readonly ICacheProvider _cacheProvider;
-    protected readonly IRateLimitingService _rateLimitingService;
-    protected readonly StreamingSettings _streamingSettings;
-
-    protected BaseLLMProvider(
-        ICacheProvider cacheProvider,
-        IRateLimitingService rateLimitingService,
-        StreamingSettings streamingSettings)
+    public abstract class BaseLLMProvider : ILLMProvider
     {
-        _cacheProvider = cacheProvider;
-        _rateLimitingService = rateLimitingService;
-        _streamingSettings = streamingSettings;
-    }
+        protected readonly ILogger _logger;
+        protected readonly CircuitBreaker _circuitBreaker;
+        protected readonly HttpClient _httpClient;
+        protected readonly IRateLimitingService _rateLimitingService;
 
-    public abstract string ProviderName { get; }
-    public abstract string ModelName { get; }
-
-    protected abstract Task<string> GetCompletionInternalAsync(string prompt);
-    
-    /// <summary>
-    /// Gets a streaming completion from the LLM provider
-    /// </summary>
-    /// <param name="prompt">The prompt to send to the LLM</param>
-    /// <param name="cancellationToken">Token to cancel the streaming operation</param>
-    /// <returns>An async enumerable of completion chunks</returns>
-    protected abstract IAsyncEnumerable<string> GetCompletionStreamInternalAsync(
-        string prompt,
-        CancellationToken cancellationToken = default);
-
-    public async Task<string> GetCompletionAsync(string prompt)
-    {
-        // Generate cache key from prompt
-        var cacheKey = GenerateCacheKey(prompt);
-
-        // Try to get from cache first
-        var cachedResponse = await _cacheProvider.GetAsync<string>(cacheKey);
-        if (cachedResponse != null)
+        protected BaseLLMProvider(
+            ILogger logger,
+            HttpClient httpClient,
+            IRateLimitingService rateLimitingService)
         {
-            return cachedResponse;
-        }
-
-        // Get new completion with rate limiting
-        await _rateLimitingService.AcquirePermitAsync(ProviderName);
-        try
-        {
-            var response = await GetCompletionInternalAsync(prompt);
+            _logger = logger ?? throw new ArgumentNullException(nameof(logger));
+            _httpClient = httpClient ?? throw new ArgumentNullException(nameof(httpClient));
+            _rateLimitingService = rateLimitingService ?? throw new ArgumentNullException(nameof(rateLimitingService));
             
-            // Cache the response
-            await _cacheProvider.SetAsync(cacheKey, response);
-            
-            return response;
-        }
-        finally
-        {
-            _rateLimitingService.ReleasePermit(ProviderName);
-        }
-    }
-
-
-    public async Task<IAsyncEnumerable<string>> GetCompletionStreamAsync(
-        string prompt,
-        CancellationToken cancellationToken = default)
-    {
-        // Generate cache key from prompt
-        var cacheKey = GenerateCacheKey(prompt);
-
-        // Try to get from cache first
-        var cachedResponse = await _cacheProvider.GetAsync<string>(cacheKey);
-        if (cachedResponse != null)
-        {
-            // For cached responses, return as a single chunk
-            return AsyncEnumerable.Singleton(cachedResponse);
+            _circuitBreaker = new CircuitBreaker(
+                maxFailures: 3,
+                resetTimeout: TimeSpan.FromMinutes(5));
         }
 
-        // Get new completion with rate limiting
-        await _rateLimitingService.AcquirePermitAsync(ProviderName, cancellationToken: cancellationToken);
-        
-        // Create a StringBuilder to accumulate the full response for caching
-        var fullResponse = new StringBuilder();
+        public abstract string ProviderName { get; }
+        public abstract string ModelName { get; }
 
-        // Return an async stream that accumulates the response and caches it when complete
-        async IAsyncEnumerable<string> StreamWithCaching(
-            [EnumeratorCancellation] CancellationToken streamCancellationToken)
+        public virtual bool IsHealthy()
         {
-            try
+            return _circuitBreaker.IsAllowed() && _rateLimitingService.CanMakeRequest(ProviderName);
+        }
+
+        public abstract Task<string> GetCompletionAsync(string prompt);
+
+        protected async Task<T> ExecuteWithRetryAsync<T>(Func<Task<T>> action, int maxRetries = 3)
+        {
+            if (!_circuitBreaker.IsAllowed())
             {
-                await foreach (var chunk in GetCompletionStreamInternalAsync(prompt)
-                    .WithCancellation(streamCancellationToken))
+                throw new InvalidOperationException($"Circuit breaker is open for provider {ProviderName}");
+            }
+
+            Exception lastException = null;
+            for (int attempt = 0; attempt < maxRetries; attempt++)
+            {
+                try
                 {
-                    if (streamCancellationToken.IsCancellationRequested)
+                    await _rateLimitingService.WaitForAvailabilityAsync(ProviderName);
+                    var result = await action();
+                    _circuitBreaker.OnSuccess();
+                    return result;
+                }
+                catch (Exception ex)
+                {
+                    lastException = ex;
+                    _logger.LogWarning(ex, $"Attempt {attempt + 1} failed for {ProviderName}");
+                    
+                    if (attempt < maxRetries - 1)
                     {
-                        // Don't cache partial responses when cancelled
-                        _rateLimitingService.ReleasePermit(ProviderName);
-                        yield break;
+                        var delay = TimeSpan.FromSeconds(Math.Pow(2, attempt)); // Exponential backoff
+                        await Task.Delay(delay);
                     }
-
-                    fullResponse.Append(chunk);
-                    yield return chunk;
-                }
-
-                // Only cache complete responses
-                if (!streamCancellationToken.IsCancellationRequested)
-                {
-                    var completeResponse = fullResponse.ToString();
-                    await _cacheProvider.SetAsync(cacheKey, completeResponse);
                 }
             }
-            finally
-            {
-                _rateLimitingService.ReleasePermit(ProviderName);
-            }
+
+            _circuitBreaker.OnFailure();
+            throw new Exception($"All retry attempts failed for {ProviderName}", lastException);
         }
-
-        return StreamWithCaching(cancellationToken);
-    }
-
-    private string GenerateCacheKey(string prompt)
-    {
-        // Include model info in cache key to ensure different models get different caches
-        var keyInput = $"{ProviderName}:{ModelName}:{prompt}";
-
-        using var sha256 = SHA256.Create();
-        var hashBytes = sha256.ComputeHash(Encoding.UTF8.GetBytes(keyInput));
-        return Convert.ToBase64String(hashBytes);
     }
 }
