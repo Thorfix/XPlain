@@ -2,14 +2,58 @@
 
 let trendsChart;
 let mitigationChart;
+let timelineChart;
+let notificationSocket;
 
-async function fetchDashboardData() {
+// Store filtered data
+let currentData = {
+    incidents: [],
+    patterns: [],
+    recommendations: [],
+    metrics: {}
+};
+
+async function fetchDashboardData(filters = {}) {
     try {
-        const response = await fetch('/api/incidents/analysis');
+        const queryParams = new URLSearchParams(filters).toString();
+        const response = await fetch(`/api/incidents/analysis?${queryParams}`);
         const data = await response.json();
+        currentData = data;
         updateDashboard(data);
     } catch (error) {
         console.error('Error fetching dashboard data:', error);
+        showNotification('Error loading dashboard data', 'error');
+    }
+}
+
+function initializeWebSocket() {
+    notificationSocket = new WebSocket(`ws://${window.location.host}/incidents/notifications`);
+    
+    notificationSocket.onmessage = (event) => {
+        const notification = JSON.parse(event.data);
+        if (notification.severity === 'Critical') {
+            showNotification(notification.message, 'critical');
+            playAlertSound();
+        }
+        // Refresh dashboard data for real-time updates
+        fetchDashboardData();
+    };
+
+    notificationSocket.onerror = (error) => {
+        console.error('WebSocket error:', error);
+    };
+}
+
+function showNotification(message, type) {
+    const panel = document.getElementById('notificationPanel');
+    const content = panel.querySelector('.notification-content');
+    
+    content.textContent = message;
+    panel.className = `notification-panel ${type}`;
+    panel.classList.remove('hidden');
+    
+    if (type !== 'critical') {
+        setTimeout(() => panel.classList.add('hidden'), 5000);
     }
 }
 
@@ -20,6 +64,72 @@ function updateDashboard(data) {
     updateMitigationChart(data.systemMetrics);
     updatePatterns(data.patterns);
     updateRecommendations(data.recommendations);
+    updateTimeline(data.incidents, data.mitigations);
+    updateFilterOptions(data);
+}
+
+function updateTimeline(incidents, mitigations) {
+    const ctx = document.getElementById('timelineView').getContext('2d');
+    
+    if (timelineChart) {
+        timelineChart.destroy();
+    }
+
+    const timelineData = {
+        datasets: [
+            {
+                label: 'Incidents',
+                data: incidents.map(inc => ({
+                    x: new Date(inc.timestamp),
+                    y: inc.severity === 'Critical' ? 1 : 0.5,
+                    incident: inc
+                })),
+                pointStyle: 'circle',
+                pointRadius: 8,
+                pointBackgroundColor: incident => 
+                    incident.severity === 'Critical' ? '#ff0000' : '#ffa500'
+            },
+            {
+                label: 'Mitigations',
+                data: mitigations.map(mit => ({
+                    x: new Date(mit.timestamp),
+                    y: 0.75,
+                    mitigation: mit
+                })),
+                pointStyle: 'triangle',
+                pointRadius: 8,
+                pointBackgroundColor: '#00ff00'
+            }
+        ]
+    };
+
+    timelineChart = new Chart(ctx, {
+        type: 'scatter',
+        data: timelineData,
+        options: {
+            responsive: true,
+            scales: {
+                x: {
+                    type: 'time',
+                    time: {
+                        unit: 'hour'
+                    }
+                },
+                y: {
+                    display: false
+                }
+            },
+            onClick: (event, elements) => {
+                if (elements.length > 0) {
+                    const element = elements[0];
+                    const data = element.dataset.data[element.index];
+                    if (data.incident) {
+                        showIncidentDetails(data.incident);
+                    }
+                }
+            }
+        }
+    });
 }
 
 function updateSystemMetrics(metrics) {
@@ -148,9 +258,125 @@ function formatDuration(duration) {
     return `${hours}h ${minutes}m`;
 }
 
+function exportToPDF() {
+    const { jsPDF } = window.jspdf;
+    const doc = new jsPDF();
+    
+    // Add title
+    doc.setFontSize(18);
+    doc.text('Incident Analysis Report', 20, 20);
+    
+    // Add system metrics
+    doc.setFontSize(12);
+    doc.text(`MTBF: ${currentData.systemMetrics.mtbf}`, 20, 40);
+    doc.text(`MTTR: ${currentData.systemMetrics.mttr}`, 20, 50);
+    doc.text(`Availability: ${currentData.systemMetrics.availability}%`, 20, 60);
+    
+    // Add patterns and recommendations
+    doc.text('Key Patterns:', 20, 80);
+    currentData.patterns.forEach((pattern, index) => {
+        doc.text(`${pattern.category}: ${pattern.frequency} occurrences`, 30, 90 + (index * 10));
+    });
+    
+    // Save the PDF
+    doc.save('incident-report.pdf');
+}
+
+function exportToCSV() {
+    const data = currentData.incidents.map(incident => ({
+        Timestamp: incident.timestamp,
+        Severity: incident.severity,
+        Category: incident.category,
+        Description: incident.description,
+        AffectedUsers: incident.affectedUsers,
+        Resolution: incident.resolution
+    }));
+    
+    const ws = XLSX.utils.json_to_sheet(data);
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, "Incidents");
+    XLSX.writeFile(wb, 'incident-report.xlsx');
+}
+
+function showIncidentDetails(incident) {
+    const modal = document.getElementById('detailsModal');
+    const details = document.getElementById('incidentDetails');
+    const related = document.getElementById('relatedIncidents');
+    const mitigations = document.getElementById('mitigationHistory');
+    
+    details.innerHTML = `
+        <h4>${incident.category}</h4>
+        <p><strong>Time:</strong> ${formatDate(incident.timestamp)}</p>
+        <p><strong>Severity:</strong> ${incident.severity}</p>
+        <p><strong>Description:</strong> ${incident.description}</p>
+        <p><strong>Affected Users:</strong> ${incident.affectedUsers}</p>
+        <p><strong>Resolution:</strong> ${incident.resolution || 'Pending'}</p>
+    `;
+    
+    // Load related incidents
+    fetch(`/api/incidents/related/${incident.id}`)
+        .then(response => response.json())
+        .then(data => {
+            related.innerHTML = `
+                <h4>Related Incidents</h4>
+                ${data.map(inc => `
+                    <div class="related-incident">
+                        <span>${formatDate(inc.timestamp)}</span>
+                        <span>${inc.category}</span>
+                        <span>${inc.severity}</span>
+                    </div>
+                `).join('')}
+            `;
+        });
+    
+    // Load mitigation history
+    fetch(`/api/incidents/mitigations/${incident.id}`)
+        .then(response => response.json())
+        .then(data => {
+            mitigations.innerHTML = `
+                <h4>Mitigation History</h4>
+                ${data.map(mit => `
+                    <div class="mitigation-item">
+                        <span>${formatDate(mit.timestamp)}</span>
+                        <span>${mit.action}</span>
+                        <span>Success: ${mit.successful ? 'Yes' : 'No'}</span>
+                    </div>
+                `).join('')}
+            `;
+        });
+    
+    modal.classList.remove('hidden');
+}
+
 // Initialize dashboard
 document.addEventListener('DOMContentLoaded', () => {
+    // Initialize WebSocket for real-time notifications
+    initializeWebSocket();
+    
+    // Initialize filters
+    document.getElementById('categoryFilter').addEventListener('change', handleFilterChange);
+    document.getElementById('severityFilter').addEventListener('change', handleFilterChange);
+    document.getElementById('dateFilter').addEventListener('change', handleFilterChange);
+    
+    // Initialize export buttons
+    document.getElementById('exportPDF').addEventListener('click', exportToPDF);
+    document.getElementById('exportCSV').addEventListener('click', exportToCSV);
+    
+    // Initialize timeline controls
+    document.getElementById('zoomIn').addEventListener('click', () => handleTimelineZoom('in'));
+    document.getElementById('zoomOut').addEventListener('click', () => handleTimelineZoom('out'));
+    document.getElementById('timelineRange').addEventListener('change', handleTimelineRangeChange);
+    
+    // Initialize modal close buttons
+    document.querySelectorAll('.close-btn').forEach(btn => {
+        btn.addEventListener('click', () => {
+            btn.closest('.modal, .notification-panel').classList.add('hidden');
+        });
+    });
+    
+    // Initial data load
     fetchDashboardData();
+    
     // Refresh data every 5 minutes
     setInterval(fetchDashboardData, 5 * 60 * 1000);
 });
