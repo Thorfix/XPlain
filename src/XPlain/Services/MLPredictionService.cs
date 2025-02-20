@@ -14,6 +14,7 @@ namespace XPlain.Services
         private readonly ILogger<MLPredictionService> _logger;
         private readonly MLModelTrainingService _trainingService;
         private readonly MLModelValidationService _validationService;
+        private readonly MetricsCollectionService _metricsService;
         private ITransformer? _model;
         private ModelVersion? _activeVersion;
         private Dictionary<string, ITransformer> _shadowModels;
@@ -22,12 +23,14 @@ namespace XPlain.Services
         public MLPredictionService(
             ILogger<MLPredictionService> logger,
             MLModelTrainingService trainingService,
-            MLModelValidationService validationService)
+            MLModelValidationService validationService,
+            MetricsCollectionService metricsService)
         {
             _mlContext = new MLContext(seed: 1);
             _logger = logger;
             _trainingService = trainingService;
             _validationService = validationService;
+            _metricsService = metricsService;
             _shadowModels = new Dictionary<string, ITransformer>();
             _shadowModeEnabled = false;
         }
@@ -312,8 +315,8 @@ namespace XPlain.Services
         {
             try
             {
-                // TODO: Implement query frequency tracking
-                return 1.0f;
+                var frequency = await _metricsService.GetQueryFrequency(key, TimeSpan.FromHours(1));
+                return (float)frequency;
             }
             catch (Exception ex)
             {
@@ -326,8 +329,8 @@ namespace XPlain.Services
         {
             try
             {
-                // TODO: Implement response time tracking
-                return 100.0f; // Default 100ms
+                var responseTime = await _metricsService.GetAverageResponseTime(key, TimeSpan.FromMinutes(5));
+                return (float)responseTime;
             }
             catch (Exception ex)
             {
@@ -340,8 +343,8 @@ namespace XPlain.Services
         {
             try
             {
-                // TODO: Implement cache hit rate tracking
-                return 0.5f; // Default 50% hit rate
+                var hitRate = await _metricsService.GetCacheHitRate(key, TimeSpan.FromMinutes(5));
+                return (float)hitRate;
             }
             catch (Exception ex)
             {
@@ -383,8 +386,8 @@ namespace XPlain.Services
         {
             try
             {
-                // TODO: Implement user activity level calculation
-                return 0.5f; // Default medium activity
+                var activityLevel = await _metricsService.GetUserActivityLevel(TimeSpan.FromMinutes(15));
+                return (float)activityLevel;
             }
             catch (Exception ex)
             {

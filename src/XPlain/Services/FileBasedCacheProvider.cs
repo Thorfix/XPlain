@@ -11,6 +11,7 @@ namespace XPlain.Services
         private ICacheEvictionPolicy _evictionPolicy;
         private readonly CircuitBreaker _circuitBreaker;
         private readonly MLPredictionService _mlPredictionService;
+        private readonly MetricsCollectionService _metricsService;
         private Dictionary<string, double> _resourceLimits;
         private readonly object _resourceLock = new object();
         private readonly Dictionary<string, CacheEntry> _cache;
@@ -22,11 +23,13 @@ namespace XPlain.Services
         public FileBasedCacheProvider(
             ICacheEvictionPolicy evictionPolicy,
             IEncryptionProvider encryptionProvider,
-            MLPredictionService mlPredictionService)
+            MLPredictionService mlPredictionService,
+            MetricsCollectionService metricsService)
         {
             _evictionPolicy = evictionPolicy;
             EncryptionProvider = encryptionProvider;
             _mlPredictionService = mlPredictionService;
+            _metricsService = metricsService;
             _circuitBreaker = new CircuitBreaker();
             MaintenanceLogs = new List<MaintenanceLogEntry>();
             _cache = new Dictionary<string, CacheEntry>();
@@ -97,11 +100,25 @@ namespace XPlain.Services
 
         public async Task<bool> IsKeyFresh(string key)
         {
-            if (_cache.TryGetValue(key, out var entry))
+            var stopwatch = System.Diagnostics.Stopwatch.StartNew();
+            try
             {
-                return !entry.IsExpired;
+                if (_cache.TryGetValue(key, out var entry))
+                {
+                    stopwatch.Stop();
+                    await _metricsService.RecordQueryMetrics(key, stopwatch.ElapsedMilliseconds, !entry.IsExpired);
+                    return !entry.IsExpired;
+                }
+                stopwatch.Stop();
+                await _metricsService.RecordQueryMetrics(key, stopwatch.ElapsedMilliseconds, false);
+                return false;
             }
-            return false;
+            catch
+            {
+                stopwatch.Stop();
+                await _metricsService.RecordQueryMetrics(key, stopwatch.ElapsedMilliseconds, false);
+                throw;
+            }
         }
 
         public async Task PreWarmKey(string key)

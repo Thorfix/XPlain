@@ -1036,6 +1036,15 @@ file class Program
             services.AddSingleton<IModelPerformanceMonitor, ModelPerformanceMonitor>();
             services.AddSingleton<IAutomaticMitigationService, AutomaticMitigationService>();
 
+            // Configure metrics settings
+            var metricsSettings = new MetricsSettings();
+            configuration.GetSection("Metrics").Bind(metricsSettings);
+            services.AddSingleton(Options.Create(metricsSettings));
+            services.AddSingleton<TimeSeriesMetricsStore>();
+            services.AddSingleton<MetricsCollectionService>();
+            services.AddHostedService<MetricsCollectionService>(); // Register as hosted service
+            services.AddSingleton<ICacheEventListener>(sp => sp.GetRequiredService<MetricsCollectionService>()); // Register as event listener
+            
             // Configure ML model settings
             services.AddSingleton<IMLModelTrainingService, MLModelTrainingService>();
             services.AddSingleton<MLPredictionService>();
