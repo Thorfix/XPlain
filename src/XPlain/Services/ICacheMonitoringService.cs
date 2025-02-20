@@ -36,6 +36,11 @@ namespace XPlain.Services
 
     public interface ICacheMonitoringService
     {
+        /// <summary>
+        /// Gets the current state of the circuit breaker
+        /// </summary>
+        Task<CircuitBreakerStatus> GetCircuitBreakerStatusAsync();
+
         // Real-time monitoring
         Task<CacheHealthStatus> GetHealthStatusAsync();
         Task<List<CacheAlert>> GetActiveAlertsAsync();
