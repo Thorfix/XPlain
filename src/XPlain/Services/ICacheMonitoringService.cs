@@ -25,6 +25,43 @@ namespace XPlain.Services
         public Dictionary<string, double> PerformanceMetrics { get; init; } = new();
     }
 
+    public record EncryptionStatus
+    {
+        public bool IsEnabled { get; init; }
+        public string CurrentKeyId { get; init; } = string.Empty;
+        public DateTime KeyCreatedAt { get; init; }
+        public DateTime NextRotationDue { get; init; }
+        public int KeysInRotation { get; init; }
+        public bool AutoRotationEnabled { get; init; }
+    }
+
+    public record MaintenanceLogEntry
+    {
+        public string Id { get; init; } = Guid.NewGuid().ToString();
+        public DateTime Timestamp { get; init; } = DateTime.UtcNow;
+        public string Operation { get; init; } = string.Empty;
+        public string Status { get; init; } = string.Empty;
+        public TimeSpan Duration { get; init; }
+        public Dictionary<string, object> Metadata { get; init; } = new();
+    }
+
+    public record CircuitBreakerState
+    {
+        public string Status { get; init; } = string.Empty;
+        public DateTime LastStateChange { get; init; }
+        public int FailureCount { get; init; }
+        public DateTime? NextRetryTime { get; init; }
+        public List<CircuitBreakerEvent> RecentEvents { get; init; } = new();
+    }
+
+    public record CircuitBreakerEvent
+    {
+        public DateTime Timestamp { get; init; }
+        public string FromState { get; init; } = string.Empty;
+        public string ToState { get; init; } = string.Empty;
+        public string Reason { get; init; } = string.Empty;
+    }
+
     public record MonitoringThresholds
     {
         public double MinHitRatio { get; init; } = 0.7;
@@ -32,10 +69,18 @@ namespace XPlain.Services
         public double MaxResponseTimeMs { get; init; } = 500;
         public double PerformanceDegradationThreshold { get; init; } = 20;
         public int MaxConcurrentAlerts { get; init; } = 10;
+        public int MaxFailuresBeforeBreaking { get; init; } = 5;
+        public double MaxEvictionRatePerMinute { get; init; } = 1000;
+        public int MaxStorageUsagePercent { get; init; } = 90;
     }
 
     public interface ICacheMonitoringService
     {
+        /// <summary>
+        /// Gets the current state of the circuit breaker
+        /// </summary>
+        Task<CircuitBreakerStatus> GetCircuitBreakerStatusAsync();
+
         // Real-time monitoring
         Task<CacheHealthStatus> GetHealthStatusAsync();
         Task<List<CacheAlert>> GetActiveAlertsAsync();
@@ -68,5 +113,22 @@ namespace XPlain.Services
         // Maintenance
         Task<bool> TriggerMaintenanceAsync();
         Task<bool> OptimizeCacheAsync();
+
+        // Circuit Breaker monitoring
+        Task<CircuitBreakerState> GetCircuitBreakerStateAsync();
+        Task<List<CircuitBreakerEvent>> GetCircuitBreakerHistoryAsync(DateTime since);
+        Task<bool> IsCircuitBreakerTrippedAsync();
+
+        // Encryption monitoring
+        Task<EncryptionStatus> GetEncryptionStatusAsync();
+        Task<DateTime> GetNextKeyRotationTimeAsync();
+        Task<Dictionary<string, DateTime>> GetKeyRotationScheduleAsync();
+        Task<List<string>> GetActiveEncryptionKeysAsync();
+
+        // Maintenance and operations
+        Task<List<MaintenanceLogEntry>> GetMaintenanceLogsAsync(DateTime since);
+        Task<Dictionary<string, int>> GetEvictionStatisticsAsync();
+        Task<List<CacheEvictionEvent>> GetRecentEvictionsAsync(int count);
+        Task LogMaintenanceEventAsync(string operation, string status, TimeSpan duration, Dictionary<string, object>? metadata = null);
     }
 }

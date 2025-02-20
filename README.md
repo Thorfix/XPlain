@@ -1,4 +1,51 @@
 # XPlain
+
+## Cache Monitoring Dashboard
+
+XPlain now includes a real-time cache monitoring dashboard that provides insights into cache performance and health metrics. The dashboard visualizes important metrics and provides alerts for potential issues.
+
+### Features
+
+- Real-time cache health monitoring
+- Performance metrics visualization
+- Historical analytics
+- Alert management
+- Interactive charts and graphs
+
+### Accessing the Dashboard
+
+1. Start the XPlain application
+2. Open your browser to `http://localhost:5000/dashboard.html`
+3. The dashboard will automatically load and begin displaying real-time data
+
+### Available Metrics
+
+- Cache hit/miss ratios
+- Memory usage trends
+- Query performance metrics
+- Cache item counts
+- Response times
+- Active alerts
+
+### API Endpoints
+
+The following monitoring endpoints are available:
+
+- GET `/api/cache/health` - Current cache health status
+- GET `/api/cache/metrics` - Performance metrics
+- GET `/api/cache/alerts` - Active alerts
+- GET `/api/cache/analytics/{days}` - Historical analytics
+- GET `/api/cache/recommendations` - Optimization recommendations
+
+### Real-time Updates
+
+The dashboard uses SignalR for real-time updates of metrics and alerts. Update frequencies:
+
+- Health status: Every minute
+- Performance metrics: Every 5 minutes
+- Alerts: Every 30 seconds
+- Analytics: Every hour
+
 An AI-powered code analysis tool supporting multiple LLM providers
 
 ## Overview

@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Cache Monitoring Dashboard</title>
+    <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@microsoft/signalr@6.0.1/dist/browser/signalr.min.js"></script>
+</head>
+<body class="bg-gray-100">
+    <div class="container mx-auto px-4 py-8">
+        <h1 class="text-3xl font-bold mb-8">Cache Monitoring Dashboard</h1>
+
+        <!-- Health Status Section -->
+        <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
+            <div class="bg-white p-4 rounded-lg shadow">
+                <h3 class="text-lg font-semibold mb-2">Hit Ratio</h3>
+                <p id="hitRatio" class="text-2xl font-bold text-blue-600">-</p>
+            </div>
+            <div class="bg-white p-4 rounded-lg shadow">
+                <h3 class="text-lg font-semibold mb-2">Memory Usage</h3>
+                <p id="memoryUsage" class="text-2xl font-bold text-green-600">-</p>
+            </div>
+            <div class="bg-white p-4 rounded-lg shadow">
+                <h3 class="text-lg font-semibold mb-2">Response Time</h3>
+                <p id="responseTime" class="text-2xl font-bold text-purple-600">-</p>
+            </div>
+            <div class="bg-white p-4 rounded-lg shadow">
+                <h3 class="text-lg font-semibold mb-2">Cached Items</h3>
+                <p id="itemCount" class="text-2xl font-bold text-gray-600">-</p>
+            </div>
+        </div>
+
+        <!-- Charts Section -->
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-8 mb-8">
+            <div class="bg-white p-4 rounded-lg shadow">
+                <h3 class="text-lg font-semibold mb-4">Health Status</h3>
+                <canvas id="healthChart" height="200"></canvas>
+            </div>
+            <div class="bg-white p-4 rounded-lg shadow">
+                <h3 class="text-lg font-semibold mb-4">Performance Metrics</h3>
+                <canvas id="metricsChart" height="200"></canvas>
+            </div>
+        </div>
+
+        <!-- Analytics Section -->
+        <div class="grid grid-cols-1 mb-8">
+            <div class="bg-white p-4 rounded-lg shadow">
+                <h3 class="text-lg font-semibold mb-4">Historical Analytics</h3>
+                <canvas id="analyticsChart" height="200"></canvas>
+            </div>
+        </div>
+
+        <!-- Circuit Breaker Section -->
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-8 mb-8">
+            <div class="bg-white p-4 rounded-lg shadow">
+                <h3 class="text-lg font-semibold mb-4">Circuit Breaker Status</h3>
+                <div id="circuitBreakerStatus" class="mb-4">
+                    <p>Current State: <span id="cbState" class="font-bold">-</span></p>
+                    <p>Failure Count: <span id="cbFailures" class="font-bold">-</span></p>
+                    <p>Last State Change: <span id="cbLastChange" class="font-bold">-</span></p>
+                    <p>Next Retry: <span id="cbNextRetry" class="font-bold">-</span></p>
+                </div>
+                <div id="circuitBreakerHistory" class="mt-4">
+                    <h4 class="text-md font-semibold mb-2">Recent Events</h4>
+                    <div id="cbEvents" class="space-y-2">
+                        <!-- Events will be populated here -->
+                    </div>
+                </div>
+            </div>
+            <div class="bg-white p-4 rounded-lg shadow">
+                <h3 class="text-lg font-semibold mb-4">Eviction Statistics</h3>
+                <canvas id="evictionChart" height="200"></canvas>
+                <div id="evictionStats" class="mt-4">
+                    <!-- Eviction stats will be populated here -->
+                </div>
+            </div>
+        </div>
+
+        <!-- Encryption Section -->
+        <div class="bg-white p-4 rounded-lg shadow mb-8">
+            <h3 class="text-lg font-semibold mb-4">Encryption Status</h3>
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div id="encryptionStatus">
+                    <p>Status: <span id="encEnabled" class="font-bold">-</span></p>
+                    <p>Current Key: <span id="encCurrentKey" class="font-bold">-</span></p>
+                    <p>Keys in Rotation: <span id="encKeyCount" class="font-bold">-</span></p>
+                    <p>Auto-rotation: <span id="encAutoRotation" class="font-bold">-</span></p>
+                </div>
+                <div id="keyRotation">
+                    <h4 class="text-md font-semibold mb-2">Key Rotation Schedule</h4>
+                    <div id="keySchedule" class="space-y-2">
+                        <!-- Schedule will be populated here -->
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Maintenance Logs Section -->
+        <div class="bg-white p-4 rounded-lg shadow mb-8">
+            <h3 class="text-lg font-semibold mb-4">Maintenance Logs</h3>
+            <div class="overflow-x-auto">
+                <table class="min-w-full">
+                    <thead>
+                        <tr>
+                            <th class="px-4 py-2">Timestamp</th>
+                            <th class="px-4 py-2">Operation</th>
+                            <th class="px-4 py-2">Status</th>
+                            <th class="px-4 py-2">Duration</th>
+                            <th class="px-4 py-2">Details</th>
+                        </tr>
+                    </thead>
+                    <tbody id="maintenanceLogs">
+                        <!-- Logs will be populated here -->
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- Alerts Section -->
+        <div class="bg-white p-4 rounded-lg shadow mb-8">
+            <h3 class="text-lg font-semibold mb-4">Active Alerts</h3>
+            <div id="alertsList" class="space-y-4">
+                <!-- Alerts will be populated here -->
+            </div>
+        </div>
+
+        <!-- Status Footer -->
+        <div class="text-center text-gray-600">
+            <p>Last Updated: <span id="lastUpdate">-</span></p>
+        </div>
+    </div>
+
+    <script src="/js/dashboard.js"></script>
+</body>
+</html>
