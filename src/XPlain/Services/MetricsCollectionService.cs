@@ -11,7 +11,7 @@ using XPlain.Configuration;
 
 namespace XPlain.Services
 {
-    public class MetricsCollectionService : IHostedService, IDisposable
+    public class MetricsCollectionService : IHostedService, ICacheEventListener, IDisposable
     {
         private readonly ILogger<MetricsCollectionService> _logger;
         private readonly TimeSeriesMetricsStore _timeSeriesStore;
@@ -61,7 +61,7 @@ namespace XPlain.Services
             return Task.CompletedTask;
         }
 
-        public async Task RecordQueryMetrics(string key, double responseTime, bool isHit)
+        public async Task OnCacheAccess(string key, double responseTime, bool isHit)
         {
             try
             {
@@ -83,6 +83,32 @@ namespace XPlain.Services
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Error recording metrics for key {Key}", key);
+            }
+        }
+
+        public async Task OnCacheEviction(string key)
+        {
+            try
+            {
+                // Record eviction in time series database
+                await _timeSeriesStore.StoreEvictionEvent(key, DateTime.UtcNow);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error recording cache eviction for key {Key}", key);
+            }
+        }
+
+        public async Task OnCachePreWarm(string key, bool success)
+        {
+            try
+            {
+                // Record pre-warm attempt in time series database
+                await _timeSeriesStore.StorePreWarmEvent(key, success, DateTime.UtcNow);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error recording cache pre-warm for key {Key}", key);
             }
         }
 

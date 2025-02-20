@@ -51,6 +51,49 @@ namespace XPlain.Services
             }
         }
 
+        public async Task StoreEvictionEvent(string key, DateTime timestamp)
+        {
+            try
+            {
+                var point = PointData
+                    .Measurement("cache_events")
+                    .Tag("key", key)
+                    .Tag("type", "eviction")
+                    .Field("count", 1)
+                    .Timestamp(timestamp, WritePrecision.Ms);
+
+                using var writeApi = _client.GetWriteApiAsync();
+                await writeApi.WritePointAsync(point);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Failed to store eviction event for key {Key}", key);
+                throw;
+            }
+        }
+
+        public async Task StorePreWarmEvent(string key, bool success, DateTime timestamp)
+        {
+            try
+            {
+                var point = PointData
+                    .Measurement("cache_events")
+                    .Tag("key", key)
+                    .Tag("type", "prewarm")
+                    .Tag("success", success.ToString())
+                    .Field("count", 1)
+                    .Timestamp(timestamp, WritePrecision.Ms);
+
+                using var writeApi = _client.GetWriteApiAsync();
+                await writeApi.WritePointAsync(point);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Failed to store pre-warm event for key {Key}", key);
+                throw;
+            }
+        }
+
         public async Task<double> GetQueryFrequency(string key, TimeSpan window)
         {
             try
