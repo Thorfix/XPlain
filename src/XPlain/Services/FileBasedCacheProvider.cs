@@ -91,10 +91,10 @@ namespace XPlain.Services
             IOptions<CacheSettings> settings,
             ILLMProvider llmProvider,
             ICacheMonitoringService monitoringService,
-            ICacheEvictionPolicy? evictionPolicy = null)
+            ICacheEvictionPolicy evictionPolicy)
         {
             _settings = settings.Value;
-            _evictionPolicy = evictionPolicy ?? CreateEvictionPolicy(_settings.EvictionPolicy);
+            _evictionPolicy = evictionPolicy;
             _llmProvider = llmProvider;
             _monitoringService = monitoringService;
             _cacheDirectory = _settings.CacheDirectory ?? Path.Combine(AppContext.BaseDirectory, "cache");
