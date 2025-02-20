@@ -1042,6 +1042,8 @@ file class Program
             services.AddSingleton(Options.Create(metricsSettings));
             services.AddSingleton<TimeSeriesMetricsStore>();
             services.AddSingleton<MetricsCollectionService>();
+            services.AddHostedService<MetricsCollectionService>(); // Register as hosted service
+            services.AddSingleton<ICacheEventListener>(sp => sp.GetRequiredService<MetricsCollectionService>()); // Register as event listener
             
             // Configure ML model settings
             services.AddSingleton<IMLModelTrainingService, MLModelTrainingService>();
