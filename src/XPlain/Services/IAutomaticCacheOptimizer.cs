@@ -9,5 +9,7 @@ namespace XPlain.Services
         Task AdjustEvictionPolicyAsync(TrendAnalysis trends);
         Task UpdateCacheWarningThresholdsAsync(List<PredictedAlert> alerts);
         Task PrewarmFrequentItemsAsync(Dictionary<string, double> hitRates);
+        Task<OptimizationMetrics> GetOptimizationMetricsAsync();
+        Task SetEmergencyOverrideAsync(bool enabled);
     }
 }

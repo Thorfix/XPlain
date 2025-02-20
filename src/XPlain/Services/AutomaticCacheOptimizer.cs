@@ -14,7 +14,13 @@ namespace XPlain.Services
         private readonly Dictionary<string, double> _baselineThresholds;
         private readonly double _maxThresholdAdjustment = 0.2; // Maximum 20% adjustment
         private readonly TimeSpan _optimizationCooldown = TimeSpan.FromMinutes(5);
+        private readonly TimeSpan _rollbackCheckPeriod = TimeSpan.FromMinutes(1);
         private DateTime _lastOptimization = DateTime.MinValue;
+        private readonly Dictionary<string, OptimizationStrategy> _optimizationStrategies;
+        private readonly Dictionary<string, OptimizationAction> _activeOptimizations;
+        private readonly Queue<OptimizationAction> _auditTrail;
+        private readonly int _maxAuditTrailSize = 1000;
+        private bool _emergencyOverrideActive;
 
         public AutomaticCacheOptimizer(
             ICacheProvider cacheProvider,
@@ -25,6 +31,12 @@ namespace XPlain.Services
             _monitoringService = monitoringService;
             _logger = logger;
             _baselineThresholds = new Dictionary<string, double>();
+            _optimizationStrategies = new Dictionary<string, OptimizationStrategy>();
+            _activeOptimizations = new Dictionary<string, OptimizationAction>();
+            _auditTrail = new Queue<OptimizationAction>();
+
+            // Start optimization monitoring
+            _ = MonitorOptimizationsAsync();
         }
 
         public async Task OptimizeAsync(PredictionResult prediction)
@@ -271,5 +283,198 @@ namespace XPlain.Services
             
             return Math.Max(baseline * 0.5, Math.Min(baseline * 1.5, current + limitedAdjustment));
         }
+
+        private async Task MonitorOptimizationsAsync()
+        {
+            while (true)
+            {
+                await Task.Delay(_rollbackCheckPeriod);
+                
+                try
+                {
+                    if (_emergencyOverrideActive) continue;
+
+                    var currentMetrics = await _monitoringService.GetPerformanceMetricsAsync();
+                    var activeOptimizations = _activeOptimizations.ToList();
+
+                    foreach (var (key, action) in activeOptimizations)
+                    {
+                        if (ShouldRollback(action, currentMetrics))
+                        {
+                            await RollbackOptimizationAsync(action);
+                            UpdateOptimizationStrategy(action, false);
+                            _activeOptimizations.Remove(key);
+                        }
+                        else if (DateTime.UtcNow - action.Timestamp > TimeSpan.FromMinutes(15))
+                        {
+                            // Optimization successful after 15 minutes
+                            UpdateOptimizationStrategy(action, true);
+                            _activeOptimizations.Remove(key);
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "Error in optimization monitoring");
+                }
+            }
+        }
+
+        private bool ShouldRollback(OptimizationAction action, Dictionary<string, double> currentMetrics)
+        {
+            // Check if metrics degraded significantly after optimization
+            foreach (var (metric, valueBefore) in action.MetricsBefore)
+            {
+                if (!currentMetrics.ContainsKey(metric)) continue;
+                
+                var valueAfter = currentMetrics[metric];
+                var degradation = metric.ToLower() switch
+                {
+                    "cachehitrate" => valueBefore - valueAfter,
+                    "memoryusage" => valueAfter - valueBefore,
+                    "averageresponsetime" => valueAfter - valueBefore,
+                    _ => 0
+                };
+
+                if (degradation > valueBefore * 0.3) // 30% degradation threshold
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private async Task RollbackOptimizationAsync(OptimizationAction action)
+        {
+            try
+            {
+                switch (action.ActionType)
+                {
+                    case "CacheSizeIncrease":
+                        await _cacheProvider.TrimCacheAsync(action.MetricsBefore["cacheSize"]);
+                        break;
+                    case "CacheSizeDecrease":
+                        await _cacheProvider.ExpandCacheSizeAsync(action.MetricsBefore["cacheSize"]);
+                        break;
+                    case "EvictionPolicyChange":
+                        var previousPolicy = Enum.Parse<EvictionPolicyType>(action.MetricsBefore["evictionPolicy"].ToString());
+                        await _cacheProvider.SetEvictionPolicyAsync(CreateEvictionPolicy(previousPolicy));
+                        break;
+                }
+
+                _logger.LogWarning("Rolled back optimization: {ActionType} due to performance degradation", action.ActionType);
+                
+                RecordAuditTrail(new OptimizationAction
+                {
+                    ActionType = $"Rollback_{action.ActionType}",
+                    Timestamp = DateTime.UtcNow,
+                    MetricsBefore = action.MetricsAfter,
+                    MetricsAfter = action.MetricsBefore,
+                    WasSuccessful = true,
+                    RollbackReason = "Performance degradation"
+                });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error rolling back optimization: {ActionType}", action.ActionType);
+            }
+        }
+
+        private void UpdateOptimizationStrategy(OptimizationAction action, bool wasSuccessful)
+        {
+            var key = $"{action.ActionType}_{action.Trigger}";
+            if (!_optimizationStrategies.ContainsKey(key))
+            {
+                _optimizationStrategies[key] = new OptimizationStrategy
+                {
+                    Trigger = action.Trigger,
+                    Action = action.ActionType,
+                    SuccessRate = 0,
+                    TotalAttempts = 0,
+                    SuccessfulAttempts = 0
+                };
+            }
+
+            var strategy = _optimizationStrategies[key];
+            strategy.TotalAttempts++;
+            if (wasSuccessful)
+            {
+                strategy.SuccessfulAttempts++;
+            }
+            strategy.SuccessRate = (double)strategy.SuccessfulAttempts / strategy.TotalAttempts;
+            strategy.History.Add(action);
+
+            // Trim history if too long
+            if (strategy.History.Count > 100)
+            {
+                strategy.History.RemoveAt(0);
+            }
+        }
+
+        private void RecordAuditTrail(OptimizationAction action)
+        {
+            _auditTrail.Enqueue(action);
+            while (_auditTrail.Count > _maxAuditTrailSize)
+            {
+                _auditTrail.Dequeue();
+            }
+        }
+
+        private ICacheEvictionPolicy CreateEvictionPolicy(EvictionPolicyType policyType)
+        {
+            return policyType switch
+            {
+                EvictionPolicyType.LRU => new LRUEvictionPolicy(),
+                EvictionPolicyType.LFU => new LFUEvictionPolicy(),
+                EvictionPolicyType.FIFO => new FIFOEvictionPolicy(),
+                _ => throw new ArgumentException($"Unknown policy type: {policyType}")
+            };
+        }
+
+        public async Task<OptimizationMetrics> GetOptimizationMetricsAsync()
+        {
+            return new OptimizationMetrics
+            {
+                ActiveOptimizations = _activeOptimizations.Values.ToList(),
+                SuccessRateByStrategy = _optimizationStrategies.ToDictionary(
+                    kvp => kvp.Key,
+                    kvp => kvp.Value.SuccessRate
+                ),
+                RecentActions = _auditTrail.TakeLast(50).ToList(),
+                EmergencyOverrideActive = _emergencyOverrideActive
+            };
+        }
+
+        public async Task SetEmergencyOverrideAsync(bool enabled)
+        {
+            _emergencyOverrideActive = enabled;
+            _logger.LogWarning("Emergency override {Status}", enabled ? "activated" : "deactivated");
+            
+            if (enabled)
+            {
+                // Rollback all active optimizations
+                foreach (var action in _activeOptimizations.Values)
+                {
+                    await RollbackOptimizationAsync(action);
+                }
+                _activeOptimizations.Clear();
+            }
+        }
+    }
+
+    public class OptimizationMetrics
+    {
+        public List<OptimizationAction> ActiveOptimizations { get; set; }
+        public Dictionary<string, double> SuccessRateByStrategy { get; set; }
+        public List<OptimizationAction> RecentActions { get; set; }
+        public bool EmergencyOverrideActive { get; set; }
+    }
+
+    public enum EvictionPolicyType
+    {
+        LRU,
+        LFU,
+        FIFO
     }
 }

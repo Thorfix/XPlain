@@ -1,531 +1,133 @@
-let currentMetrics = {};
-let metricsCharts = {};
-let updateInterval;
-let currentPredictions = {};
+document.addEventListener('DOMContentLoaded', init);
 
-function initializeDashboard() {
-    setupChartContainers();
-    fetchMetrics();
-    fetchAlerts();
-    fetchPredictions();
-    fetchMitigationStatus();
-    setupThresholdForm();
-    startRealTimeUpdates();
-}
+const updateData = async () => {
+    await updateCacheMetrics();
+    await updateCacheAlerts();
+    await updateCacheHealth();
+    await updateOptimizationMetrics();
+};
 
-async function fetchMitigationStatus() {
-    try {
-        const response = await fetch('/api/cache/mitigation/status');
-        const status = await response.json();
-        updateMitigationStatus(status);
-    } catch (error) {
-        console.error('Error fetching mitigation status:', error);
-    }
-}
+const init = async () => {
+    await updateCacheMetrics();
+    await updateCacheAlerts();
+    await updateCacheHealth();
+    await updateOptimizationMetrics();
+    setInterval(updateData, 5000);
+};
 
-function updateMitigationStatus(status) {
-    const container = document.getElementById('mitigation-status');
-    if (!container) return;
-
-    const recentMitigations = status.RecentMitigations || [];
-    const html = `
-        <div class="row">
-            <div class="col-md-6">
-                <h4>Recent Automatic Actions</h4>
-                <ul class="list-group">
-                    ${recentMitigations.map(mitigation => `
-                        <li class="list-group-item">
-                            <strong>${mitigation.Operation}</strong>
-                            <br>
-                            <small class="text-muted">
-                                ${new Date(mitigation.Timestamp).toLocaleString()}
-                                (${mitigation.Status})
-                            </small>
-                        </li>
-                    `).join('')}
-                </ul>
-            </div>
-            <div class="col-md-6">
-                <h4>Current Thresholds</h4>
-                <ul class="list-group">
-                    <li class="list-group-item">
-                        Min Hit Ratio: ${status.Thresholds.MinHitRatio.toFixed(2)}
-                    </li>
-                    <li class="list-group-item">
-                        Max Memory Usage: ${status.Thresholds.MaxMemoryUsageMB} MB
-                    </li>
-                    <li class="list-group-item">
-                        Max Response Time: ${status.Thresholds.MaxResponseTimeMs} ms
-                    </li>
-                </ul>
-            </div>
-        </div>
-    `;
-    container.innerHTML = html;
-}
-
-function setupThresholdForm() {
-    const form = document.getElementById('threshold-form');
-    if (!form) return;
-
-    form.addEventListener('submit', async (e) => {
-        e.preventDefault();
-        const thresholds = {
-            MinHitRatio: parseFloat(document.getElementById('minHitRatio').value),
-            MaxMemoryUsageMB: parseFloat(document.getElementById('maxMemoryUsage').value),
-            MaxResponseTimeMs: parseFloat(document.getElementById('maxResponseTime').value)
-        };
-
-        try {
-            await fetch('/api/cache/mitigation/thresholds', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json'
-                },
-                body: JSON.stringify(thresholds)
-            });
-            fetchMitigationStatus(); // Refresh the display
-        } catch (error) {
-            console.error('Error updating thresholds:', error);
-            alert('Failed to update thresholds');
-        }
-    });
-}
-
-async function fetchMetrics() {
+const updateCacheMetrics = async () => {
     try {
         const response = await fetch('/api/cache/metrics');
         const metrics = await response.json();
-        currentMetrics = metrics;
-        updateMetricsDisplay(metrics);
+        document.getElementById('cache-metrics').innerHTML = `
+            <h3>Cache Metrics</h3>
+            <div>Hit Rate: ${(metrics.hitRate * 100).toFixed(1)}%</div>
+            <div>Memory Usage: ${metrics.memoryUsage.toFixed(2)} MB</div>
+            <div>Item Count: ${metrics.itemCount}</div>
+        `;
     } catch (error) {
-        console.error('Error fetching metrics:', error);
+        console.error('Error updating cache metrics:', error);
     }
-}
+};
 
-async function fetchPredictions() {
-    try {
-        const [predictions, predictedAlerts, trends] = await Promise.all([
-            fetch('/api/cache/predictions').then(r => r.json()),
-            fetch('/api/cache/alerts/predicted').then(r => r.json()),
-            fetch('/api/cache/metrics/trends').then(r => r.json())
-        ]);
-
-        updatePredictionCharts(predictions);
-        updatePredictedAlerts(predictedAlerts);
-        updateTrendAnalysis(trends);
-    } catch (error) {
-        console.error('Error fetching predictions:', error);
-    }
-}
-
-async function fetchAlerts() {
+const updateCacheAlerts = async () => {
     try {
         const response = await fetch('/api/cache/alerts');
         const alerts = await response.json();
-        updateAlertsDisplay(alerts);
-    } catch (error) {
-        console.error('Error fetching alerts:', error);
-    }
-}
-
-function setupChartContainers() {
-    const metrics = ['CacheHitRate', 'MemoryUsage', 'AverageResponseTime'];
-    const container = document.getElementById('metrics-container');
-    
-    metrics.forEach(metric => {
-        // Current metrics chart
-        const chartDiv = document.createElement('div');
-        chartDiv.className = 'chart-container';
-        chartDiv.innerHTML = `
-            <h3>${formatMetricName(metric)}</h3>
-            <canvas id="${metric}-chart"></canvas>
-        `;
-        container.appendChild(chartDiv);
-
-        // Prediction chart
-        const predictionDiv = document.createElement('div');
-        predictionDiv.className = 'chart-container';
-        predictionDiv.innerHTML = `
-            <h3>${formatMetricName(metric)} Prediction</h3>
-            <canvas id="${metric}-prediction-chart"></canvas>
-        `;
-        container.appendChild(predictionDiv);
-
-        initializeChart(metric);
-    });
-}
-
-function initializeChart(metric) {
-    const ctx = document.getElementById(`${metric}-chart`).getContext('2d');
-    const metricColor = getMetricColor(metric);
-    
-    metricsCharts[metric] = new Chart(ctx, {
-        type: 'line',
-        data: {
-            datasets: [
-                {
-                    label: `${formatMetricName(metric)} (Actual)`,
-                    data: [],
-                    borderColor: metricColor,
-                    tension: 0.1,
-                    fill: false,
-                    order: 1
-                },
-                {
-                    label: `${formatMetricName(metric)} (Predicted)`,
-                    data: [],
-                    borderColor: adjustColor(metricColor, 0.6),
-                    borderDash: [5, 5],
-                    tension: 0.1,
-                    fill: false,
-                    order: 2
-                },
-                {
-                    label: 'Confidence Interval',
-                    data: [],
-                    borderColor: 'transparent',
-                    backgroundColor: adjustColor(metricColor, 0.2),
-                    fill: '+1',
-                    order: 3
-                },
-                {
-                    label: 'Confidence Interval',
-                    data: [],
-                    borderColor: 'transparent',
-                    backgroundColor: adjustColor(metricColor, 0.2),
-                    fill: '-1',
-                    order: 3
-                },
-                {
-                    label: 'Warning Threshold',
-                    data: [],
-                    borderColor: 'rgba(255, 206, 86, 1)',
-                    borderDash: [5, 5],
-                    fill: false,
-                    order: 4
-                },
-                {
-                    label: 'Critical Threshold',
-                    data: [],
-                    borderColor: 'rgba(255, 99, 132, 1)',
-                    borderDash: [5, 5],
-                    fill: false,
-                    order: 4
-                }
-            ]
-        },
-        options: {
-            responsive: true,
-            interaction: {
-                intersect: false,
-                mode: 'index'
-            },
-            scales: {
-                y: {
-                    beginAtZero: true,
-                    grid: {
-                        drawBorder: false
-                    }
-                },
-                x: {
-                    grid: {
-                        display: false
-                    }
-                }
-            },
-            plugins: {
-                tooltip: {
-                    callbacks: {
-                        label: function(context) {
-                            const value = context.raw;
-                            const datasetLabel = context.dataset.label;
-                            if (datasetLabel.includes('Confidence')) {
-                                return null; // Don't show confidence bounds in tooltip
-                            }
-                            return `${datasetLabel}: ${value.toFixed(2)}`;
-                        }
-                    }
-                },
-                legend: {
-                    labels: {
-                        filter: function(item) {
-                            return !item.text.includes('Confidence'); // Hide confidence bounds from legend
-                        }
-                    }
-                }
-            }
-        }
-    });
-}
-
-function adjustColor(color, alpha) {
-    const rgb = color.match(/\d+/g);
-    return `rgba(${rgb[0]}, ${rgb[1]}, ${rgb[2]}, ${alpha})`;
-}
-
-function updateMetricsDisplay(metrics) {
-    Object.entries(metrics).forEach(([metric, value]) => {
-        if (metricsCharts[metric]) {
-            const chart = metricsCharts[metric];
-            const now = new Date().toLocaleTimeString();
-            
-            // Actual value data
-            const actualData = {
-                x: now,
-                y: value
-            };
-            chart.data.datasets[0].data.push(actualData);
-
-            // Add prediction if available
-            if (currentPredictions[metric]) {
-                const prediction = currentPredictions[metric];
-                const confidenceRange = calculateConfidenceRange(prediction);
-                
-                // Predicted value data
-                const predictedData = {
-                    x: now,
-                    y: prediction.value
-                };
-                chart.data.datasets[1].data.push(predictedData);
-
-                // Confidence interval upper bound
-                const upperBoundData = {
-                    x: now,
-                    y: confidenceRange.upper
-                };
-                chart.data.datasets[2].data.push(upperBoundData);
-
-                // Confidence interval lower bound
-                const lowerBoundData = {
-                    x: now,
-                    y: confidenceRange.lower
-                };
-                chart.data.datasets[3].data.push(lowerBoundData);
-
-                // Add warning threshold line
-                const threshold = chart.data.datasets[4];
-                threshold.data = chart.data.labels.map(() => prediction.warningThreshold);
-
-                // Add critical threshold line
-                const criticalThreshold = chart.data.datasets[5];
-                criticalThreshold.data = chart.data.labels.map(() => prediction.criticalThreshold);
-            }
-            
-            // Remove old data points to maintain rolling window
-            const maxDataPoints = 20;
-            if (chart.data.datasets[0].data.length > maxDataPoints) {
-                chart.data.datasets.forEach(dataset => {
-                    if (dataset.data.length > maxDataPoints) {
-                        dataset.data.shift();
-                    }
-                });
-            }
-            
-            chart.update();
-        }
-    });
-    updateConfidenceIndicators();
-}
-
-function calculateConfidenceRange(prediction) {
-    const range = prediction.value * (1 - prediction.confidence);
-    return {
-        upper: prediction.value + range,
-        lower: prediction.value - range
-    };
-}
-
-function updateConfidenceIndicators() {
-    const container = document.getElementById('confidence-indicators');
-    if (!container) return;
-
-    let html = '<div class="row">';
-    Object.entries(currentPredictions).forEach(([metric, prediction]) => {
-        const confidenceClass = prediction.confidence >= 0.85 ? 'high' :
-                              prediction.confidence >= 0.6 ? 'medium' : 'low';
-        
-        html += `
-            <div class="col-md-4">
-                <div class="confidence-indicator ${confidenceClass}">
-                    <h5>${formatMetricName(metric)}</h5>
-                    <div class="confidence-gauge">
-                        <div class="gauge-fill" style="width: ${prediction.confidence * 100}%"></div>
-                    </div>
-                    <div class="confidence-details">
-                        <span class="confidence-value">${(prediction.confidence * 100).toFixed(1)}%</span>
-                        <span class="confidence-label">Confidence</span>
-                    </div>
-                    ${prediction.detectedPattern ? `
-                        <div class="pattern-info">
-                            <span class="pattern-type">${prediction.detectedPattern.type}</span>
-                            <span class="pattern-time">Lead time: ${formatTimeSpan(prediction.detectedPattern.timeToIssue)}</span>
-                        </div>
-                    ` : ''}
+        document.getElementById('cache-alerts').innerHTML = `
+            <h3>Active Alerts</h3>
+            ${alerts.map(alert => `
+                <div class="alert ${alert.severity.toLowerCase()}">
+                    ${alert.message}
                 </div>
+            `).join('')}
+        `;
+    } catch (error) {
+        console.error('Error updating cache alerts:', error);
+    }
+};
+
+const updateCacheHealth = async () => {
+    try {
+        const response = await fetch('/api/cache/health');
+        const health = await response.json();
+        document.getElementById('cache-health').innerHTML = `
+            <h3>Cache Health</h3>
+            <div class="health-status ${health.status.toLowerCase()}">
+                ${health.status}
             </div>
         `;
-    });
-    html += '</div>';
-    container.innerHTML = html;
-}
-
-function updatePredictionCharts(predictions) {
-    currentPredictions = predictions;
-
-    Object.entries(predictions).forEach(([metric, prediction]) => {
-        if (metricsCharts[metric]) {
-            const chart = metricsCharts[metric];
-            
-            // Update thresholds based on prediction confidence
-            const confidence = prediction.confidence;
-            const warningOpacity = Math.min(0.3 + confidence * 0.7, 1);
-            const criticalOpacity = Math.min(0.3 + confidence * 0.7, 1);
-            
-            chart.data.datasets[4].borderColor = `rgba(255, 206, 86, ${warningOpacity})`;
-            chart.data.datasets[5].borderColor = `rgba(255, 99, 132, ${criticalOpacity})`;
-            
-            // Update the visualization
-            chart.update();
-        }
-    });
-}
-
-function updatePredictedAlerts(alerts) {
-    const alertsContainer = document.getElementById('predicted-alerts');
-    if (!alertsContainer) return;
-
-    alertsContainer.innerHTML = alerts.map(alert => `
-        <div class="alert alert-${getAlertClass(alert.severity)}">
-            <strong>${alert.metric}:</strong> Predicted to reach ${alert.predictedValue.toFixed(2)} 
-            in ${formatTimeSpan(alert.timeToImpact)}
-            (Confidence: ${(alert.confidence * 100).toFixed(1)}%)
-        </div>
-    `).join('');
-}
-
-function updateTrendAnalysis(trends) {
-    const trendsContainer = document.getElementById('trend-analysis');
-    if (!trendsContainer) return;
-
-    trendsContainer.innerHTML = Object.entries(trends).map(([metric, analysis]) => `
-        <div class="trend-card">
-            <h4>${metric}</h4>
-            <p>Trend: ${analysis.trend}</p>
-            <p>Seasonality: ${(analysis.seasonality * 100).toFixed(1)}%</p>
-            <p>Volatility: ${analysis.volatility.toFixed(3)}</p>
-        </div>
-    `).join('');
-}
-
-function updateAlertsDisplay(alerts) {
-    const alertsContainer = document.getElementById('alerts-container');
-    if (!alertsContainer) return;
-
-    alertsContainer.innerHTML = alerts.map(alert => `
-        <div class="alert alert-${getAlertClass(alert.severity)}">
-            <strong>${alert.type}:</strong> ${alert.message}
-        </div>
-    `).join('');
-}
-
-function getMetricColor(metric) {
-    const colors = {
-        CacheHitRate: 'rgb(75, 192, 192)',
-        MemoryUsage: 'rgb(255, 99, 132)',
-        AverageResponseTime: 'rgb(255, 159, 64)'
-    };
-    return colors[metric] || 'rgb(201, 203, 207)';
-}
-
-function getAlertClass(severity) {
-    switch (severity.toLowerCase()) {
-        case 'critical': return 'danger';
-        case 'warning': return 'warning';
-        case 'info': return 'info';
-        default: return 'secondary';
-    }
-}
-
-function formatMetricName(metric) {
-    return metric.replace(/([A-Z])/g, ' $1').trim();
-}
-
-function formatTimeSpan(timeSpan) {
-    const minutes = Math.floor(timeSpan / 60000);
-    const hours = Math.floor(minutes / 60);
-    if (hours > 0) {
-        return `${hours}h ${minutes % 60}m`;
-    }
-    return `${minutes}m`;
-}
-
-function startRealTimeUpdates() {
-    if (updateInterval) {
-        clearInterval(updateInterval);
-    }
-    updateInterval = setInterval(() => {
-        fetchMetrics();
-        fetchAlerts();
-        fetchPredictions();
-        fetchMitigationStatus();
-    }, 5000);
-}
-
-async function initializeThresholdConfig() {
-    try {
-        const response = await fetch('/api/cache/mitigation/thresholds');
-        const thresholds = await response.json();
-        
-        // Set initial values in the form
-        Object.entries(thresholds).forEach(([metric, config]) => {
-            document.querySelector(`input[name="${metric}.warning"]`).value = config.warningThreshold;
-            document.querySelector(`input[name="${metric}.critical"]`).value = config.criticalThreshold;
-            document.querySelector(`input[name="${metric}.confidence"]`).value = config.minConfidence;
-        });
     } catch (error) {
-        console.error('Error loading threshold configuration:', error);
+        console.error('Error updating cache health:', error);
     }
-}
+};
 
-async function saveThresholds() {
-    const form = document.getElementById('thresholdConfigForm');
-    const thresholds = {};
-    
-    ['CacheHitRate', 'MemoryUsage', 'AverageResponseTime'].forEach(metric => {
-        thresholds[metric] = {
-            warningThreshold: parseFloat(form.querySelector(`input[name="${metric}.warning"]`).value),
-            criticalThreshold: parseFloat(form.querySelector(`input[name="${metric}.critical"]`).value),
-            minConfidence: parseFloat(form.querySelector(`input[name="${metric}.confidence"]`).value)
-        };
-    });
-
+const updateOptimizationMetrics = async () => {
     try {
-        await fetch('/api/cache/mitigation/thresholds', {
+        const response = await fetch('/api/cache/optimization/metrics');
+        const metrics = await response.json();
+        
+        // Update optimization metrics section
+        const metricsDiv = document.getElementById('optimization-metrics');
+        
+        const activeOptimizations = metrics.activeOptimizations.map(opt => `
+            <div class="optimization-action">
+                <strong>${opt.actionType}</strong>
+                <span>Started: ${new Date(opt.timestamp).toLocaleString()}</span>
+            </div>
+        `).join('');
+
+        const successRates = Object.entries(metrics.successRateByStrategy).map(([strategy, rate]) => `
+            <div class="strategy-success">
+                <strong>${strategy}:</strong> ${(rate * 100).toFixed(1)}% success rate
+            </div>
+        `).join('');
+
+        const recentActions = metrics.recentActions.slice(0, 5).map(action => `
+            <div class="recent-action ${action.wasSuccessful ? 'success' : 'failure'}">
+                <strong>${action.actionType}</strong>
+                <span>${new Date(action.timestamp).toLocaleString()}</span>
+                ${action.rollbackReason ? `<span class="rollback">Rollback: ${action.rollbackReason}</span>` : ''}
+            </div>
+        `).join('');
+
+        metricsDiv.innerHTML = `
+            <h3>Optimization Status</h3>
+            <div class="emergency-override ${metrics.emergencyOverrideActive ? 'active' : ''}">
+                Emergency Override: ${metrics.emergencyOverrideActive ? 'Active' : 'Inactive'}
+                <button onclick="toggleEmergencyOverride(${!metrics.emergencyOverrideActive})">
+                    ${metrics.emergencyOverrideActive ? 'Deactivate' : 'Activate'} Override
+                </button>
+            </div>
+            <div class="active-optimizations">
+                <h4>Active Optimizations</h4>
+                ${activeOptimizations || '<p>No active optimizations</p>'}
+            </div>
+            <div class="success-rates">
+                <h4>Strategy Success Rates</h4>
+                ${successRates || '<p>No optimization history</p>'}
+            </div>
+            <div class="recent-actions">
+                <h4>Recent Actions</h4>
+                ${recentActions || '<p>No recent actions</p>'}
+            </div>
+        `;
+    } catch (error) {
+        console.error('Error updating optimization metrics:', error);
+    }
+};
+
+const toggleEmergencyOverride = async (enabled) => {
+    try {
+        await fetch('/api/cache/optimization/emergency-override', {
             method: 'POST',
             headers: {
-                'Content-Type': 'application/json'
+                'Content-Type': 'application/json',
             },
-            body: JSON.stringify(thresholds)
+            body: JSON.stringify(enabled)
         });
-
-        // Close modal
-        const modal = bootstrap.Modal.getInstance(document.getElementById('thresholdConfigModal'));
-        modal.hide();
-
-        // Refresh dashboard
-        fetchMetrics();
-        fetchPredictions();
+        await updateOptimizationMetrics();
     } catch (error) {
-        console.error('Error saving thresholds:', error);
-        alert('Failed to save thresholds');
+        console.error('Error toggling emergency override:', error);
     }
-}
-
-// Initialize threshold configuration when modal is shown
-document.getElementById('thresholdConfigModal').addEventListener('show.bs.modal', initializeThresholdConfig);
-
-// Save thresholds when save button is clicked
-document.getElementById('saveThresholds').addEventListener('click', saveThresholds);
-
-window.addEventListener('load', initializeDashboard);
+};

@@ -373,6 +373,16 @@ file class Program
                    .WithName("GetCacheReport")
                    .WithOpenApi();
 
+                app.MapGet("/api/cache/optimization/metrics", async (IAutomaticCacheOptimizer optimizer) =>
+                    await optimizer.GetOptimizationMetricsAsync())
+                   .WithName("GetOptimizationMetrics")
+                   .WithOpenApi();
+
+                app.MapPost("/api/cache/optimization/emergency-override", async (bool enabled, IAutomaticCacheOptimizer optimizer) =>
+                    await optimizer.SetEmergencyOverrideAsync(enabled))
+                   .WithName("SetEmergencyOverride")
+                   .WithOpenApi();
+
                 // Start web server
                 _ = app.RunAsync(); // Run in background
 
