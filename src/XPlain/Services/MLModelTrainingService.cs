@@ -68,13 +68,76 @@ namespace XPlain.Services
             _logger = logger;
         }
 
+        public async Task AddTrainingDataPoint(CacheTrainingData data)
+        {
+            _trainingData.Add(data);
+            await CheckAndTriggerRetraining();
+        }
+
+        private readonly List<CacheTrainingData> _trainingData = new();
+        private readonly int _retrainingThreshold = 1000; // Retrain after collecting 1000 new data points
+        private readonly double _dataDriftThreshold = 0.1; // 10% drift threshold
+
+        private async Task CheckAndTriggerRetraining()
+        {
+            if (_trainingData.Count >= _retrainingThreshold || await DetectDataDrift())
+            {
+                await TriggerRetraining();
+            }
+        }
+
+        private async Task<bool> DetectDataDrift()
+        {
+            if (_activeVersion == null || _trainingData.Count < 100)
+                return false;
+
+            var currentDistribution = CalculateDistribution(_trainingData.TakeLast(100));
+            var baselineDistribution = _activeVersion.Metadata.DatasetCharacteristics;
+
+            return CalculateDistributionDrift(currentDistribution, baselineDistribution) > _dataDriftThreshold;
+        }
+
+        private Dictionary<string, double> CalculateDistribution(IEnumerable<CacheTrainingData> data)
+        {
+            return new Dictionary<string, double>
+            {
+                ["avgAccessFrequency"] = data.Average(d => d.AccessFrequency),
+                ["avgResourceUsage"] = data.Average(d => d.ResourceUsage),
+                ["avgHitRate"] = data.Average(d => d.CacheHitRate),
+                ["avgResponseTime"] = data.Average(d => d.ResponseTime)
+            };
+        }
+
+        private double CalculateDistributionDrift(Dictionary<string, double> current, Dictionary<string, string> baseline)
+        {
+            double totalDrift = 0;
+            int metrics = 0;
+
+            foreach (var kvp in current)
+            {
+                if (baseline.TryGetValue(kvp.Key, out var baselineValue) && 
+                    double.TryParse(baselineValue, out var baselineDouble))
+                {
+                    totalDrift += Math.Abs((kvp.Value - baselineDouble) / baselineDouble);
+                    metrics++;
+                }
+            }
+
+            return metrics > 0 ? totalDrift / metrics : 0;
+        }
+
         public async Task<ModelVersion> TrainModelAsync(List<CacheTrainingData> trainingData, ModelTrainingParameters parameters)
         {
             try
             {
-                var dataView = _mlContext.Data.LoadFromEnumerable(trainingData);
+                _logger.LogInformation("Starting model training with {Count} data points", trainingData.Count);
 
-                // Create data processing pipeline
+                // Split data into training and validation sets
+                var dataSplit = _mlContext.Data.TrainTestSplit(
+                    _mlContext.Data.LoadFromEnumerable(trainingData),
+                    testFraction: 0.2);
+
+                // Create feature engineering pipeline
                 var pipeline = _mlContext.Transforms
                     .Concatenate("Features",
                         "AccessFrequency",
@@ -123,17 +186,46 @@ namespace XPlain.Services
                         featureColumnName: "Features")
                 );
 
-                // Train the model
-                _trainedModel = trainingPipeline.Fit(dataView);
+                // Train the model on training data
+                _trainedModel = trainingPipeline.Fit(dataSplit.TrainSet);
 
-                // Evaluate the model
-                var predictions = _trainedModel.Transform(dataView);
+                // Evaluate the model on validation data
+                var predictions = _trainedModel.Transform(dataSplit.TestSet);
                 var metrics = _mlContext.Regression.Evaluate(predictions);
 
+                // Perform cross-validation
+                var cvResults = _mlContext.Regression.CrossValidate(
+                    dataSplit.TrainSet, 
+                    trainingPipeline, 
+                    numberOfFolds: 5);
+
+                var avgRSquared = cvResults.Average(r => r.Metrics.RSquared);
+                var avgRMSE = cvResults.Average(r => r.Metrics.RootMeanSquaredError);
+
                 _logger.LogInformation(
-                    "Model trained successfully. R² score: {RSquared}, RMS error: {RootMeanSquaredError}",
+                    "Model trained successfully. Validation metrics - R²: {RSquared}, RMSE: {RMSE}. " +
+                    "Cross-validation metrics - Avg R²: {AvgRSquared}, Avg RMSE: {AvgRMSE}",
                     metrics.RSquared,
-                    metrics.RootMeanSquaredError);
+                    metrics.RootMeanSquaredError,
+                    avgRSquared,
+                    avgRMSE);
+
+                // Perform feature importance analysis
+                var permutationMetrics = _mlContext.Regression
+                    .PermutationFeatureImportance(_trainedModel, predictions);
+
+                var featureImportance = new Dictionary<string, double>();
+                var featureColumns = predictions.Schema
+                    .Where(col => col.Name.EndsWith("Features"))
+                    .Select(col => col.Name)
+                    .ToList();
+
+                foreach (var feature in featureColumns)
+                {
+                    featureImportance[feature] = Math.Abs(permutationMetrics
+                        .Select(m => m.RSquared)
+                        .Average());
+                }
 
                 // Create model version and metadata
                 var modelVersion = new ModelVersion
@@ -309,7 +401,7 @@ namespace XPlain.Services
             return result;
         }
 
-        public async Task<ModelVersion?> ActivateModelVersion(string versionId)
+        public async Task<ModelVersion?> ActivateModelVersion(string versionId, bool performSafetyChecks = true)
         {
             var version = await GetModelVersion(versionId);
             if (version == null)
@@ -317,16 +409,138 @@ namespace XPlain.Services
                 throw new InvalidOperationException($"Model version {versionId} not found");
             }
 
-            if (_activeVersion != null)
+            if (performSafetyChecks)
             {
-                _activeVersion.IsActive = false;
+                var safetyChecksPassed = await PerformModelSafetyChecks(version);
+                if (!safetyChecksPassed)
+                {
+                    throw new InvalidOperationException("Model safety checks failed - activation aborted");
+                }
             }
 
-            version.IsActive = true;
-            _activeVersion = version;
-            _trainedModel = await LoadModelAsync(version.FilePath);
+            try
+            {
+                // Load the model first to ensure it's valid
+                var newModel = await LoadModelAsync(version.FilePath);
 
-            return version;
+                // Perform A/B testing if previous version exists
+                if (_activeVersion != null)
+                {
+                    var comparisonResult = await CompareModelVersions(_activeVersion.Id, version.Id);
+                    if (!comparisonResult.IsCandidateBetter)
+                    {
+                        _logger.LogWarning("New model version does not show significant improvement");
+                        if (!performSafetyChecks) // Only throw if not in force mode
+                        {
+                            throw new InvalidOperationException("New model does not show significant improvement");
+                        }
+                    }
+
+                    _activeVersion.IsActive = false;
+                }
+
+                version.IsActive = true;
+                _activeVersion = version;
+                _trainedModel = newModel;
+
+                _logger.LogInformation("Successfully activated model version {VersionId}", versionId);
+                return version;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error activating model version {VersionId}", versionId);
+                throw;
+            }
+        }
+
+        private async Task<bool> PerformModelSafetyChecks(ModelVersion version)
+        {
+            try
+            {
+                // Check 1: Validate model file integrity
+                if (!File.Exists(version.FilePath))
+                {
+                    _logger.LogError("Model file not found: {FilePath}", version.FilePath);
+                    return false;
+                }
+
+                // Check 2: Validate performance metrics
+                var metrics = version.Metadata.ValidationMetrics;
+                if (metrics["RSquared"] < 0.5 || metrics["RootMeanSquaredError"] > 0.3)
+                {
+                    _logger.LogError("Model metrics below acceptable thresholds");
+                    return false;
+                }
+
+                // Check 3: Validate prediction stability
+                if (!await ValidatePredictionStability(version))
+                {
+                    _logger.LogError("Model predictions show instability");
+                    return false;
+                }
+
+                return true;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error performing model safety checks");
+                return false;
+            }
+        }
+
+        private async Task<bool> ValidatePredictionStability(ModelVersion version)
+        {
+            try
+            {
+                var model = await LoadModelAsync(version.FilePath);
+                var testData = GenerateStabilityTestData();
+                var predictionEngine = _mlContext.Model.CreatePredictionEngine<CacheTrainingData, CachePrediction>(model);
+
+                var predictions = testData.Select(d => predictionEngine.Predict(d).PredictedValue).ToList();
+                
+                // Check for extreme predictions
+                if (predictions.Any(p => p < 0 || p > 1000))
+                    return false;
+
+                // Check for prediction variance
+                var variance = CalculateVariance(predictions);
+                return variance < 100; // Threshold for acceptable variance
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error validating prediction stability");
+                return false;
+            }
+        }
+
+        private List<CacheTrainingData> GenerateStabilityTestData()
+        {
+            var testData = new List<CacheTrainingData>();
+            var random = new Random(42); // Fixed seed for reproducibility
+
+            for (int i = 0; i < 100; i++)
+            {
+                testData.Add(new CacheTrainingData
+                {
+                    Key = $"test_key_{i}",
+                    AccessFrequency = (float)random.NextDouble(),
+                    TimeOfDay = random.Next(0, 24),
+                    DayOfWeek = random.Next(0, 7),
+                    UserActivityLevel = (float)random.NextDouble(),
+                    ResponseTime = (float)(random.NextDouble() * 1000),
+                    CacheHitRate = (float)random.NextDouble(),
+                    ResourceUsage = (float)random.NextDouble(),
+                    PerformanceGain = (float)random.NextDouble()
+                });
+            }
+
+            return testData;
+        }
+
+        private double CalculateVariance(List<float> values)
+        {
+            var mean = values.Average();
+            return values.Sum(v => Math.Pow(v - mean, 2)) / values.Count;
         }
 
         public async Task CleanupOldModels(int keepVersions = 5)
@@ -339,11 +553,63 @@ namespace XPlain.Services
 
             foreach (var version in versionsToDelete)
             {
-                if (File.Exists(version.FilePath))
+                try
                 {
-                    File.Delete(version.FilePath);
+                    if (File.Exists(version.FilePath))
+                    {
+                        File.Delete(version.FilePath);
+                        _logger.LogInformation("Deleted old model file: {FilePath}", version.FilePath);
+                    }
+                    _modelVersions.Remove(version);
                 }
-                _modelVersions.Remove(version);
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "Error deleting old model: {VersionId}", version.Id);
+                }
+            }
+        }
+
+        public async Task<ModelHealthReport> GenerateModelHealthReport()
+        {
+            if (_activeVersion == null)
+            {
+                return new ModelHealthReport
+                {
+                    Status = "No active model",
+                    IsHealthy = false
+                };
+            }
+
+            try
+            {
+                var recentPredictions = await GetRecentPredictionMetrics();
+                var dataDrift = await DetectDataDrift();
+                var modelAge = DateTime.UtcNow - _activeVersion.CreatedAt;
+
+                return new ModelHealthReport
+                {
+                    ModelId = _activeVersion.Id,
+                    Status = "Active",
+                    IsHealthy = recentPredictions.Accuracy > 0.8 && !dataDrift,
+                    Metrics = new Dictionary<string, double>
+                    {
+                        ["prediction_accuracy"] = recentPredictions.Accuracy,
+                        ["prediction_latency_ms"] = recentPredictions.AverageLatency,
+                        ["data_drift_score"] = await CalculateDataDriftScore(),
+                        ["model_age_days"] = modelAge.TotalDays
+                    },
+                    LastUpdated = DateTime.UtcNow
+                };
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error generating model health report");
+                return new ModelHealthReport
+                {
+                    Status = "Error",
+                    IsHealthy = false,
+                    ErrorMessage = ex.Message
+                };
             }
         }
     }

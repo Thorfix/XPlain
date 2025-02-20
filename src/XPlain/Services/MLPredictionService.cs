@@ -29,28 +29,27 @@ namespace XPlain.Services
         {
             try
             {
-                // This would normally use a trained ML model
-                // For now, return a simple heuristic score
-                var parts = key.Split(':');
-                var baseScore = 1.0;
-
-                if (parts.Length > 1)
+                if (_model == null)
                 {
-                    // Give higher scores to more specific queries
-                    baseScore *= parts.Length;
+                    // Fallback to heuristic if model not loaded
+                    return await PredictUsingHeuristics(key);
                 }
 
-                // Add time-based weighting
-                var hourOfDay = DateTime.UtcNow.Hour;
-                var timeWeight = 1.0;
-
-                // Assume business hours (8-18) are more important
-                if (hourOfDay >= 8 && hourOfDay <= 18)
+                var data = new QueryPredictionData
                 {
-                    timeWeight = 1.5;
-                }
+                    QueryKey = key,
+                    HourOfDay = DateTime.UtcNow.Hour,
+                    DayOfWeek = (float)DateTime.UtcNow.DayOfWeek,
+                    Frequency = await GetQueryFrequency(key),
+                    ResponseTime = await GetAverageResponseTime(key),
+                    CacheHitRate = await GetCacheHitRate(key)
+                };
 
-                return baseScore * timeWeight;
+                var predictionEngine = _mlContext.Model.CreatePredictionEngine<QueryPredictionData, QueryPrediction>(_model);
+                var prediction = predictionEngine.Predict(data);
+
+                _logger.LogDebug("ML prediction for key {Key}: {Value}", key, prediction.PredictedValue);
+                return prediction.PredictedValue;
             }
             catch (Exception ex)
             {
@@ -196,6 +195,107 @@ namespace XPlain.Services
         {
             [ColumnName("PredictedValue")]
             public float PredictedValue { get; set; }
+        }
+
+        private async Task<double> PredictUsingHeuristics(string key)
+        {
+            var parts = key.Split(':');
+            var baseScore = 1.0;
+
+            if (parts.Length > 1)
+            {
+                baseScore *= parts.Length;
+            }
+
+            var hourOfDay = DateTime.UtcNow.Hour;
+            var timeWeight = (hourOfDay >= 8 && hourOfDay <= 18) ? 1.5 : 1.0;
+
+            return baseScore * timeWeight;
+        }
+
+        private async Task<float> GetQueryFrequency(string key)
+        {
+            try
+            {
+                // TODO: Implement query frequency tracking
+                return 1.0f;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error getting query frequency for key: {Key}", key);
+                return 0.0f;
+            }
+        }
+
+        private async Task<float> GetAverageResponseTime(string key)
+        {
+            try
+            {
+                // TODO: Implement response time tracking
+                return 100.0f; // Default 100ms
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error getting average response time for key: {Key}", key);
+                return 0.0f;
+            }
+        }
+
+        private async Task<float> GetCacheHitRate(string key)
+        {
+            try
+            {
+                // TODO: Implement cache hit rate tracking
+                return 0.5f; // Default 50% hit rate
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error getting cache hit rate for key: {Key}", key);
+                return 0.0f;
+            }
+        }
+
+        public async Task CollectTrainingData(
+            string key, 
+            bool wasHit, 
+            double responseTime, 
+            double resourceUsage)
+        {
+            try
+            {
+                var data = new CacheTrainingData
+                {
+                    Key = key,
+                    AccessFrequency = await GetQueryFrequency(key),
+                    TimeOfDay = DateTime.UtcNow.Hour,
+                    DayOfWeek = (float)DateTime.UtcNow.DayOfWeek,
+                    UserActivityLevel = await CalculateUserActivityLevel(),
+                    ResponseTime = (float)responseTime,
+                    CacheHitRate = await GetCacheHitRate(key),
+                    ResourceUsage = (float)resourceUsage,
+                    PerformanceGain = wasHit ? (float)(1000.0 / responseTime) : 0f
+                };
+
+                await _trainingService.AddTrainingDataPoint(data);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error collecting training data for key: {Key}", key);
+            }
+        }
+
+        private async Task<float> CalculateUserActivityLevel()
+        {
+            try
+            {
+                // TODO: Implement user activity level calculation
+                return 0.5f; // Default medium activity
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error calculating user activity level");
+                return 0.0f;
+            }
         }
     }
 }
