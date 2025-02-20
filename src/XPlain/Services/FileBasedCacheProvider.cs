@@ -24,6 +24,7 @@ namespace XPlain.Services
         private readonly object _statsLock = new();
         private readonly ConcurrentDictionary<string, string> _keyToFileMap = new();
         private readonly ILLMProvider _llmProvider;
+        private readonly ICacheEvictionPolicy _evictionPolicy;
         private readonly ConcurrentDictionary<string, int> _queryTypeStats = new();
         private readonly ConcurrentDictionary<string, (int Count, double TotalTimeCached, double TotalTimeNonCached)> _queryResponseStats = new();
         private readonly ConcurrentDictionary<string, int> _queryFrequency = new();
@@ -46,6 +47,7 @@ namespace XPlain.Services
             ICacheMonitoringService monitoringService)
         {
             _settings = settings.Value;
+            _evictionPolicy = CreateEvictionPolicy(_settings.EvictionPolicy);
             _llmProvider = llmProvider;
             _monitoringService = monitoringService;
             _cacheDirectory = _settings.CacheDirectory ?? Path.Combine(AppContext.BaseDirectory, "cache");
@@ -1069,36 +1071,48 @@ namespace XPlain.Services
 
                     if (totalSize > cleanupThreshold)
                     {
-                        // Get all cache items sorted by last access time
-                        var items = _cacheItemStats
-                            .OrderBy(x => x.Value.LastAccess)
-                            .ToList();
-
-                        var targetSize = sizeLimit * 0.7; // Aim to reduce to 70% of limit
-                        var currentSize = totalSize;
-
-                        foreach (var item in items)
-                        {
-                            // Keep recent items regardless of size
-                            if (item.Value.LastAccess > DateTime.UtcNow.AddHours(-_settings.KeepRecentItemsHours))
+                        // Convert cache stats to format expected by eviction policy
+                        var items = _cacheItemStats.ToDictionary(
+                            kvp => kvp.Key,
+                            kvp => new CacheItemStats
                             {
-                                continue;
-                            }
+                                Size = kvp.Value.Size,
+                                LastAccess = kvp.Value.LastAccess,
+                                CreationTime = File.GetCreationTimeUtc(GetFilePath(kvp.Key)),
+                                AccessCount = _queryFrequency.GetValueOrDefault(kvp.Key, 0)
+                            });
 
-                            // Remove item
-                            var filePath = GetFilePath(item.Key);
+                        // Update policy with current stats
+                        _evictionPolicy.UpdatePolicy(new CacheAccessStats
+                        {
+                            TotalHits = _cacheHits,
+                            TotalMisses = _cacheMisses,
+                            QueryTypeFrequency = new Dictionary<string, int>(_queryTypeStats),
+                            AverageResponseTimes = new Dictionary<string, double>(
+                                _queryResponseStats.ToDictionary(
+                                    kvp => kvp.Key,
+                                    kvp => (kvp.Value.TotalTimeCached + kvp.Value.TotalTimeNonCached) / kvp.Value.Count
+                                ))
+                        });
+
+                        // Get items to evict
+                        var targetSize = sizeLimit * 0.7; // Aim to reduce to 70% of limit
+                        var itemsToEvict = _evictionPolicy.SelectItemsForEviction(items, targetSize);
+
+                        // Remove selected items
+                        foreach (var key in itemsToEvict)
+                        {
+                            var filePath = GetFilePath(key);
                             if (File.Exists(filePath))
                             {
                                 File.Delete(filePath);
-                                currentSize -= item.Value.Size;
-                                _cacheItemStats.TryRemove(item.Key, out _);
-                            }
-
-                            if (currentSize <= targetSize)
-                            {
-                                break;
+                                _cacheItemStats.TryRemove(key, out _);
                             }
                         }
+
+                        // Log policy metrics
+                        var policyMetrics = _evictionPolicy.GetPolicyMetrics();
+                        LogPolicyMetrics(policyMetrics);
                     }
 
                     // Enforce per-query-type quotas
@@ -1245,6 +1259,19 @@ namespace XPlain.Services
             }
         }
 
+        private ICacheEvictionPolicy CreateEvictionPolicy(EvictionPolicyType policyType)
+        {
+            return policyType switch
+            {
+                EvictionPolicyType.LRU => new LRUEvictionPolicy(),
+                EvictionPolicyType.LFU => new LFUEvictionPolicy(),
+                EvictionPolicyType.FIFO => new FIFOEvictionPolicy(),
+                EvictionPolicyType.SizeWeighted => new SizeWeightedEvictionPolicy(),
+                EvictionPolicyType.Hybrid => new HybridEvictionPolicy(),
+                _ => new LRUEvictionPolicy() // Default to LRU
+            };
+        }
+
         private void LogMaintenanceResults(long originalSize, long newSize)
         {
             var stats = new
@@ -1254,7 +1281,9 @@ namespace XPlain.Services
                 NewSize = newSize,
                 SpaceFreed = originalSize - newSize,
                 RemainingItems = _cacheItemStats.Count,
-                QueryTypeStats = _queryTypeStats
+                QueryTypeStats = _queryTypeStats,
+                EvictionPolicy = _settings.EvictionPolicy.ToString(),
+                PolicyMetrics = _evictionPolicy.GetPolicyMetrics()
             };
 
             var logFile = Path.Combine(_analyticsDirectory, 
@@ -1262,6 +1291,20 @@ namespace XPlain.Services
             
             File.WriteAllText(logFile, 
                 JsonSerializer.Serialize(stats, new JsonSerializerOptions { WriteIndented = true }));
+        }
+
+        private void LogPolicyMetrics(Dictionary<string, double> metrics)
+        {
+            var logFile = Path.Combine(_analyticsDirectory, 
+                $"policy_metrics_{DateTime.UtcNow:yyyyMMdd_HHmmss}.json");
+            
+            File.WriteAllText(logFile, 
+                JsonSerializer.Serialize(new
+                {
+                    Timestamp = DateTime.UtcNow,
+                    PolicyType = _settings.EvictionPolicy.ToString(),
+                    Metrics = metrics
+                }, new JsonSerializerOptions { WriteIndented = true }));
         }
     }
 }

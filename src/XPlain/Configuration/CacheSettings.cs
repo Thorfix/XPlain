@@ -1,8 +1,19 @@
 namespace XPlain.Configuration
 {
+    public enum EvictionPolicyType
+    {
+        LRU,
+        LFU,
+        FIFO,
+        SizeWeighted,
+        Hybrid
+    }
+
     public class CacheSettings
     {
         public bool CacheEnabled { get; set; } = true;
+        public EvictionPolicyType EvictionPolicy { get; set; } = EvictionPolicyType.LRU;
+        public Dictionary<string, object> EvictionPolicyParameters { get; set; } = new();
         public string? CacheDirectory { get; set; }
         public int CacheExpirationHours { get; set; } = 24;
         public string CodebasePath { get; set; } = string.Empty;
