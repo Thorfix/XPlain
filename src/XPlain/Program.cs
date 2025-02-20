@@ -837,6 +837,12 @@ file class Program
             // Create service collection
             IServiceCollection services = new ServiceCollection();
 
+            // Configure rate limiting settings
+            var rateLimitSettings = new RateLimitSettings();
+            configuration.GetSection("RateLimit").Bind(rateLimitSettings);
+            services.AddSingleton(Options.Create(rateLimitSettings));
+            services.AddSingleton<IRateLimitingService, RateLimitingService>();
+
             // Configure cache settings
             var cacheSettings = new CacheSettings();
             configuration.GetSection("Cache").Bind(cacheSettings);
