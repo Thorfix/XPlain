@@ -3,6 +3,90 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>XPlain Monitoring Dashboard</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link href="css/styles.css" rel="stylesheet">
+</head>
+<body>
+    <nav class="navbar navbar-dark bg-dark">
+        <div class="container-fluid">
+            <a class="navbar-brand" href="#">XPlain Monitoring Dashboard</a>
+        </div>
+    </nav>
+
+    <div class="container-fluid mt-4">
+        <div class="row">
+            <!-- Model Performance Metrics -->
+            <div class="col-md-6">
+                <div class="card">
+                    <div class="card-header">
+                        <h5 class="card-title">Model Performance</h5>
+                    </div>
+                    <div class="card-body">
+                        <div class="metrics-grid">
+                            <div class="metric-box">
+                                <h6>Accuracy</h6>
+                                <span id="accuracyMetric">--</span>
+                            </div>
+                            <div class="metric-box">
+                                <h6>F1 Score</h6>
+                                <span id="f1ScoreMetric">--</span>
+                            </div>
+                            <div class="metric-box">
+                                <h6>Latency</h6>
+                                <span id="latencyMetric">--</span>
+                            </div>
+                        </div>
+                        <canvas id="modelPerformanceChart"></canvas>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Historical Performance -->
+            <div class="col-md-6">
+                <div class="card">
+                    <div class="card-header">
+                        <h5 class="card-title">Historical Performance</h5>
+                    </div>
+                    <div class="card-body">
+                        <canvas id="modelHistoryChart"></canvas>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="row mt-4">
+            <!-- Alerts Section -->
+            <div class="col-12">
+                <div class="card">
+                    <div class="card-header">
+                        <h5 class="card-title">Model Alerts</h5>
+                    </div>
+                    <div class="card-body">
+                        <div id="alertsContainer"></div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="row mt-4">
+            <!-- Last Update -->
+            <div class="col-12 text-end">
+                <small class="text-muted">Last Updated: <span id="lastUpdate">--</span></small>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="/js/signalr/dist/browser/signalr.js"></script>
+    <script src="/js/dashboard.js"></script>
+</body>
+</html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>XPlain Dashboard</title>
     <link rel="stylesheet" href="css/styles.css">
     <script src="js/chart.js"></script>

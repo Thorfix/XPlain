@@ -1031,6 +1031,10 @@ file class Program
             services.AddSingleton(Options.Create(cacheSettings));
             services.AddSingleton<ICacheMonitoringService, CacheMonitoringService>();
             services.AddSingleton<ICacheProvider, FileBasedCacheProvider>();
+            
+            // Configure ML model monitoring
+            services.AddSingleton<IModelPerformanceMonitor, ModelPerformanceMonitor>();
+            services.AddSingleton<IAutomaticMitigationService, AutomaticMitigationService>();
 
             // Configure ML model settings
             services.AddSingleton<IMLModelTrainingService, MLModelTrainingService>();
