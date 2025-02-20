@@ -39,15 +39,62 @@ namespace XPlain.Services
         private readonly byte[] _encryptionKey;
         private readonly object _encryptionLock = new object();
         private readonly object _maintenanceLock = new object();
-        private readonly ConcurrentDictionary<string, (long Size, DateTime LastAccess)> _cacheItemStats = new();
+        private readonly ConcurrentDictionary<string, DetailedCacheItemStats> _cacheItemStats = new();
+        private DateTime _lastPolicySwitch = DateTime.MinValue;
+        private readonly object _policySwitchLock = new object();
+
+        private class DetailedCacheItemStats
+        {
+            public long Size { get; set; }
+            public DateTime LastAccess { get; set; }
+            public DateTime CreationTime { get; set; }
+            public int AccessCount { get; set; }
+            public double AverageResponseTime { get; set; }
+            public int CacheHits { get; set; }
+            public int CacheMisses { get; set; }
+            public string QueryType { get; set; } = string.Empty;
+            public double MemoryUsage { get; set; }
+            public ConcurrentQueue<DateTime> AccessHistory { get; } = new();
+            private const int MaxAccessHistorySize = 100;
+
+            public void RecordAccess(DateTime accessTime, double responseTime, bool wasHit)
+            {
+                LastAccess = accessTime;
+                AccessCount++;
+                AccessHistory.Enqueue(accessTime);
+                while (AccessHistory.Count > MaxAccessHistorySize)
+                {
+                    AccessHistory.TryDequeue(out _);
+                }
+
+                if (wasHit)
+                {
+                    CacheHits++;
+                }
+                else
+                {
+                    CacheMisses++;
+                }
+
+                // Update rolling average response time
+                AverageResponseTime = ((AverageResponseTime * (AccessCount - 1)) + responseTime) / AccessCount;
+            }
+
+            public double GetAccessFrequency(TimeSpan window)
+            {
+                var cutoff = DateTime.UtcNow - window;
+                return AccessHistory.Count(t => t >= cutoff) / window.TotalHours;
+            }
+        }
 
         public FileBasedCacheProvider(
             IOptions<CacheSettings> settings,
             ILLMProvider llmProvider,
-            ICacheMonitoringService monitoringService)
+            ICacheMonitoringService monitoringService,
+            ICacheEvictionPolicy? evictionPolicy = null)
         {
             _settings = settings.Value;
-            _evictionPolicy = CreateEvictionPolicy(_settings.EvictionPolicy);
+            _evictionPolicy = evictionPolicy ?? CreateEvictionPolicy(_settings.EvictionPolicy);
             _llmProvider = llmProvider;
             _monitoringService = monitoringService;
             _cacheDirectory = _settings.CacheDirectory ?? Path.Combine(AppContext.BaseDirectory, "cache");
@@ -127,12 +174,34 @@ namespace XPlain.Services
                 return null;
             }
 
-            // Update last access time
+            var startTime = DateTime.UtcNow;
+            var fileInfo = new FileInfo(filePath);
+            var cacheKey = Path.GetFileNameWithoutExtension(filePath);
+            var queryType = GetQueryTypeFromKey(key);
+
+            // Update detailed statistics
             _cacheItemStats.AddOrUpdate(
-                Path.GetFileNameWithoutExtension(filePath),
-                (new FileInfo(filePath).Length, DateTime.UtcNow),
-                (_, stats) => (stats.Size, DateTime.UtcNow)
+                cacheKey,
+                _ => new DetailedCacheItemStats
+                {
+                    Size = fileInfo.Length,
+                    CreationTime = fileInfo.CreationTimeUtc,
+                    LastAccess = DateTime.UtcNow,
+                    QueryType = queryType,
+                    MemoryUsage = fileInfo.Length / (1024.0 * 1024.0)
+                },
+                (_, stats) =>
+                {
+                    stats.RecordAccess(DateTime.UtcNow, (DateTime.UtcNow - startTime).TotalMilliseconds, true);
+                    stats.Size = fileInfo.Length;
+                    stats.MemoryUsage = fileInfo.Length / (1024.0 * 1024.0);
+                    stats.QueryType = queryType;
+                    return stats;
+                }
             );
+
+            // Check if we should switch eviction policy
+            await CheckAndSwitchPolicyAsync();
 
             try
             {
