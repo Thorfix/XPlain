@@ -816,6 +816,370 @@ namespace XPlain.Tests.Services
             Assert.Empty(remainingFiles);
         }
 
+        [Fact]
+        public async Task WAL_FileIntegrity_DuringConcurrentOperations()
+        {
+            // Arrange
+            var key = "wal_test_key";
+            var value = "wal_test_value";
+            var walDir = Path.Combine(_testDirectory, "wal");
+            var operations = 100;
+
+            // Act - Generate concurrent operations that will create WAL entries
+            var tasks = new List<Task>();
+            for (int i = 0; i < operations; i++)
+            {
+                tasks.Add(Task.Run(async () =>
+                {
+                    await _cacheProvider.SetAsync(key, $"{value}_{i}");
+                    // Immediately try to read to force potential race conditions
+                    await _cacheProvider.GetAsync<string>(key);
+                }));
+            }
+
+            // Monitor WAL directory during operations
+            var walFiles = new List<string>();
+            tasks.Add(Task.Run(async () =>
+            {
+                while (tasks.Any(t => !t.IsCompleted))
+                {
+                    var currentWalFiles = Directory.GetFiles(walDir);
+                    foreach (var file in currentWalFiles)
+                    {
+                        if (!walFiles.Contains(file))
+                        {
+                            // Verify WAL file integrity
+                            var content = await File.ReadAllTextAsync(file);
+                            Assert.Contains("Operation", content); // WAL entries should contain operation type
+                            Assert.Contains("Timestamp", content); // WAL entries should contain timestamp
+                            walFiles.Add(file);
+                        }
+                    }
+                    await Task.Delay(10);
+                }
+            }));
+
+            await Task.WhenAll(tasks);
+
+            // Assert
+            // Verify final state is consistent
+            var finalValue = await _cacheProvider.GetAsync<string>(key);
+            Assert.NotNull(finalValue);
+            Assert.StartsWith(value, finalValue);
+
+            // Verify WAL cleanup
+            Assert.Empty(Directory.GetFiles(walDir));
+        }
+
+        [Fact]
+        public async Task ErrorRecoveryChain_WALToBackupToClean()
+        {
+            // Arrange
+            var key = "recovery_chain_key";
+            var value = "recovery_chain_value";
+            var walDir = Path.Combine(_testDirectory, "wal");
+            var backupDir = Path.Combine(_testDirectory, "backups");
+
+            // Step 1: Initial state with data
+            await _cacheProvider.SetAsync(key, value);
+            Assert.Equal(value, await _cacheProvider.GetAsync<string>(key));
+
+            // Step 2: Corrupt main cache file but leave WAL intact
+            var cacheFile = Directory.GetFiles(_testDirectory, "*.json").First();
+            File.WriteAllText(cacheFile, "corrupted");
+
+            // Step 3: Attempt recovery from WAL
+            var newProvider1 = new FileBasedCacheProvider(
+                Options.Create(_defaultSettings),
+                _llmProviderMock.Object);
+            var walRecoveryValue = await newProvider1.GetAsync<string>(key);
+            Assert.Equal(value, walRecoveryValue);
+
+            // Step 4: Corrupt both cache and WAL, leaving backup
+            File.WriteAllText(cacheFile, "corrupted");
+            foreach (var walFile in Directory.GetFiles(walDir))
+            {
+                File.WriteAllText(walFile, "corrupted");
+            }
+
+            // Step 5: Attempt recovery from backup
+            var newProvider2 = new FileBasedCacheProvider(
+                Options.Create(_defaultSettings),
+                _llmProviderMock.Object);
+            var backupRecoveryValue = await newProvider2.GetAsync<string>(key);
+            Assert.Equal(value, backupRecoveryValue);
+
+            // Step 6: Corrupt everything
+            File.WriteAllText(cacheFile, "corrupted");
+            foreach (var walFile in Directory.GetFiles(walDir))
+            {
+                File.WriteAllText(walFile, "corrupted");
+            }
+            foreach (var backupFile in Directory.GetFiles(backupDir))
+            {
+                File.WriteAllText(backupFile, "corrupted");
+            }
+
+            // Step 7: Verify clean state initialization
+            var newProvider3 = new FileBasedCacheProvider(
+                Options.Create(_defaultSettings),
+                _llmProviderMock.Object);
+            var cleanStateValue = await newProvider3.GetAsync<string>(key);
+            Assert.Null(cleanStateValue);
+
+            // Verify directory structure is clean
+            Assert.Empty(Directory.GetFiles(_testDirectory, "*.json"));
+            Assert.Empty(Directory.GetFiles(walDir));
+            Assert.Empty(Directory.GetFiles(backupDir));
+        }
+
+        [Fact]
+        public async Task FileSystem_RaceConditions_DuringBackupRestore()
+        {
+            // Arrange
+            var key = "race_condition_key";
+            var value = "race_condition_value";
+            var operations = 100;
+            var backupDir = Path.Combine(_testDirectory, "backups");
+
+            // Act - Concurrent backup/restore operations
+            var tasks = new List<Task>();
+            
+            // Task 1: Continuously write and read data
+            tasks.Add(Task.Run(async () =>
+            {
+                for (int i = 0; i < operations; i++)
+                {
+                    await _cacheProvider.SetAsync(key, $"{value}_{i}");
+                    await _cacheProvider.GetAsync<string>(key);
+                    await Task.Delay(10);
+                }
+            }));
+
+            // Task 2: Trigger backup operations
+            tasks.Add(Task.Run(async () =>
+            {
+                for (int i = 0; i < operations/10; i++)
+                {
+                    await _cacheProvider.SetAsync($"backup_trigger_{i}", "trigger");
+                    await Task.Delay(50);
+                }
+            }));
+
+            // Task 3: Simulate backup restorations
+            tasks.Add(Task.Run(async () =>
+            {
+                while (!tasks[0].IsCompleted)
+                {
+                    var backups = Directory.GetFiles(backupDir);
+                    if (backups.Any())
+                    {
+                        var newProvider = new FileBasedCacheProvider(
+                            Options.Create(_defaultSettings),
+                            _llmProviderMock.Object);
+                        var restoredValue = await newProvider.GetAsync<string>(key);
+                        Assert.NotNull(restoredValue);
+                        Assert.StartsWith(value, restoredValue);
+                    }
+                    await Task.Delay(100);
+                }
+            }));
+
+            await Task.WhenAll(tasks);
+
+            // Assert
+            // Verify final state is consistent
+            var finalValue = await _cacheProvider.GetAsync<string>(key);
+            Assert.NotNull(finalValue);
+            Assert.StartsWith(value, finalValue);
+
+            // Verify no partial/corrupt files exist
+            Assert.Empty(Directory.GetFiles(_testDirectory, "*.tmp"));
+            Assert.Empty(Directory.GetFiles(_testDirectory, "*.corrupt"));
+        }
+
+        [Theory]
+        [InlineData("AES", 256)]
+        [InlineData("AES", 192)]
+        [InlineData("AES", 128)]
+        public async Task EncryptionAlgorithms_WorkWithDifferentKeyConfigrations(string algorithm, int keySize)
+        {
+            // Arrange
+            var testSettings = _defaultSettings with
+            {
+                EncryptionAlgorithm = algorithm,
+                EncryptionKeySize = keySize
+            };
+            
+            var testProvider = new FileBasedCacheProvider(
+                Options.Create(testSettings),
+                _llmProviderMock.Object);
+
+            var sensitiveData = "sensitive_information_" + Guid.NewGuid().ToString();
+            var key = "encryption_test_key";
+
+            // Act
+            await testProvider.SetAsync(key, sensitiveData);
+            
+            // Get raw file content
+            var filePath = Directory.GetFiles(_testDirectory, "*.json")
+                .First(f => f.Contains(
+                    Convert.ToBase64String(SHA256.HashData(Encoding.UTF8.GetBytes(key)))));
+            var rawContent = await File.ReadAllTextAsync(filePath);
+
+            // Assert
+            Assert.DoesNotContain(sensitiveData, rawContent); // Data is encrypted
+            var retrievedData = await testProvider.GetAsync<string>(key);
+            Assert.Equal(sensitiveData, retrievedData); // Can be decrypted
+        }
+
+        [Theory]
+        [InlineData(100, 10)]    // Light load
+        [InlineData(1000, 100)]  // Medium load
+        [InlineData(5000, 1000)] // Heavy load
+        public async Task CachePerformance_UnderDifferentLoadPatterns(int totalOperations, int concurrentOperations)
+        {
+            // Arrange
+            var stopwatch = new Stopwatch();
+            var operationsPerBatch = totalOperations / concurrentOperations;
+            var results = new ConcurrentDictionary<string, double>();
+
+            // Act
+            stopwatch.Start();
+
+            // Run batches of concurrent operations
+            for (int batch = 0; batch < concurrentOperations; batch++)
+            {
+                var tasks = new List<Task>();
+                for (int i = 0; i < operationsPerBatch; i++)
+                {
+                    var key = $"perf_key_{batch}_{i}";
+                    var value = $"perf_value_{batch}_{i}";
+                    
+                    tasks.Add(Task.Run(async () =>
+                    {
+                        var sw = Stopwatch.StartNew();
+                        await _cacheProvider.SetAsync(key, value);
+                        await _cacheProvider.GetAsync<string>(key);
+                        sw.Stop();
+                        results.TryAdd(key, sw.ElapsedMilliseconds);
+                    }));
+                }
+                await Task.WhenAll(tasks);
+            }
+
+            stopwatch.Stop();
+
+            // Assert
+            var totalTime = stopwatch.ElapsedMilliseconds;
+            var avgOperationTime = results.Values.Average();
+            var maxOperationTime = results.Values.Max();
+
+            // Performance thresholds (adjust based on environment)
+            Assert.True(avgOperationTime < 100, $"Average operation time ({avgOperationTime}ms) exceeded threshold");
+            Assert.True(maxOperationTime < 500, $"Maximum operation time ({maxOperationTime}ms) exceeded threshold");
+            Assert.True(totalTime < totalOperations * 50, $"Total execution time ({totalTime}ms) exceeded threshold");
+
+            // Verify cache state
+            var cacheStats = _cacheProvider.GetCacheStats();
+            Assert.Equal(totalOperations, cacheStats.Hits + cacheStats.Misses);
+        }
+
+        [Fact]
+        public async Task RecoveryMechanism_VerifiesDataConsistency()
+        {
+            // Arrange
+            var testData = new Dictionary<string, string>();
+            for (int i = 0; i < 100; i++)
+            {
+                testData.Add($"key_{i}", $"value_{i}");
+            }
+
+            // Act - Phase 1: Initial data population
+            foreach (var (key, value) in testData)
+            {
+                await _cacheProvider.SetAsync(key, value);
+            }
+
+            // Verify initial state
+            foreach (var (key, expectedValue) in testData)
+            {
+                var value = await _cacheProvider.GetAsync<string>(key);
+                Assert.Equal(expectedValue, value);
+            }
+
+            // Phase 2: Simulate partial corruption
+            var cacheFiles = Directory.GetFiles(_testDirectory, "*.json");
+            for (int i = 0; i < cacheFiles.Length; i += 2) // Corrupt every other file
+            {
+                File.WriteAllText(cacheFiles[i], "corrupted");
+            }
+
+            // Phase 3: Recovery attempt through WAL
+            var provider1 = new FileBasedCacheProvider(
+                Options.Create(_defaultSettings),
+                _llmProviderMock.Object);
+
+            // Verify WAL recovery
+            foreach (var (key, expectedValue) in testData)
+            {
+                var value = await provider1.GetAsync<string>(key);
+                if (value != null) // Some values should be recovered
+                {
+                    Assert.Equal(expectedValue, value);
+                }
+            }
+
+            // Phase 4: Simulate WAL corruption, forcing backup recovery
+            foreach (var file in Directory.GetFiles(Path.Combine(_testDirectory, "wal")))
+            {
+                File.WriteAllText(file, "corrupted");
+            }
+
+            // Phase 5: Recovery attempt through backup
+            var provider2 = new FileBasedCacheProvider(
+                Options.Create(_defaultSettings),
+                _llmProviderMock.Object);
+
+            // Verify backup recovery
+            var recoveredCount = 0;
+            foreach (var (key, expectedValue) in testData)
+            {
+                var value = await provider2.GetAsync<string>(key);
+                if (value != null)
+                {
+                    Assert.Equal(expectedValue, value);
+                    recoveredCount++;
+                }
+            }
+
+            // Assert some data was recovered
+            Assert.True(recoveredCount > 0, "No data was recovered from backup");
+
+            // Phase 6: Complete corruption, verify clean state
+            foreach (var file in Directory.GetFiles(_testDirectory, "*.*", SearchOption.AllDirectories))
+            {
+                try { File.WriteAllText(file, "corrupted"); } catch { }
+            }
+
+            var provider3 = new FileBasedCacheProvider(
+                Options.Create(_defaultSettings),
+                _llmProviderMock.Object);
+
+            // Verify clean state
+            foreach (var key in testData.Keys)
+            {
+                var value = await provider3.GetAsync<string>(key);
+                Assert.Null(value);
+            }
+
+            // Verify cache is in clean, working state
+            var testKey = "new_test_key";
+            var testValue = "new_test_value";
+            await provider3.SetAsync(testKey, testValue);
+            Assert.Equal(testValue, await provider3.GetAsync<string>(testKey));
+        }
+
         public void Dispose()
         {
             try
