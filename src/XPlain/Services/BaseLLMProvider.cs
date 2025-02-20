@@ -1,5 +1,7 @@
+using System.Collections.Generic;
 using System.Security.Cryptography;
 using System.Text;
+using System.Runtime.CompilerServices;
 
 namespace XPlain.Services;
 
@@ -20,6 +22,8 @@ public abstract class BaseLLMProvider : ILLMProvider
     public abstract string ModelName { get; }
 
     protected abstract Task<string> GetCompletionInternalAsync(string prompt);
+    
+    protected abstract IAsyncEnumerable<string> GetCompletionStreamInternalAsync(string prompt);
 
     public async Task<string> GetCompletionAsync(string prompt)
     {
@@ -48,6 +52,52 @@ public abstract class BaseLLMProvider : ILLMProvider
         {
             _rateLimitingService.ReleasePermit(ProviderName);
         }
+    }
+
+
+    public async Task<IAsyncEnumerable<string>> GetCompletionStreamAsync(string prompt)
+    {
+        // Generate cache key from prompt
+        var cacheKey = GenerateCacheKey(prompt);
+
+        // Try to get from cache first
+        var cachedResponse = await _cacheProvider.GetAsync<string>(cacheKey);
+        if (cachedResponse != null)
+        {
+            // For cached responses, return as a single chunk
+            return AsyncEnumerable.Singleton(cachedResponse);
+        }
+
+        // Get new completion with rate limiting
+        await _rateLimitingService.AcquirePermitAsync(ProviderName);
+        
+        // Create a StringBuilder to accumulate the full response for caching
+        var fullResponse = new StringBuilder();
+
+        // Return an async stream that accumulates the response and caches it when complete
+        async IAsyncEnumerable<string> StreamWithCaching(
+            [EnumeratorCancellation] CancellationToken cancellationToken = default)
+        {
+            try
+            {
+                await foreach (var chunk in GetCompletionStreamInternalAsync(prompt)
+                    .WithCancellation(cancellationToken))
+                {
+                    fullResponse.Append(chunk);
+                    yield return chunk;
+                }
+
+                // Cache the complete response
+                var completeResponse = fullResponse.ToString();
+                await _cacheProvider.SetAsync(cacheKey, completeResponse);
+            }
+            finally
+            {
+                _rateLimitingService.ReleasePermit(ProviderName);
+            }
+        }
+
+        return StreamWithCaching();
     }
 
     private string GenerateCacheKey(string prompt)

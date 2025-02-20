@@ -1,10 +1,13 @@
 using System.Diagnostics;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
+using System.Text.Json;
 using System.Text.Json.Serialization;
 using Microsoft.Extensions.Options;
 using XPlain.Configuration;
 using System.Net;
+using System.Collections.Generic;
+using System.Runtime.CompilerServices;
 
 namespace XPlain.Services;
 
@@ -73,6 +76,126 @@ public class AnthropicClient : BaseLLMProvider, IAnthropicClient, IDisposable
             return response?.Content.FirstOrDefault()?.Text.Trim() ?? 
                    "No response received from the API.";
         }, 0);
+    }
+
+    protected override async IAsyncEnumerable<string> GetCompletionStreamInternalAsync(
+        string prompt)
+    {
+        var requestBody = new AnthropicRequest
+        {
+            Model = _settings.DefaultModel,
+            Messages = [
+                new AnthropicMessage
+                {
+                    Role = "user",
+                    Content = [new AnthropicMessageContent { Type = "text", Text = prompt }]
+                }
+            ],
+            MaxTokens = _settings.MaxTokenLimit,
+            Temperature = 0.7,
+            Stream = true
+        };
+
+        await foreach (var chunk in ExecuteStreamWithRetryAsync(requestBody))
+        {
+            yield return chunk;
+        }
+    }
+
+    private async IAsyncEnumerable<string> ExecuteStreamWithRetryAsync(
+        AnthropicRequest request,
+        [EnumeratorCancellation] CancellationToken cancellationToken = default)
+    {
+        if (!_circuitBreaker.CanProcess())
+        {
+            throw new CircuitBreakerOpenException(
+                "Circuit breaker is open. Too many recent failures.");
+        }
+
+        var attempts = 0;
+        var delay = _settings.InitialRetryDelayMs;
+        Exception lastException = null;
+
+        while (attempts < _settings.MaxRetryAttempts)
+        {
+            try
+            {
+                attempts++;
+                await foreach (var chunk in ProcessStreamRequestAsync(request, cancellationToken))
+                {
+                    yield return chunk;
+                }
+                _circuitBreaker.RecordSuccess();
+                yield break;
+            }
+            catch (HttpRequestException ex) when (
+                ex.StatusCode.HasValue &&
+                RetryableStatusCodes.Contains(ex.StatusCode.Value))
+            {
+                lastException = ex;
+                _circuitBreaker.RecordFailure();
+
+                if (attempts < _settings.MaxRetryAttempts)
+                {
+                    var jitter = Random.Shared.NextDouble() * _settings.JitterFactor * delay;
+                    await Task.Delay((int)(delay + jitter), cancellationToken);
+                    delay = Math.Min(
+                        (int)(delay * _settings.BackoffMultiplier),
+                        _settings.MaxRetryDelayMs);
+                }
+            }
+            catch (Exception ex)
+            {
+                lastException = ex;
+                _circuitBreaker.RecordFailure();
+                throw;
+            }
+        }
+
+        throw new AnthropicApiException(
+            $"Stream operation failed after {attempts} attempts. Last error: {lastException?.Message}",
+            lastException);
+    }
+
+    private async IAsyncEnumerable<string> ProcessStreamRequestAsync(
+        AnthropicRequest request,
+        [EnumeratorCancellation] CancellationToken cancellationToken)
+    {
+        // Acquire rate limiting permit
+        await _rateLimitingService.AcquirePermitAsync(ProviderName, 0, cancellationToken);
+        try
+        {
+            using var response = await _httpClient.PostAsJsonAsync(
+                "/v1/messages",
+                request,
+                cancellationToken);
+
+            response.EnsureSuccessStatusCode();
+            
+            using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
+            using var reader = new StreamReader(stream);
+
+            while (!reader.EndOfStream)
+            {
+                var line = await reader.ReadLineAsync();
+                if (string.IsNullOrEmpty(line)) continue;
+                if (!line.StartsWith("data: ")) continue;
+                if (line == "data: [DONE]") break;
+
+                var jsonData = line.Substring(6);
+                var streamResponse = JsonSerializer.Deserialize<AnthropicStreamResponse>(jsonData);
+                
+                if (streamResponse?.Type == "content_block_delta" && 
+                    !string.IsNullOrEmpty(streamResponse.Delta?.Text))
+                {
+                    yield return streamResponse.Delta.Text;
+                }
+            }
+        }
+        finally
+        {
+            _rateLimitingService.ReleasePermit(ProviderName);
+        }
     }
 
     private async Task<AnthropicResponse> ProcessRequestAsync(
@@ -269,4 +392,25 @@ public class AnthropicResponse
 
     [JsonPropertyName("content")]
     public required List<AnthropicMessageContent> Content { get; set; }
+}
+
+public class AnthropicStreamResponse
+{
+    [JsonPropertyName("type")]
+    public required string Type { get; set; }
+
+    [JsonPropertyName("delta")]
+    public AnthropicDelta? Delta { get; set; }
+
+    [JsonPropertyName("index")]
+    public int Index { get; set; }
+}
+
+public class AnthropicDelta
+{
+    [JsonPropertyName("type")]
+    public string? Type { get; set; }
+
+    [JsonPropertyName("text")]
+    public string? Text { get; set; }
 }

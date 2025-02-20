@@ -1,10 +1,13 @@
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
+using System.Text.Json;
 using System.Text.Json.Serialization;
 using Microsoft.Extensions.Options;
 using System.Net;
 using System.Diagnostics;
 using XPlain.Configuration;
+using System.Collections.Generic;
+using System.Runtime.CompilerServices;
 
 namespace XPlain.Services;
 
@@ -72,6 +75,126 @@ public class OpenAIClient : BaseLLMProvider, IOpenAIClient, IDisposable
             return response?.Choices.FirstOrDefault()?.Message.Content.Trim() ?? 
                    "No response received from the API.";
         }, 0);
+    }
+
+    protected override async IAsyncEnumerable<string> GetCompletionStreamInternalAsync(
+        string prompt)
+    {
+        var requestBody = new OpenAIRequest
+        {
+            Model = _settings.DefaultModel,
+            Messages = [
+                new OpenAIMessage
+                {
+                    Role = "user",
+                    Content = prompt
+                }
+            ],
+            MaxTokens = _settings.MaxTokenLimit,
+            Temperature = 0.7,
+            Stream = true
+        };
+
+        await foreach (var chunk in ExecuteStreamWithRetryAsync(requestBody))
+        {
+            yield return chunk;
+        }
+    }
+
+    private async IAsyncEnumerable<string> ExecuteStreamWithRetryAsync(
+        OpenAIRequest request,
+        [EnumeratorCancellation] CancellationToken cancellationToken = default)
+    {
+        if (!_circuitBreaker.CanProcess())
+        {
+            throw new CircuitBreakerOpenException(
+                "Circuit breaker is open. Too many recent failures.");
+        }
+
+        var attempts = 0;
+        var delay = _settings.InitialRetryDelayMs;
+        Exception lastException = null;
+
+        while (attempts < _settings.MaxRetryAttempts)
+        {
+            try
+            {
+                attempts++;
+                await foreach (var chunk in ProcessStreamRequestAsync(request, cancellationToken))
+                {
+                    yield return chunk;
+                }
+                _circuitBreaker.RecordSuccess();
+                yield break;
+            }
+            catch (HttpRequestException ex) when (
+                ex.StatusCode.HasValue &&
+                RetryableStatusCodes.Contains(ex.StatusCode.Value))
+            {
+                lastException = ex;
+                _circuitBreaker.RecordFailure();
+
+                if (attempts < _settings.MaxRetryAttempts)
+                {
+                    var jitter = Random.Shared.NextDouble() * _settings.JitterFactor * delay;
+                    await Task.Delay((int)(delay + jitter), cancellationToken);
+                    delay = Math.Min(
+                        (int)(delay * _settings.BackoffMultiplier),
+                        _settings.MaxRetryDelayMs);
+                }
+            }
+            catch (Exception ex)
+            {
+                lastException = ex;
+                _circuitBreaker.RecordFailure();
+                throw;
+            }
+        }
+
+        throw new OpenAIApiException(
+            $"Stream operation failed after {attempts} attempts. Last error: {lastException?.Message}",
+            lastException);
+    }
+
+    private async IAsyncEnumerable<string> ProcessStreamRequestAsync(
+        OpenAIRequest request,
+        [EnumeratorCancellation] CancellationToken cancellationToken)
+    {
+        // Acquire rate limiting permit
+        await _rateLimitingService.AcquirePermitAsync(ProviderName, 0, cancellationToken);
+        try
+        {
+            using var response = await _httpClient.PostAsJsonAsync(
+                "/v1/chat/completions",
+                request,
+                cancellationToken);
+
+            response.EnsureSuccessStatusCode();
+            
+            using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
+            using var reader = new StreamReader(stream);
+
+            while (!reader.EndOfStream)
+            {
+                var line = await reader.ReadLineAsync();
+                if (string.IsNullOrEmpty(line)) continue;
+                if (!line.StartsWith("data: ")) continue;
+                if (line == "data: [DONE]") break;
+
+                var jsonData = line.Substring(6);
+                var streamResponse = JsonSerializer.Deserialize<OpenAIStreamResponse>(jsonData);
+                
+                if (streamResponse?.Choices?.Count > 0 && 
+                    !string.IsNullOrEmpty(streamResponse.Choices[0].Delta?.Content))
+                {
+                    yield return streamResponse.Choices[0].Delta.Content;
+                }
+            }
+        }
+        finally
+        {
+            _rateLimitingService.ReleasePermit(ProviderName);
+        }
     }
 
     private async Task<OpenAIResponse> ProcessRequestAsync(
@@ -266,9 +389,30 @@ public class OpenAIChoice
     [JsonPropertyName("message")]
     public required OpenAIMessage Message { get; set; }
 
+    [JsonPropertyName("delta")]
+    public OpenAIMessage? Delta { get; set; }
+
     [JsonPropertyName("finish_reason")]
     public required string FinishReason { get; set; }
 
     [JsonPropertyName("index")]
     public required int Index { get; set; }
+}
+
+public class OpenAIStreamResponse
+{
+    [JsonPropertyName("id")]
+    public required string Id { get; set; }
+
+    [JsonPropertyName("object")]
+    public required string Object { get; set; }
+
+    [JsonPropertyName("created")]
+    public required int Created { get; set; }
+
+    [JsonPropertyName("model")]
+    public required string Model { get; set; }
+
+    [JsonPropertyName("choices")]
+    public required List<OpenAIChoice> Choices { get; set; }
 }

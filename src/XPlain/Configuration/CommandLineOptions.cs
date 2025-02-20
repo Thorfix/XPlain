@@ -81,6 +81,10 @@ public class CommandLineOptions
     [Description("Display cache statistics")]
     public bool ShowCacheStats { get; set; }
 
+    [OptionGroup(OptionGroup.Output)]
+    [Description("Enable streaming responses")]
+    public bool EnableStreaming { get; set; } = false;
+
     public bool InteractiveMode => string.IsNullOrEmpty(DirectQuestion) && !ShowCacheStats;
 
     public void Validate()
