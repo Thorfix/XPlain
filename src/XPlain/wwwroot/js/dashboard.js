@@ -1,133 +1,104 @@
-document.addEventListener('DOMContentLoaded', init);
+// Dashboard initialization and control
+document.addEventListener('DOMContentLoaded', () => {
+    const startTestBtn = document.getElementById('startTest');
+    const stopTestBtn = document.getElementById('stopTest');
+    const testProfileSelect = document.getElementById('testProfile');
 
-const updateData = async () => {
-    await updateCacheMetrics();
-    await updateCacheAlerts();
-    await updateCacheHealth();
-    await updateOptimizationMetrics();
-};
+    // Initialize metrics update interval
+    setInterval(updateMetrics, 1000);
 
-const init = async () => {
-    await updateCacheMetrics();
-    await updateCacheAlerts();
-    await updateCacheHealth();
-    await updateOptimizationMetrics();
-    setInterval(updateData, 5000);
-};
+    // Load test controls
+    startTestBtn.addEventListener('click', async () => {
+        const profile = testProfileSelect.value;
+        try {
+            const response = await fetch('/api/loadtest/start', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                    scenarioType: 'CachePerformance',
+                    profileName: profile
+                })
+            });
 
-const updateCacheMetrics = async () => {
+            if (!response.ok) {
+                throw new Error('Failed to start load test');
+            }
+
+            startTestBtn.disabled = true;
+            stopTestBtn.disabled = false;
+            addAlert('info', 'Load test started successfully');
+        } catch (error) {
+            addAlert('critical', `Failed to start load test: ${error.message}`);
+        }
+    });
+
+    stopTestBtn.addEventListener('click', async () => {
+        try {
+            const response = await fetch('/api/loadtest/stop', {
+                method: 'POST'
+            });
+
+            if (!response.ok) {
+                throw new Error('Failed to stop load test');
+            }
+
+            startTestBtn.disabled = false;
+            stopTestBtn.disabled = true;
+            addAlert('info', 'Load test stopped successfully');
+        } catch (error) {
+            addAlert('critical', `Failed to stop load test: ${error.message}`);
+        }
+    });
+});
+
+// Update dashboard metrics
+async function updateMetrics() {
     try {
         const response = await fetch('/api/cache/metrics');
         const metrics = await response.json();
-        document.getElementById('cache-metrics').innerHTML = `
-            <h3>Cache Metrics</h3>
-            <div>Hit Rate: ${(metrics.hitRate * 100).toFixed(1)}%</div>
-            <div>Memory Usage: ${metrics.memoryUsage.toFixed(2)} MB</div>
-            <div>Item Count: ${metrics.itemCount}</div>
-        `;
+
+        // Update metric cards
+        document.getElementById('cacheHitRate').textContent = `${(metrics.hitRate * 100).toFixed(1)}%`;
+        document.getElementById('responseTime').textContent = `${metrics.averageResponseTime.toFixed(1)}ms`;
+        document.getElementById('memoryUsage').textContent = `${(metrics.memoryUsageMB).toFixed(1)} MB`;
+        document.getElementById('predictionAccuracy').textContent = `${(metrics.predictionAccuracy * 100).toFixed(1)}%`;
+
+        // Update alerts if any threshold is exceeded
+        if (metrics.hitRate < 0.7) {
+            addAlert('warning', 'Cache hit rate is below 70%');
+        }
+        if (metrics.averageResponseTime > 1000) {
+            addAlert('critical', 'Average response time exceeds 1000ms');
+        }
+        if (metrics.memoryUsageMB > 1000) {
+            addAlert('warning', 'Memory usage exceeds 1GB');
+        }
+        if (metrics.predictionAccuracy < 0.8) {
+            addAlert('warning', 'ML prediction accuracy is below 80%');
+        }
     } catch (error) {
-        console.error('Error updating cache metrics:', error);
+        console.error('Failed to update metrics:', error);
     }
-};
+}
 
-const updateCacheAlerts = async () => {
-    try {
-        const response = await fetch('/api/cache/alerts');
-        const alerts = await response.json();
-        document.getElementById('cache-alerts').innerHTML = `
-            <h3>Active Alerts</h3>
-            ${alerts.map(alert => `
-                <div class="alert ${alert.severity.toLowerCase()}">
-                    ${alert.message}
-                </div>
-            `).join('')}
-        `;
-    } catch (error) {
-        console.error('Error updating cache alerts:', error);
+// Add alert to the dashboard
+function addAlert(type, message) {
+    const alertsList = document.getElementById('alertsList');
+    const alertElement = document.createElement('div');
+    alertElement.className = `alert-item ${type}`;
+    alertElement.textContent = `${new Date().toLocaleTimeString()}: ${message}`;
+    
+    alertsList.insertBefore(alertElement, alertsList.firstChild);
+    
+    // Remove old alerts if there are too many
+    while (alertsList.children.length > 10) {
+        alertsList.removeChild(alertsList.lastChild);
     }
-};
 
-const updateCacheHealth = async () => {
-    try {
-        const response = await fetch('/api/cache/health');
-        const health = await response.json();
-        document.getElementById('cache-health').innerHTML = `
-            <h3>Cache Health</h3>
-            <div class="health-status ${health.status.toLowerCase()}">
-                ${health.status}
-            </div>
-        `;
-    } catch (error) {
-        console.error('Error updating cache health:', error);
-    }
-};
-
-const updateOptimizationMetrics = async () => {
-    try {
-        const response = await fetch('/api/cache/optimization/metrics');
-        const metrics = await response.json();
-        
-        // Update optimization metrics section
-        const metricsDiv = document.getElementById('optimization-metrics');
-        
-        const activeOptimizations = metrics.activeOptimizations.map(opt => `
-            <div class="optimization-action">
-                <strong>${opt.actionType}</strong>
-                <span>Started: ${new Date(opt.timestamp).toLocaleString()}</span>
-            </div>
-        `).join('');
-
-        const successRates = Object.entries(metrics.successRateByStrategy).map(([strategy, rate]) => `
-            <div class="strategy-success">
-                <strong>${strategy}:</strong> ${(rate * 100).toFixed(1)}% success rate
-            </div>
-        `).join('');
-
-        const recentActions = metrics.recentActions.slice(0, 5).map(action => `
-            <div class="recent-action ${action.wasSuccessful ? 'success' : 'failure'}">
-                <strong>${action.actionType}</strong>
-                <span>${new Date(action.timestamp).toLocaleString()}</span>
-                ${action.rollbackReason ? `<span class="rollback">Rollback: ${action.rollbackReason}</span>` : ''}
-            </div>
-        `).join('');
-
-        metricsDiv.innerHTML = `
-            <h3>Optimization Status</h3>
-            <div class="emergency-override ${metrics.emergencyOverrideActive ? 'active' : ''}">
-                Emergency Override: ${metrics.emergencyOverrideActive ? 'Active' : 'Inactive'}
-                <button onclick="toggleEmergencyOverride(${!metrics.emergencyOverrideActive})">
-                    ${metrics.emergencyOverrideActive ? 'Deactivate' : 'Activate'} Override
-                </button>
-            </div>
-            <div class="active-optimizations">
-                <h4>Active Optimizations</h4>
-                ${activeOptimizations || '<p>No active optimizations</p>'}
-            </div>
-            <div class="success-rates">
-                <h4>Strategy Success Rates</h4>
-                ${successRates || '<p>No optimization history</p>'}
-            </div>
-            <div class="recent-actions">
-                <h4>Recent Actions</h4>
-                ${recentActions || '<p>No recent actions</p>'}
-            </div>
-        `;
-    } catch (error) {
-        console.error('Error updating optimization metrics:', error);
-    }
-};
-
-const toggleEmergencyOverride = async (enabled) => {
-    try {
-        await fetch('/api/cache/optimization/emergency-override', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-            },
-            body: JSON.stringify(enabled)
-        });
-        await updateOptimizationMetrics();
-    } catch (error) {
-        console.error('Error toggling emergency override:', error);
-    }
-};
+    // Auto-remove alert after 5 minutes
+    setTimeout(() => {
+        alertElement.remove();
+    }, 300000);
+}
