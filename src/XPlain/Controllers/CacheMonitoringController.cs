@@ -50,5 +50,40 @@ namespace XPlain.Controllers
             var stats = _monitoringService.GetCacheStatistics();
             return Ok(stats);
         }
+
+        [HttpGet("circuit-breaker")]
+        public async Task<IActionResult> GetCircuitBreakerState()
+        {
+            var state = await _monitoringService.GetCircuitBreakerStatusAsync();
+            return Ok(state);
+        }
+
+        [HttpGet("circuit-breaker/history")]
+        public async Task<IActionResult> GetCircuitBreakerHistory()
+        {
+            var history = await _monitoringService.GetCircuitBreakerHistoryAsync();
+            return Ok(history);
+        }
+
+        [HttpGet("encryption")]
+        public async Task<IActionResult> GetEncryptionStatus()
+        {
+            var status = await _monitoringService.GetEncryptionStatusAsync();
+            return Ok(status);
+        }
+
+        [HttpGet("encryption/rotation")]
+        public async Task<IActionResult> GetKeyRotationSchedule()
+        {
+            var schedule = await _monitoringService.GetKeyRotationScheduleAsync();
+            return Ok(schedule);
+        }
+
+        [HttpGet("maintenance/logs")]
+        public async Task<IActionResult> GetMaintenanceLogs()
+        {
+            var logs = await _monitoringService.GetMaintenanceLogsAsync();
+            return Ok(logs);
+        }
     }
 }

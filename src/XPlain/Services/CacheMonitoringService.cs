@@ -165,5 +165,113 @@ namespace XPlain.Services
             // Implementation to optimize cache
             throw new NotImplementedException();
         }
+
+        public async Task<CircuitBreakerState> GetCircuitBreakerStateAsync()
+        {
+            var circuitBreaker = (_cacheProvider as FileBasedCacheProvider)?.CircuitBreaker;
+            if (circuitBreaker == null)
+            {
+                throw new InvalidOperationException("Circuit breaker not available");
+            }
+
+            return new CircuitBreakerState
+            {
+                Status = circuitBreaker.CurrentState.ToString(),
+                LastStateChange = circuitBreaker.LastStateChange,
+                FailureCount = circuitBreaker.FailureCount,
+                NextRetryTime = circuitBreaker.NextRetryTime,
+                RecentEvents = await GetCircuitBreakerHistoryAsync(DateTime.UtcNow.AddHours(-24))
+            };
+        }
+
+        public async Task<List<CircuitBreakerEvent>> GetCircuitBreakerHistoryAsync(DateTime since)
+        {
+            // Implementation to get circuit breaker history
+            return new List<CircuitBreakerEvent>();
+        }
+
+        public async Task<bool> IsCircuitBreakerTrippedAsync()
+        {
+            var state = await GetCircuitBreakerStateAsync();
+            return state.Status == "Open";
+        }
+
+        public async Task<EncryptionStatus> GetEncryptionStatusAsync()
+        {
+            var provider = _cacheProvider as FileBasedCacheProvider;
+            if (provider?.EncryptionProvider == null)
+            {
+                throw new InvalidOperationException("Encryption provider not available");
+            }
+
+            return new EncryptionStatus
+            {
+                IsEnabled = provider.EncryptionProvider.IsEnabled,
+                CurrentKeyId = provider.EncryptionProvider.CurrentKeyId,
+                KeyCreatedAt = provider.EncryptionProvider.CurrentKeyCreatedAt,
+                NextRotationDue = await GetNextKeyRotationTimeAsync(),
+                KeysInRotation = (await GetActiveEncryptionKeysAsync()).Count,
+                AutoRotationEnabled = provider.EncryptionProvider.AutoRotationEnabled
+            };
+        }
+
+        public async Task<DateTime> GetNextKeyRotationTimeAsync()
+        {
+            var provider = _cacheProvider as FileBasedCacheProvider;
+            return provider?.EncryptionProvider?.NextScheduledRotation ?? DateTime.MaxValue;
+        }
+
+        public async Task<Dictionary<string, DateTime>> GetKeyRotationScheduleAsync()
+        {
+            var provider = _cacheProvider as FileBasedCacheProvider;
+            return provider?.EncryptionProvider?.GetKeyRotationSchedule() ?? new Dictionary<string, DateTime>();
+        }
+
+        public async Task<List<string>> GetActiveEncryptionKeysAsync()
+        {
+            var provider = _cacheProvider as FileBasedCacheProvider;
+            return provider?.EncryptionProvider?.GetActiveKeyIds().ToList() ?? new List<string>();
+        }
+
+        public async Task<List<MaintenanceLogEntry>> GetMaintenanceLogsAsync(DateTime since)
+        {
+            var provider = _cacheProvider as FileBasedCacheProvider;
+            return provider?.MaintenanceLogs.Where(log => log.Timestamp >= since).ToList() 
+                   ?? new List<MaintenanceLogEntry>();
+        }
+
+        public async Task<Dictionary<string, int>> GetEvictionStatisticsAsync()
+        {
+            var provider = _cacheProvider as FileBasedCacheProvider;
+            return provider?.GetEvictionStats() ?? new Dictionary<string, int>();
+        }
+
+        public async Task<List<CacheEvictionEvent>> GetRecentEvictionsAsync(int count)
+        {
+            var provider = _cacheProvider as FileBasedCacheProvider;
+            return provider?.GetRecentEvictions(count).ToList() ?? new List<CacheEvictionEvent>();
+        }
+
+        public async Task LogMaintenanceEventAsync(string operation, string status, TimeSpan duration, Dictionary<string, object>? metadata = null)
+        {
+            var provider = _cacheProvider as FileBasedCacheProvider;
+            if (provider == null) return;
+
+            var logEntry = new MaintenanceLogEntry
+            {
+                Operation = operation,
+                Status = status,
+                Duration = duration,
+                Metadata = metadata ?? new Dictionary<string, object>()
+            };
+
+            provider.MaintenanceLogs.Add(logEntry);
+
+            // Notify subscribers of the new maintenance event
+            if (status == "Warning" || status == "Error")
+            {
+                await CreateAlertAsync("Maintenance", $"Operation '{operation}' completed with status: {status}", "Warning", metadata);
+            }
+        }
     }
 }
