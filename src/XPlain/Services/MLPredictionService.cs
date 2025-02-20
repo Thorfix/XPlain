@@ -12,12 +12,17 @@ namespace XPlain.Services
     {
         private readonly MLContext _mlContext;
         private readonly ILogger<MLPredictionService> _logger;
+        private readonly MLModelTrainingService _trainingService;
         private ITransformer? _model;
+        private ModelVersion? _activeVersion;
 
-        public MLPredictionService(ILogger<MLPredictionService> logger)
+        public MLPredictionService(
+            ILogger<MLPredictionService> logger,
+            MLModelTrainingService trainingService)
         {
             _mlContext = new MLContext(seed: 1);
             _logger = logger;
+            _trainingService = trainingService;
         }
 
         public async Task<double> PredictQueryValueAsync(string key)
@@ -114,18 +119,55 @@ namespace XPlain.Services
             }
         }
 
-        public async Task UpdateModelAsync(string modelPath)
+        public async Task UpdateModelAsync(string modelVersionId)
         {
             try
             {
+                var version = await _trainingService.GetModelVersion(modelVersionId);
+                if (version == null)
+                {
+                    throw new InvalidOperationException($"Model version {modelVersionId} not found");
+                }
+
                 // Load the trained model
-                _model = await Task.Run(() => _mlContext.Model.Load(modelPath, out var _));
-                _logger.LogInformation("Successfully loaded ML model from {Path}", modelPath);
+                _model = await Task.Run(() => _mlContext.Model.Load(version.FilePath, out var _));
+                _activeVersion = version;
+                _logger.LogInformation("Successfully loaded ML model version {Version}", modelVersionId);
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Error loading ML model from {Path}", modelPath);
+                _logger.LogError(ex, "Error loading ML model version {Version}", modelVersionId);
                 throw;
+            }
+        }
+
+        public async Task<ModelVersion?> GetActiveModelVersion()
+        {
+            return _activeVersion;
+        }
+
+        public async Task<bool> FallbackToPreviousVersion()
+        {
+            try
+            {
+                var versions = await _trainingService.GetModelVersions();
+                var previousVersion = versions
+                    .Where(v => v != _activeVersion && v.Status == "trained")
+                    .OrderByDescending(v => v.CreatedAt)
+                    .FirstOrDefault();
+
+                if (previousVersion != null)
+                {
+                    await UpdateModelAsync(previousVersion.Id);
+                    return true;
+                }
+
+                return false;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error falling back to previous model version");
+                return false;
             }
         }
 

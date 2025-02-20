@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Threading.Tasks;
 using System.Linq;
+using System.IO;
 using Microsoft.ML;
 using Microsoft.ML.Data;
 using Microsoft.ML.Trainers;
@@ -57,6 +58,9 @@ namespace XPlain.Services
         private readonly MLContext _mlContext;
         private readonly ILogger<MLModelTrainingService> _logger;
         private ITransformer? _trainedModel;
+        private readonly string _modelsDirectory = "ml_models";
+        private readonly List<ModelVersion> _modelVersions = new();
+        private ModelVersion? _activeVersion;
 
         public MLModelTrainingService(ILogger<MLModelTrainingService> logger)
         {
@@ -64,7 +68,7 @@ namespace XPlain.Services
             _logger = logger;
         }
 
-        public async Task TrainModelAsync(List<CacheTrainingData> trainingData, ModelTrainingParameters parameters)
+        public async Task<ModelVersion> TrainModelAsync(List<CacheTrainingData> trainingData, ModelTrainingParameters parameters)
         {
             try
             {
@@ -131,8 +135,59 @@ namespace XPlain.Services
                     metrics.RSquared,
                     metrics.RootMeanSquaredError);
 
-                // Save the model
-                await Task.Run(() => _mlContext.Model.Save(_trainedModel, dataView.Schema, "cache_prediction_model.zip"));
+                // Create model version and metadata
+                var modelVersion = new ModelVersion
+                {
+                    ModelName = "cache_prediction_model",
+                    CreatedAt = DateTime.UtcNow,
+                    TrainingParameters = parameters.Features,
+                    Metadata = new ModelMetadata
+                    {
+                        DatasetSize = trainingData.Count,
+                        TrainingStartTime = DateTime.UtcNow,
+                        Features = parameters.Features.Keys.ToList(),
+                        DatasetCharacteristics = new Dictionary<string, string>
+                        {
+                            ["avgAccessFrequency"] = trainingData.Average(d => d.AccessFrequency).ToString("F2"),
+                            ["avgResourceUsage"] = trainingData.Average(d => d.ResourceUsage).ToString("F2"),
+                            ["avgHitRate"] = trainingData.Average(d => d.CacheHitRate).ToString("F2")
+                        }
+                    }
+                };
+
+                // Create models directory if it doesn't exist
+                Directory.CreateDirectory(_modelsDirectory);
+
+                // Save the model with version information
+                string modelPath = Path.Combine(_modelsDirectory, $"{modelVersion.Id}.zip");
+                await Task.Run(() => _mlContext.Model.Save(_trainedModel, dataView.Schema, modelPath));
+
+                // Update metadata and save metrics
+                modelVersion.FilePath = modelPath;
+                modelVersion.Metadata.TrainingEndTime = DateTime.UtcNow;
+                modelVersion.Metadata.ValidationMetrics = new Dictionary<string, double>
+                {
+                    ["RSquared"] = metrics.RSquared,
+                    ["RootMeanSquaredError"] = metrics.RootMeanSquaredError,
+                    ["MeanAbsoluteError"] = metrics.MeanAbsoluteError
+                };
+                modelVersion.Status = "trained";
+                modelVersion.IsActive = true;
+
+                // If there was a previous active version, deactivate it
+                if (_activeVersion != null)
+                {
+                    _activeVersion.IsActive = false;
+                }
+
+                _activeVersion = modelVersion;
+                _modelVersions.Add(modelVersion);
+
+                _logger.LogInformation(
+                    "Model version {VersionId} trained and saved successfully",
+                    modelVersion.Id);
+
+                return modelVersion;
             }
             catch (Exception ex)
             {
@@ -141,14 +196,28 @@ namespace XPlain.Services
             }
         }
 
-        public async Task<Dictionary<string, double>> PredictCacheValuesAsync(List<CacheTrainingData> data)
+        public async Task<Dictionary<string, double>> PredictCacheValuesAsync(List<CacheTrainingData> data, string? modelVersionId = null)
         {
-            if (_trainedModel == null)
+            ITransformer model;
+            if (modelVersionId != null)
             {
-                throw new InvalidOperationException("Model has not been trained");
+                var version = _modelVersions.FirstOrDefault(v => v.Id == modelVersionId);
+                if (version == null)
+                {
+                    throw new InvalidOperationException($"Model version {modelVersionId} not found");
+                }
+                model = await LoadModelAsync(version.FilePath);
+            }
+            else if (_trainedModel != null)
+            {
+                model = _trainedModel;
+            }
+            else
+            {
+                throw new InvalidOperationException("No model available for predictions");
             }
 
-            var predictionEngine = _mlContext.Model.CreatePredictionEngine<CacheTrainingData, CachePrediction>(_trainedModel);
+            var predictionEngine = _mlContext.Model.CreatePredictionEngine<CacheTrainingData, CachePrediction>(model);
             var results = new Dictionary<string, double>();
 
             foreach (var item in data)
@@ -182,6 +251,100 @@ namespace XPlain.Services
         private DataViewSchema GetCurrentSchema()
         {
             return _mlContext.Data.LoadFromEnumerable(new List<CacheTrainingData>()).Schema;
+        }
+
+        private async Task<ITransformer> LoadModelAsync(string modelPath)
+        {
+            return await Task.Run(() => _mlContext.Model.Load(modelPath, out var _));
+        }
+
+        public async Task<ModelVersion?> GetActiveModelVersion()
+        {
+            return _activeVersion;
+        }
+
+        public async Task<List<ModelVersion>> GetModelVersions()
+        {
+            return _modelVersions.OrderByDescending(v => v.CreatedAt).ToList();
+        }
+
+        public async Task<ModelVersion?> GetModelVersion(string versionId)
+        {
+            return _modelVersions.FirstOrDefault(v => v.Id == versionId);
+        }
+
+        public async Task<ModelComparisonResult> CompareModelVersions(string baselineVersionId, string candidateVersionId)
+        {
+            var baseline = await GetModelVersion(baselineVersionId);
+            var candidate = await GetModelVersion(candidateVersionId);
+
+            if (baseline == null || candidate == null)
+            {
+                throw new InvalidOperationException("One or both model versions not found");
+            }
+
+            var result = new ModelComparisonResult
+            {
+                BaselineModelId = baselineVersionId,
+                CandidateModelId = candidateVersionId,
+                MetricDifferences = new Dictionary<string, double>()
+            };
+
+            foreach (var metric in baseline.Metadata.ValidationMetrics.Keys)
+            {
+                if (candidate.Metadata.ValidationMetrics.ContainsKey(metric))
+                {
+                    result.MetricDifferences[metric] = 
+                        candidate.Metadata.ValidationMetrics[metric] - baseline.Metadata.ValidationMetrics[metric];
+                }
+            }
+
+            // Determine if candidate is better
+            var rSquaredImprovement = result.MetricDifferences.GetValueOrDefault("RSquared", 0);
+            var rmseImprovement = -result.MetricDifferences.GetValueOrDefault("RootMeanSquaredError", 0);
+            
+            result.IsCandidateBetter = rSquaredImprovement > 0.01 || rmseImprovement > 0.01;
+            result.RecommendedAction = result.IsCandidateBetter ? "promote" : "keep_baseline";
+
+            return result;
+        }
+
+        public async Task<ModelVersion?> ActivateModelVersion(string versionId)
+        {
+            var version = await GetModelVersion(versionId);
+            if (version == null)
+            {
+                throw new InvalidOperationException($"Model version {versionId} not found");
+            }
+
+            if (_activeVersion != null)
+            {
+                _activeVersion.IsActive = false;
+            }
+
+            version.IsActive = true;
+            _activeVersion = version;
+            _trainedModel = await LoadModelAsync(version.FilePath);
+
+            return version;
+        }
+
+        public async Task CleanupOldModels(int keepVersions = 5)
+        {
+            var versionsToDelete = _modelVersions
+                .Where(v => !v.IsActive)
+                .OrderByDescending(v => v.CreatedAt)
+                .Skip(keepVersions)
+                .ToList();
+
+            foreach (var version in versionsToDelete)
+            {
+                if (File.Exists(version.FilePath))
+                {
+                    File.Delete(version.FilePath);
+                }
+                _modelVersions.Remove(version);
+            }
         }
     }
 }
