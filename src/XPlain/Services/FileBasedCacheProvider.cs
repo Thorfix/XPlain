@@ -8,7 +8,7 @@ namespace XPlain.Services
 {
     public class FileBasedCacheProvider : ICacheProvider
     {
-        private readonly ICacheEvictionPolicy _evictionPolicy;
+        private ICacheEvictionPolicy _evictionPolicy;
         private readonly CircuitBreaker _circuitBreaker;
         private Dictionary<string, double> _resourceLimits;
         private readonly object _resourceLock = new object();
@@ -144,6 +144,38 @@ namespace XPlain.Services
             }
         }
 
+        public async Task UpdateEvictionPolicy(EvictionStrategy strategy)
+        {
+            // Create new policy instance based on strategy
+            ICacheEvictionPolicy newPolicy = strategy switch
+            {
+                EvictionStrategy.LRU => new LRUEvictionPolicy(),
+                EvictionStrategy.HitRateWeighted => new HitRateWeightedEvictionPolicy(_accessStats),
+                EvictionStrategy.SizeWeighted => new SizeWeightedEvictionPolicy(),
+                EvictionStrategy.Adaptive => new AdaptiveEvictionPolicy(_accessStats),
+                _ => throw new ArgumentException("Unknown eviction strategy")
+            };
+
+            // Transfer current thresholds to new policy
+            await newPolicy.UpdateEvictionThreshold(_evictionPolicy.CurrentEvictionThreshold);
+            await newPolicy.UpdatePressureThreshold(_evictionPolicy.CurrentPressureThreshold);
+
+            // Switch to new policy
+            _evictionPolicy = newPolicy;
+
+            MaintenanceLogs.Add(new MaintenanceLogEntry
+            {
+                Operation = "EvictionPolicyChange",
+                Status = "Success",
+                Metadata = new Dictionary<string, object>
+                {
+                    ["newStrategy"] = strategy.ToString(),
+                    ["evictionThreshold"] = _evictionPolicy.CurrentEvictionThreshold,
+                    ["pressureThreshold"] = _evictionPolicy.CurrentPressureThreshold
+                }
+            });
+        }
+
         private void AdjustMemoryLimit(double limit)
         {
             var baseMemory = 1024L * 1024L * 1024L; // 1GB base
@@ -156,6 +188,12 @@ namespace XPlain.Services
             if (GetCurrentMemoryUsage() > newLimit)
             {
                 _evictionPolicy.ForceEviction(GetCurrentMemoryUsage() - newLimit);
+            }
+
+            // Consider switching to size-weighted eviction if memory pressure is high
+            if (limit > 90)
+            {
+                UpdateEvictionPolicy(EvictionStrategy.SizeWeighted).Wait();
             }
         }
 
