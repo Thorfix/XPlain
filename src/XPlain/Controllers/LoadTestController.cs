@@ -16,14 +16,43 @@ namespace XPlain.Controllers
         private readonly MLPredictionService _mlPredictionService;
         private static CancellationTokenSource _currentTest;
 
+        private readonly StressTester _stressTester;
+
         public LoadTestController(
             LoadTestEngine loadTestEngine,
             ICacheProvider cacheProvider,
-            MLPredictionService mlPredictionService)
+            MLPredictionService mlPredictionService,
+            AutomaticMitigationService mitigationService,
+            QueryDistributionGenerator queryGenerator,
+            ILogger<StressTester> logger)
         {
             _loadTestEngine = loadTestEngine;
             _cacheProvider = cacheProvider;
             _mlPredictionService = mlPredictionService;
+            _stressTester = new StressTester(
+                cacheProvider,
+                mlPredictionService,
+                mitigationService,
+                queryGenerator,
+                logger);
+        }
+
+        [HttpPost("stress")]
+        public async Task<ActionResult<StressTestReport>> RunStressTest([FromBody] StressTestConfig config)
+        {
+            try
+            {
+                var report = await _stressTester.RunStressTest(
+                    config,
+                    _loadTestEngine,
+                    new CancellationTokenSource(TimeSpan.FromHours(1)).Token);
+                    
+                return Ok(report);
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, new { error = ex.Message });
+            }
         }
 
         [HttpPost("start")]
