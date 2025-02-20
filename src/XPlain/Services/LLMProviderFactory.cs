@@ -54,8 +54,9 @@ namespace XPlain.Services
             {
                 "anthropic" => CreateAnthropicProvider(),
                 "openai" => CreateOpenAIProvider(),
+                "azureopenai" => CreateAzureOpenAIProvider(),
                 _ => throw new ArgumentException($"Unsupported LLM provider: {providerName}. " +
-                    $"Supported providers are: Anthropic, OpenAI")
+                    $"Supported providers are: Anthropic, OpenAI, AzureOpenAI")
             };
 
             ValidateProvider(provider);
@@ -124,6 +125,23 @@ namespace XPlain.Services
                 _serviceProvider.GetRequiredService<ILogger<FallbackLLMProvider>>(),
                 _serviceProvider.GetRequiredService<LLMProviderMetrics>(),
                 _serviceProvider.GetRequiredService<IRateLimitingService>());
+        }
+
+        private ILLMProvider CreateAzureOpenAIProvider()
+        {
+            try
+            {
+                var client = _serviceProvider.GetRequiredService<AzureOpenAIClient>();
+                if (client == null)
+                {
+                    throw new InvalidOperationException("Failed to create Azure OpenAI client");
+                }
+                return client;
+            }
+            catch (Exception ex) when (ex is not InvalidOperationException)
+            {
+                throw new InvalidOperationException("Failed to initialize Azure OpenAI provider", ex);
+            }
         }
 
         private void ValidateProvider(ILLMProvider provider)

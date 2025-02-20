@@ -61,6 +61,12 @@ XPlain is a local development tool designed to help developers understand codeba
   - Features: Fast responses, broad knowledge base
   - Configuration: API key required
 
+- **Azure OpenAI Service**
+  - Models: Depends on your Azure OpenAI deployments
+  - Features: Enterprise-grade security, regional data residency
+  - Configuration: Endpoint, API key, and deployment ID required
+  - Optional: Managed Identity support
+
 Additional providers can be added by implementing the `ILLMProvider` interface and following the provider integration guidelines.
 
 ## Features
@@ -101,12 +107,25 @@ Additional providers can be added by implementing the `ILLMProvider` interface a
        },
        "OpenAI": {
          "ApiToken": "your-openai-key-here"
+       },
+       "AzureOpenAI": {
+         "Endpoint": "https://{your-endpoint}.openai.azure.com/",
+         "DeploymentId": "your-deployment-name",
+         "ApiKey": "your-azure-api-key",
+         "ApiVersion": "2024-02-15-preview",
+         "UseManagedIdentity": false
        }
      }
      ```
    - Set the environment variable: 
      - For Anthropic: `THORFIX_ANTHROPIC__APITOKEN`
      - For OpenAI: `THORFIX_OPENAI__APITOKEN`
+     - For Azure OpenAI:
+       - `THORFIX_AZUREOPENAI__ENDPOINT`
+       - `THORFIX_AZUREOPENAI__DEPLOYMENTID`
+       - `THORFIX_AZUREOPENAI__APIKEY`
+       - `THORFIX_AZUREOPENAI__APIVERSION`
+       - `THORFIX_AZUREOPENAI__USEMANAGEDIDENTITY`
 2. Other settings can be configured in `appsettings.json` or via environment variables:
    - `ApiEndpoint`: The Anthropic API endpoint (default: https://api.anthropic.com/v1)
    - `MaxTokenLimit`: Maximum token limit for requests (default: 2000)
