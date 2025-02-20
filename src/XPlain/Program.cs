@@ -1,6 +1,8 @@
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
+using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Http;
 using System.CommandLine;
 using System.CommandLine.Parsing;
 using System.ComponentModel;
@@ -297,12 +299,70 @@ file class Program
                 // Validate all options before proceeding
                 options.Validate();
 
+                // Create web application builder
+                var builder = WebApplication.CreateBuilder();
+                builder.Services.AddEndpointsApiExplorer();
+                builder.Services.AddSwaggerGen();
+
                 if (options.VerbosityLevel >= 1)
                 {
                     Console.WriteLine($"Analyzing code directory: {options.CodebasePath}");
                 }
 
                 var serviceProvider = ConfigureServices(options);
+                
+                // Configure web application
+                var app = builder.Build();
+                app.UseSwagger();
+                app.UseSwaggerUI();
+                app.UseCors();
+                app.UseDefaultFiles();
+                app.UseStaticFiles(); // Serve files from wwwroot
+
+                // Add monitoring API endpoints
+                app.MapGet("/api/cache/health", async (ICacheMonitoringService monitoring) =>
+                    await monitoring.GetHealthStatusAsync())
+                   .WithName("GetCacheHealth")
+                   .WithOpenApi();
+
+                app.MapGet("/api/cache/metrics", async (ICacheMonitoringService monitoring) =>
+                    await monitoring.GetPerformanceMetricsAsync())
+                   .WithName("GetCacheMetrics")
+                   .WithOpenApi();
+
+                app.MapGet("/api/cache/alerts", async (ICacheMonitoringService monitoring) =>
+                    await monitoring.GetActiveAlertsAsync())
+                   .WithName("GetCacheAlerts")
+                   .WithOpenApi();
+
+                app.MapGet("/api/cache/analytics/{days}", async (int days, ICacheMonitoringService monitoring) =>
+                    await monitoring.GetAnalyticsHistoryAsync(TimeSpan.FromDays(days)))
+                   .WithName("GetCacheAnalytics")
+                   .WithOpenApi();
+
+                app.MapGet("/api/cache/recommendations", async (ICacheMonitoringService monitoring) =>
+                    await monitoring.GetOptimizationRecommendationsAsync())
+                   .WithName("GetCacheRecommendations")
+                   .WithOpenApi();
+
+                app.MapGet("/api/cache/thresholds", async (ICacheMonitoringService monitoring) =>
+                    await monitoring.GetCurrentThresholdsAsync())
+                   .WithName("GetCacheThresholds")
+                   .WithOpenApi();
+
+                app.MapPost("/api/cache/thresholds", async (MonitoringThresholds thresholds, ICacheMonitoringService monitoring) =>
+                    await monitoring.UpdateMonitoringThresholdsAsync(thresholds))
+                   .WithName("UpdateCacheThresholds")
+                   .WithOpenApi();
+
+                app.MapGet("/api/cache/report/{format}", async (string format, ICacheMonitoringService monitoring) =>
+                    await monitoring.GeneratePerformanceReportAsync(format))
+                   .WithName("GetCacheReport")
+                   .WithOpenApi();
+
+                // Start web server
+                _ = app.RunAsync(); // Run in background
+
                 var llmFactory = serviceProvider.GetRequiredService<LLMProviderFactory>();
                 var provider = llmFactory.CreateProvider(options.Provider);
                 var cacheProvider = serviceProvider.GetRequiredService<ICacheProvider>();
@@ -895,6 +955,19 @@ file class Program
             // Add common services
             services.AddHttpClient();
             services.AddSingleton<LLMProviderFactory>();
+            
+            // Add ASP.NET Core services
+            services.AddEndpointsApiExplorer();
+            services.AddSwaggerGen();
+            services.AddCors(options =>
+            {
+                options.AddDefaultPolicy(builder =>
+                {
+                    builder.AllowAnyOrigin()
+                           .AllowAnyMethod()
+                           .AllowAnyHeader();
+                });
+            });
 
             return services.BuildServiceProvider();
         }
