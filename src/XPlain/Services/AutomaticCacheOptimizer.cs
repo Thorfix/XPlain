@@ -10,6 +10,8 @@ namespace XPlain.Services
     {
         private readonly ICacheProvider _cacheProvider;
         private readonly ICacheMonitoringService _monitoringService;
+        private readonly IMLModelTrainingService _modelTrainingService;
+        private readonly MLPredictionService _predictionService;
         private readonly ILogger<AutomaticCacheOptimizer> _logger;
         private readonly Dictionary<string, double> _baselineThresholds;
         private readonly double _maxThresholdAdjustment = 0.2; // Maximum 20% adjustment
@@ -25,11 +27,14 @@ namespace XPlain.Services
         public AutomaticCacheOptimizer(
             ICacheProvider cacheProvider,
             ICacheMonitoringService monitoringService,
+            IMLModelTrainingService modelTrainingService,
+            MLPredictionService predictionService,
             ILogger<AutomaticCacheOptimizer> logger)
         {
             _cacheProvider = cacheProvider;
             _monitoringService = monitoringService;
             _logger = logger;
+            _modelTrainingService = modelTrainingService;
             _baselineThresholds = new Dictionary<string, double>();
             _optimizationStrategies = new Dictionary<string, OptimizationStrategy>();
             _activeOptimizations = new Dictionary<string, OptimizationAction>();
@@ -364,6 +369,9 @@ namespace XPlain.Services
                 }
 
                 _logger.LogWarning("Rolled back optimization: {ActionType} due to performance degradation", action.ActionType);
+
+                // Update ML model with rollback data
+                await UpdateMLModelWithOptimizationResult(action, false);
                 
                 RecordAuditTrail(new OptimizationAction
                 {
@@ -381,7 +389,7 @@ namespace XPlain.Services
             }
         }
 
-        private void UpdateOptimizationStrategy(OptimizationAction action, bool wasSuccessful)
+        private async Task UpdateOptimizationStrategy(OptimizationAction action, bool wasSuccessful)
         {
             var key = $"{action.ActionType}_{action.Trigger}";
             if (!_optimizationStrategies.ContainsKey(key))
@@ -410,6 +418,74 @@ namespace XPlain.Services
             {
                 strategy.History.RemoveAt(0);
             }
+
+            // Update ML model with optimization outcome
+            await UpdateMLModelWithOptimizationResult(action, wasSuccessful);
+        }
+
+        private async Task UpdateMLModelWithOptimizationResult(OptimizationAction action, bool wasSuccessful)
+        {
+            try
+            {
+                // Create training data from optimization outcome
+                var trainingData = new MLModelTrainingData
+                {
+                    Timestamp = action.Timestamp,
+                    ActionType = action.ActionType,
+                    MetricsBefore = action.MetricsBefore,
+                    MetricsAfter = action.MetricsAfter,
+                    WasSuccessful = wasSuccessful,
+                    OptimizationImpact = CalculateOptimizationImpact(action),
+                    Context = new OptimizationContext
+                    {
+                        CacheSize = await _cacheProvider.GetCacheSizeAsync(),
+                        EvictionPolicy = await _cacheProvider.GetEvictionPolicyAsync(),
+                        WorkloadCharacteristics = await _monitoringService.GetWorkloadCharacteristicsAsync()
+                    }
+                };
+
+                // Add to training dataset
+                await _modelTrainingService.AddTrainingDataAsync(trainingData);
+
+                // If we have enough new data, retrain the model
+                if (ShouldRetrainModel(action.ActionType))
+                {
+                    await _modelTrainingService.TrainModelAsync(action.ActionType);
+                    _logger.LogInformation("Retrained ML model for {ActionType} based on optimization outcomes", action.ActionType);
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error updating ML model with optimization result");
+            }
+        }
+
+        private double CalculateOptimizationImpact(OptimizationAction action)
+        {
+            double impact = 0;
+            foreach (var (metric, valueBefore) in action.MetricsBefore)
+            {
+                if (!action.MetricsAfter.ContainsKey(metric)) continue;
+
+                var valueAfter = action.MetricsAfter[metric];
+                impact += metric.ToLower() switch
+                {
+                    "cachehitrate" => (valueAfter - valueBefore) / valueBefore,
+                    "memoryusage" => (valueBefore - valueAfter) / valueBefore, // Lower is better
+                    "averageresponsetime" => (valueBefore - valueAfter) / valueBefore, // Lower is better
+                    _ => 0
+                };
+            }
+            return impact / action.MetricsBefore.Count; // Average impact across all metrics
+        }
+
+        private bool ShouldRetrainModel(string actionType)
+        {
+            if (!_optimizationStrategies.ContainsKey(actionType)) return false;
+            
+            var strategy = _optimizationStrategies[actionType];
+            // Retrain after every 10 new optimization attempts
+            return strategy.TotalAttempts % 10 == 0;
         }
 
         private void RecordAuditTrail(OptimizationAction action)
