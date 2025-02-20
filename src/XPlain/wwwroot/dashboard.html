@@ -1,331 +1,96 @@
 <!DOCTYPE html>
-<html lang="en">
+<html>
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Cache Monitoring Dashboard</title>
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <style>
-        .chart-container {
-            width: 45%;
-            margin: 15px;
-            padding: 10px;
-            border: 1px solid #ddd;
-            border-radius: 5px;
+        body {
+            font-family: Arial, sans-serif;
+            margin: 20px;
+            background: #f5f5f5;
         }
-        .confidence-gauge {
-            width: 150px;
-            height: 150px;
-            margin: 10px;
-            display: inline-block;
+        .container {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 20px;
         }
-        .prediction-legend {
-            padding: 15px;
-            border-left: 1px solid #ddd;
-        }
-        .confidence-level {
-            padding: 8px;
-            margin: 5px 0;
-            border-radius: 4px;
-        }
-        .confidence-level.high {
-            background-color: rgba(75, 192, 192, 0.2);
-            border: 1px solid rgba(75, 192, 192, 1);
-        }
-        .confidence-level.medium {
-            background-color: rgba(255, 206, 86, 0.2);
-            border: 1px solid rgba(255, 206, 86, 1);
-        }
-        .confidence-level.low {
-            background-color: rgba(255, 99, 132, 0.2);
-            border: 1px solid rgba(255, 99, 132, 1);
-        }
-
-        .confidence-indicator {
-            padding: 15px;
-            margin: 10px;
+        .panel {
+            background: white;
+            padding: 20px;
             border-radius: 8px;
             box-shadow: 0 2px 4px rgba(0,0,0,0.1);
         }
-
-        .confidence-indicator.high {
-            background-color: rgba(75, 192, 192, 0.1);
-            border: 1px solid rgba(75, 192, 192, 0.5);
-        }
-
-        .confidence-indicator.medium {
-            background-color: rgba(255, 206, 86, 0.1);
-            border: 1px solid rgba(255, 206, 86, 0.5);
-        }
-
-        .confidence-indicator.low {
-            background-color: rgba(255, 99, 132, 0.1);
-            border: 1px solid rgba(255, 99, 132, 0.5);
-        }
-
-        .confidence-gauge {
-            height: 8px;
-            background-color: rgba(0,0,0,0.1);
+        .alert {
+            padding: 10px;
+            margin: 5px 0;
             border-radius: 4px;
+        }
+        .alert.critical { background: #ffebee; }
+        .alert.warning { background: #fff3e0; }
+        .alert.info { background: #e3f2fd; }
+        .health-status {
+            padding: 10px;
+            border-radius: 4px;
+            text-align: center;
+            font-weight: bold;
+        }
+        .health-status.healthy { background: #c8e6c9; }
+        .health-status.warning { background: #fff3e0; }
+        .health-status.unhealthy { background: #ffebee; }
+        .optimization-action, .strategy-success, .recent-action {
+            padding: 10px;
+            margin: 5px 0;
+            border-radius: 4px;
+            background: #f5f5f5;
+        }
+        .recent-action.success { background: #c8e6c9; }
+        .recent-action.failure { background: #ffebee; }
+        .emergency-override {
+            padding: 10px;
             margin: 10px 0;
-            overflow: hidden;
+            border-radius: 4px;
         }
-
-        .gauge-fill {
-            height: 100%;
-            background-color: currentColor;
-            transition: width 0.3s ease;
+        .emergency-override.active {
+            background: #ffebee;
+            color: #d32f2f;
         }
-
-        .confidence-details {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            margin-top: 5px;
+        .emergency-override button {
+            margin-left: 10px;
+            padding: 5px 10px;
+            border-radius: 4px;
+            border: none;
+            cursor: pointer;
         }
-
-        .confidence-value {
-            font-size: 1.2em;
-            font-weight: bold;
+        .emergency-override.active button {
+            background: #d32f2f;
+            color: white;
         }
-
-        .confidence-label {
-            color: #666;
-        }
-
-        .pattern-info {
-            margin-top: 10px;
-            padding-top: 10px;
-            border-top: 1px solid rgba(0,0,0,0.1);
-            font-size: 0.9em;
-        }
-
-        .pattern-type {
-            display: block;
-            font-weight: bold;
-            margin-bottom: 3px;
-        }
-
-        .pattern-time {
-            color: #666;
-        }
-
-        #metrics-container {
-            margin-top: 30px;
-        }
-        .trend-card {
-            background: #f8f9fa;
-            border-radius: 5px;
-            padding: 15px;
-            margin: 10px;
-        }
-        #metrics-container {
-            display: flex;
-            flex-wrap: wrap;
-            justify-content: space-around;
-        }
-        #trend-analysis {
-            display: flex;
-            flex-wrap: wrap;
-            justify-content: space-around;
-            margin-top: 20px;
+        .rollback {
+            color: #d32f2f;
+            font-style: italic;
+            margin-left: 10px;
         }
     </style>
 </head>
 <body>
-    <div class="container-fluid">
-        <div class="row">
-            <div class="col-12">
-                <h1 class="text-center my-4">Cache Monitoring Dashboard</h1>
-            </div>
+    <h1>Cache Monitoring Dashboard</h1>
+    <div class="container">
+        <div id="cache-metrics" class="panel">
+            <h3>Cache Metrics</h3>
+            Loading...
         </div>
-
-        <div class="row">
-            <div class="col-12">
-                <div class="card mb-4">
-                    <div class="card-header">
-                        <h3>Predicted Alerts</h3>
-                    </div>
-                    <div class="card-body">
-                        <div id="predicted-alerts"></div>
-                    </div>
-                </div>
-            </div>
+        <div id="cache-health" class="panel">
+            <h3>Cache Health</h3>
+            Loading...
         </div>
-
-        <div class="row">
-            <div class="col-12">
-                <div class="card mb-4">
-                    <div class="card-header">
-                        <h3>Current Alerts</h3>
-                    </div>
-                    <div class="card-body">
-                        <div id="alerts-container"></div>
-                    </div>
-                </div>
-            </div>
+        <div id="cache-alerts" class="panel">
+            <h3>Active Alerts</h3>
+            Loading...
         </div>
-
-        <div class="row">
-            <div class="col-12">
-                <div class="card mb-4">
-                    <div class="card-header">
-                        <h3>Metrics and Predictions</h3>
-                        <button class="btn btn-sm btn-primary float-end" data-bs-toggle="modal" data-bs-target="#thresholdConfigModal">
-                            Configure Thresholds
-                        </button>
-                    </div>
-                    <div class="card-body">
-                        <div class="row mb-4">
-                            <div class="col-12" id="confidence-indicators"></div>
-                        </div>
-                        <div class="row mb-4">
-                            <div class="col-12">
-                                <div class="alert alert-info">
-                                    <i class="fas fa-info-circle"></i>
-                                    Predictions shown with confidence intervals.
-                                    Dashed lines represent predicted values.
-                                    Shaded areas show confidence ranges.
-                                </div>
-                            </div>
-                        </div>
-                        <div id="metrics-container"></div>
-                    </div>
-                </div>
-            </div>
-        </div>
-
-        <div class="row">
-            <div class="col-12">
-                <div class="card mb-4">
-                    <div class="card-header">
-                        <h3>Trend Analysis</h3>
-                    </div>
-                    <div class="card-body">
-                        <div id="trend-analysis"></div>
-                    </div>
-                </div>
-            </div>
-        </div>
-
-        <div class="row">
-            <div class="col-12">
-                <div class="card mb-4">
-                    <div class="card-header">
-                        <h3>Automatic Mitigation Status</h3>
-                    </div>
-                    <div class="card-body">
-                        <div id="mitigation-status"></div>
-                        <div class="mt-4">
-                            <h4>Mitigation Thresholds</h4>
-                            <form id="threshold-form" class="mt-3">
-                                <div class="row g-3">
-                                    <div class="col-md-4">
-                                        <label for="minHitRatio" class="form-label">Minimum Hit Ratio</label>
-                                        <input type="number" class="form-control" id="minHitRatio" step="0.01" min="0" max="1">
-                                    </div>
-                                    <div class="col-md-4">
-                                        <label for="maxMemoryUsage" class="form-label">Max Memory Usage (MB)</label>
-                                        <input type="number" class="form-control" id="maxMemoryUsage" min="0">
-                                    </div>
-                                    <div class="col-md-4">
-                                        <label for="maxResponseTime" class="form-label">Max Response Time (ms)</label>
-                                        <input type="number" class="form-control" id="maxResponseTime" min="0">
-                                    </div>
-                                </div>
-                                <button type="submit" class="btn btn-primary mt-3">Update Thresholds</button>
-                            </form>
-                        </div>
-                    </div>
-                </div>
-            </div>
+        <div id="optimization-metrics" class="panel">
+            <h3>Optimization Metrics</h3>
+            Loading...
         </div>
     </div>
-
-    <!-- Threshold Configuration Modal -->
-    <div class="modal fade" id="thresholdConfigModal" tabindex="-1">
-        <div class="modal-dialog modal-lg">
-            <div class="modal-content">
-                <div class="modal-header">
-                    <h5 class="modal-title">Configure Warning Thresholds</h5>
-                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
-                </div>
-                <div class="modal-body">
-                    <form id="thresholdConfigForm">
-                        <div class="mb-4">
-                            <h6>Cache Hit Rate</h6>
-                            <div class="row g-3">
-                                <div class="col-md-4">
-                                    <label class="form-label">Warning Threshold</label>
-                                    <input type="number" class="form-control" name="CacheHitRate.warning" 
-                                           min="0" max="1" step="0.05">
-                                </div>
-                                <div class="col-md-4">
-                                    <label class="form-label">Critical Threshold</label>
-                                    <input type="number" class="form-control" name="CacheHitRate.critical" 
-                                           min="0" max="1" step="0.05">
-                                </div>
-                                <div class="col-md-4">
-                                    <label class="form-label">Min Confidence</label>
-                                    <input type="number" class="form-control" name="CacheHitRate.confidence" 
-                                           min="0" max="1" step="0.05">
-                                </div>
-                            </div>
-                        </div>
-
-                        <div class="mb-4">
-                            <h6>Memory Usage (MB)</h6>
-                            <div class="row g-3">
-                                <div class="col-md-4">
-                                    <label class="form-label">Warning Threshold</label>
-                                    <input type="number" class="form-control" name="MemoryUsage.warning" 
-                                           min="0" step="50">
-                                </div>
-                                <div class="col-md-4">
-                                    <label class="form-label">Critical Threshold</label>
-                                    <input type="number" class="form-control" name="MemoryUsage.critical" 
-                                           min="0" step="50">
-                                </div>
-                                <div class="col-md-4">
-                                    <label class="form-label">Min Confidence</label>
-                                    <input type="number" class="form-control" name="MemoryUsage.confidence" 
-                                           min="0" max="1" step="0.05">
-                                </div>
-                            </div>
-                        </div>
-
-                        <div class="mb-4">
-                            <h6>Average Response Time (ms)</h6>
-                            <div class="row g-3">
-                                <div class="col-md-4">
-                                    <label class="form-label">Warning Threshold</label>
-                                    <input type="number" class="form-control" name="AverageResponseTime.warning" 
-                                           min="0" step="10">
-                                </div>
-                                <div class="col-md-4">
-                                    <label class="form-label">Critical Threshold</label>
-                                    <input type="number" class="form-control" name="AverageResponseTime.critical" 
-                                           min="0" step="10">
-                                </div>
-                                <div class="col-md-4">
-                                    <label class="form-label">Min Confidence</label>
-                                    <input type="number" class="form-control" name="AverageResponseTime.confidence" 
-                                           min="0" max="1" step="0.05">
-                                </div>
-                            </div>
-                        </div>
-                    </form>
-                </div>
-                <div class="modal-footer">
-                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
-                    <button type="button" class="btn btn-primary" id="saveThresholds">Save Changes</button>
-                </div>
-            </div>
-        </div>
-    </div>
-
-    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"></script>
     <script src="js/dashboard.js"></script>
 </body>
 </html>
