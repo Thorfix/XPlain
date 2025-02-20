@@ -13,16 +13,23 @@ namespace XPlain.Services
         private readonly MLContext _mlContext;
         private readonly ILogger<MLPredictionService> _logger;
         private readonly MLModelTrainingService _trainingService;
+        private readonly MLModelValidationService _validationService;
         private ITransformer? _model;
         private ModelVersion? _activeVersion;
+        private Dictionary<string, ITransformer> _shadowModels;
+        private bool _shadowModeEnabled;
 
         public MLPredictionService(
             ILogger<MLPredictionService> logger,
-            MLModelTrainingService trainingService)
+            MLModelTrainingService trainingService,
+            MLModelValidationService validationService)
         {
             _mlContext = new MLContext(seed: 1);
             _logger = logger;
             _trainingService = trainingService;
+            _validationService = validationService;
+            _shadowModels = new Dictionary<string, ITransformer>();
+            _shadowModeEnabled = false;
         }
 
         public async Task<double> PredictQueryValueAsync(string key)
@@ -46,10 +53,33 @@ namespace XPlain.Services
                 };
 
                 var predictionEngine = _mlContext.Model.CreatePredictionEngine<QueryPredictionData, QueryPrediction>(_model);
+                // Get prediction from main model
                 var prediction = predictionEngine.Predict(data);
+                var predictedValue = prediction.PredictedValue;
 
-                _logger.LogDebug("ML prediction for key {Key}: {Value}", key, prediction.PredictedValue);
-                return prediction.PredictedValue;
+                // If shadow mode is enabled, get predictions from shadow models
+                if (_shadowModeEnabled)
+                {
+                    foreach (var (modelId, shadowModel) in _shadowModels)
+                    {
+                        var features = new Dictionary<string, object>
+                        {
+                            { "Frequency", data.Frequency },
+                            { "HourOfDay", data.HourOfDay },
+                            { "DayOfWeek", data.DayOfWeek },
+                            { "ResponseTime", data.ResponseTime },
+                            { "CacheHitRate", data.CacheHitRate }
+                        };
+
+                        await _validationService.ComparePredictionAsync(modelId, key, predictedValue, features);
+                    }
+
+                    // Check if any shadow models should be promoted or rolled back
+                    await CheckShadowModelsAsync();
+                }
+
+                _logger.LogDebug("ML prediction for key {Key}: {Value}", key, predictedValue);
+                return predictedValue;
             }
             catch (Exception ex)
             {
@@ -118,7 +148,7 @@ namespace XPlain.Services
             }
         }
 
-        public async Task UpdateModelAsync(string modelVersionId)
+        public async Task UpdateModelAsync(string modelVersionId, bool useShadowMode = true)
         {
             try
             {
@@ -128,10 +158,40 @@ namespace XPlain.Services
                     throw new InvalidOperationException($"Model version {modelVersionId} not found");
                 }
 
-                // Load the trained model
-                _model = await Task.Run(() => _mlContext.Model.Load(version.FilePath, out var _));
-                _activeVersion = version;
-                _logger.LogInformation("Successfully loaded ML model version {Version}", modelVersionId);
+                var newModel = await Task.Run(() => _mlContext.Model.Load(version.FilePath, out var _));
+
+                // If shadow mode is enabled, validate the model first
+                if (useShadowMode)
+                {
+                    var testData = await _trainingService.GetTestDataAsync();
+                    var metrics = await _validationService.ValidateModelAsync(newModel, testData);
+
+                    if (metrics.Accuracy < 0.9 || metrics.F1Score < 0.85)
+                    {
+                        _logger.LogWarning(
+                            "Model version {Version} failed validation: Accuracy={Accuracy}, F1={F1}",
+                            modelVersionId, metrics.Accuracy, metrics.F1Score);
+                        throw new InvalidOperationException("Model failed validation checks");
+                    }
+
+                    // Start shadow deployment
+                    await _validationService.StartShadowDeploymentAsync(modelVersionId, newModel);
+                    _shadowModels[modelVersionId] = newModel;
+                    _shadowModeEnabled = true;
+
+                    _logger.LogInformation(
+                        "Started shadow deployment for model version {Version}",
+                        modelVersionId);
+                }
+                else
+                {
+                    // Direct deployment
+                    _model = newModel;
+                    _activeVersion = version;
+                    _logger.LogInformation(
+                        "Successfully loaded ML model version {Version}",
+                        modelVersionId);
+                }
             }
             catch (Exception ex)
             {
@@ -143,6 +203,41 @@ namespace XPlain.Services
         public async Task<ModelVersion?> GetActiveModelVersion()
         {
             return _activeVersion;
+        }
+
+        private async Task CheckShadowModelsAsync()
+        {
+            foreach (var (modelId, shadowModel) in _shadowModels.ToList())
+            {
+                // Check if shadow model should be promoted
+                if (await _validationService.ShouldPromoteModelAsync(modelId))
+                {
+                    _logger.LogInformation("Promoting shadow model {ModelId} to production", modelId);
+                    _model = shadowModel;
+                    _shadowModels.Remove(modelId);
+                    await _validationService.StopShadowDeploymentAsync(modelId);
+
+                    // Update active version
+                    var version = await _trainingService.GetModelVersion(modelId);
+                    if (version != null)
+                    {
+                        _activeVersion = version;
+                    }
+                }
+                // Check if shadow model should be rolled back
+                else if (await _validationService.ShouldRollbackModelAsync(modelId))
+                {
+                    _logger.LogWarning("Rolling back shadow model {ModelId}", modelId);
+                    _shadowModels.Remove(modelId);
+                    await _validationService.StopShadowDeploymentAsync(modelId);
+                }
+            }
+
+            // Disable shadow mode if no models are being tested
+            if (!_shadowModels.Any())
+            {
+                _shadowModeEnabled = false;
+            }
         }
 
         public async Task<bool> FallbackToPreviousVersion()
