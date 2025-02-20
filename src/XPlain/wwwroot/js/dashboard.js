@@ -1,6 +1,7 @@
 let currentMetrics = {};
 let metricsCharts = {};
 let updateInterval;
+let currentPredictions = {};
 
 function initializeDashboard() {
     setupChartContainers();
@@ -162,14 +163,14 @@ function initializeChart(metric) {
     metricsCharts[metric] = new Chart(ctx, {
         type: 'line',
         data: {
-            labels: [],
             datasets: [
                 {
                     label: `${formatMetricName(metric)} (Actual)`,
                     data: [],
                     borderColor: metricColor,
                     tension: 0.1,
-                    fill: false
+                    fill: false,
+                    order: 1
                 },
                 {
                     label: `${formatMetricName(metric)} (Predicted)`,
@@ -177,21 +178,40 @@ function initializeChart(metric) {
                     borderColor: adjustColor(metricColor, 0.6),
                     borderDash: [5, 5],
                     tension: 0.1,
-                    fill: false
+                    fill: false,
+                    order: 2
                 },
                 {
-                    label: 'Confidence Interval (Upper)',
+                    label: 'Confidence Interval',
                     data: [],
                     borderColor: 'transparent',
                     backgroundColor: adjustColor(metricColor, 0.2),
-                    fill: '+1'
+                    fill: '+1',
+                    order: 3
                 },
                 {
-                    label: 'Confidence Interval (Lower)',
+                    label: 'Confidence Interval',
                     data: [],
                     borderColor: 'transparent',
                     backgroundColor: adjustColor(metricColor, 0.2),
-                    fill: false
+                    fill: '-1',
+                    order: 3
+                },
+                {
+                    label: 'Warning Threshold',
+                    data: [],
+                    borderColor: 'rgba(255, 206, 86, 1)',
+                    borderDash: [5, 5],
+                    fill: false,
+                    order: 4
+                },
+                {
+                    label: 'Critical Threshold',
+                    data: [],
+                    borderColor: 'rgba(255, 99, 132, 1)',
+                    borderDash: [5, 5],
+                    fill: false,
+                    order: 4
                 }
             ]
         },
@@ -250,24 +270,56 @@ function updateMetricsDisplay(metrics) {
             const chart = metricsCharts[metric];
             const now = new Date().toLocaleTimeString();
             
-            // Add actual value
-            chart.data.labels.push(now);
-            chart.data.datasets[0].data.push(value);
+            // Actual value data
+            const actualData = {
+                x: now,
+                y: value
+            };
+            chart.data.datasets[0].data.push(actualData);
 
-            // Add prediction line and confidence interval if available
+            // Add prediction if available
             if (currentPredictions[metric]) {
                 const prediction = currentPredictions[metric];
                 const confidenceRange = calculateConfidenceRange(prediction);
                 
-                chart.data.datasets[1].data.push(prediction.value);
-                chart.data.datasets[2].data.push(confidenceRange.upper);
-                chart.data.datasets[3].data.push(confidenceRange.lower);
+                // Predicted value data
+                const predictedData = {
+                    x: now,
+                    y: prediction.value
+                };
+                chart.data.datasets[1].data.push(predictedData);
+
+                // Confidence interval upper bound
+                const upperBoundData = {
+                    x: now,
+                    y: confidenceRange.upper
+                };
+                chart.data.datasets[2].data.push(upperBoundData);
+
+                // Confidence interval lower bound
+                const lowerBoundData = {
+                    x: now,
+                    y: confidenceRange.lower
+                };
+                chart.data.datasets[3].data.push(lowerBoundData);
+
+                // Add warning threshold line
+                const threshold = chart.data.datasets[4];
+                threshold.data = chart.data.labels.map(() => prediction.warningThreshold);
+
+                // Add critical threshold line
+                const criticalThreshold = chart.data.datasets[5];
+                criticalThreshold.data = chart.data.labels.map(() => prediction.criticalThreshold);
             }
             
-            // Remove old data points
-            if (chart.data.labels.length > 20) {
-                chart.data.labels.shift();
-                chart.data.datasets.forEach(dataset => dataset.data.shift());
+            // Remove old data points to maintain rolling window
+            const maxDataPoints = 20;
+            if (chart.data.datasets[0].data.length > maxDataPoints) {
+                chart.data.datasets.forEach(dataset => {
+                    if (dataset.data.length > maxDataPoints) {
+                        dataset.data.shift();
+                    }
+                });
             }
             
             chart.update();
@@ -319,38 +371,23 @@ function updateConfidenceIndicators() {
 }
 
 function updatePredictionCharts(predictions) {
+    currentPredictions = predictions;
+
     Object.entries(predictions).forEach(([metric, prediction]) => {
-        const chartElement = document.getElementById(`${metric}-prediction-chart`);
-        if (!chartElement) return;
-
-        const data = {
-            labels: ['Current', 'Predicted'],
-            datasets: [{
-                label: metric,
-                data: [currentMetrics[metric], prediction.value],
-                backgroundColor: ['rgba(75, 192, 192, 0.2)', 'rgba(255, 159, 64, 0.2)'],
-                borderColor: ['rgba(75, 192, 192, 1)', 'rgba(255, 159, 64, 1)'],
-                borderWidth: 1
-            }]
-        };
-
-        new Chart(chartElement, {
-            type: 'bar',
-            data: data,
-            options: {
-                plugins: {
-                    title: {
-                        display: true,
-                        text: `${metric} Prediction (Confidence: ${(prediction.confidence * 100).toFixed(1)}%)`
-                    }
-                },
-                scales: {
-                    y: {
-                        beginAtZero: true
-                    }
-                }
-            }
-        });
+        if (metricsCharts[metric]) {
+            const chart = metricsCharts[metric];
+            
+            // Update thresholds based on prediction confidence
+            const confidence = prediction.confidence;
+            const warningOpacity = Math.min(0.3 + confidence * 0.7, 1);
+            const criticalOpacity = Math.min(0.3 + confidence * 0.7, 1);
+            
+            chart.data.datasets[4].borderColor = `rgba(255, 206, 86, ${warningOpacity})`;
+            chart.data.datasets[5].borderColor = `rgba(255, 99, 132, ${criticalOpacity})`;
+            
+            // Update the visualization
+            chart.update();
+        }
     });
 }
 
