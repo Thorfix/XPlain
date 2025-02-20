@@ -1,0 +1,110 @@
+name: Load Testing
+
+on:
+  workflow_dispatch:
+    inputs:
+      testProfile:
+        description: 'Load test profile to run'
+        required: true
+        default: 'LowLoad'
+        type: choice
+        options:
+          - LowLoad
+          - MediumLoad
+          - HighLoad
+          - StressTest
+      duration:
+        description: 'Test duration in minutes'
+        required: true
+        default: '30'
+        type: number
+  schedule:
+    - cron: '0 */6 * * *'  # Run every 6 hours
+  push:
+    branches: [ main ]
+    paths:
+      - 'src/XPlain/Services/**'
+      - 'src/XPlain/Controllers/**'
+
+jobs:
+  load-test:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v2
+
+    - name: Setup .NET
+      uses: actions/setup-dotnet@v1
+      with:
+        dotnet-version: '8.0.x'
+
+    - name: Build
+      run: dotnet build
+
+    - name: Start Application
+      run: |
+        dotnet run --project src/XPlain/XPlain.csproj &
+        sleep 30  # Wait for application to start
+
+    - name: Run Load Tests
+      run: |
+        # Get test profile from input or use default for scheduled runs
+        PROFILE="${{ github.event.inputs.testProfile || 'MediumLoad' }}"
+        DURATION="${{ github.event.inputs.duration || 30 }}"
+        
+        # Start load test
+        curl -X POST "http://localhost:5000/api/loadtest/start" \
+          -H "Content-Type: application/json" \
+          -d "{\"scenarioType\":\"CachePerformance\",\"profileName\":\"$PROFILE\",\"durationMinutes\":$DURATION}"
+        
+        # Wait for test to complete
+        sleep $(($DURATION * 60))
+        
+        # Get test report
+        curl "http://localhost:5000/api/loadtest/report" \
+          -H "Accept: application/json" \
+          --output loadtest-report.json
+
+    - name: Stop Load Test
+      run: |
+        curl -X POST "http://localhost:5000/api/loadtest/stop"
+
+    - name: Analyze Results
+      run: |
+        # Check if test results meet performance criteria
+        ERRORS=$(jq '.performance.errorRate' loadtest-report.json)
+        RESPONSE_TIME=$(jq '.performance.averageResponseTime' loadtest-report.json)
+        CACHE_HIT_RATE=$(jq '.performance.cacheHitRate' loadtest-report.json)
+        
+        if (( $(echo "$ERRORS > 0.05" | bc -l) )); then
+          echo "Error rate too high: $ERRORS"
+          exit 1
+        fi
+        
+        if (( $(echo "$RESPONSE_TIME > 1000" | bc -l) )); then
+          echo "Response time too high: $RESPONSE_TIME ms"
+          exit 1
+        fi
+        
+        if (( $(echo "$CACHE_HIT_RATE < 0.7" | bc -l) )); then
+          echo "Cache hit rate too low: $CACHE_HIT_RATE"
+          exit 1
+        fi
+
+    - name: Upload Test Report
+      uses: actions/upload-artifact@v2
+      with:
+        name: load-test-report
+        path: loadtest-report.json
+
+    - name: Notify on Failure
+      if: failure()
+      uses: actions/github-script@v6
+      with:
+        script: |
+          const issue = await github.rest.issues.create({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            title: 'Load Test Failure',
+            body: 'Load test failed. Check the workflow run for details: ' + context.serverUrl + '/' + context.repo.owner + '/' + context.repo.repo + '/actions/runs/' + context.runId
+          });

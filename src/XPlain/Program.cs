@@ -1037,6 +1037,10 @@ file class Program
             services.AddSingleton<MLPredictionService>();
             services.AddSingleton<IAutomaticCacheOptimizer, AutomaticCacheOptimizer>();
             
+            // Add load testing services
+            services.AddSingleton<LoadTestEngine>();
+            services.AddScoped<CachePerformanceScenario>();
+            
             // Configure settings
             var llmSettings = new LLMSettings();
             configuration.GetSection("LLM").Bind(llmSettings);

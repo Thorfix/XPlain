@@ -1,96 +1,170 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
-    <title>Cache Monitoring Dashboard</title>
-    <style>
-        body {
-            font-family: Arial, sans-serif;
-            margin: 20px;
-            background: #f5f5f5;
-        }
-        .container {
-            display: grid;
-            grid-template-columns: repeat(2, 1fr);
-            gap: 20px;
-        }
-        .panel {
-            background: white;
-            padding: 20px;
-            border-radius: 8px;
-            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-        }
-        .alert {
-            padding: 10px;
-            margin: 5px 0;
-            border-radius: 4px;
-        }
-        .alert.critical { background: #ffebee; }
-        .alert.warning { background: #fff3e0; }
-        .alert.info { background: #e3f2fd; }
-        .health-status {
-            padding: 10px;
-            border-radius: 4px;
-            text-align: center;
-            font-weight: bold;
-        }
-        .health-status.healthy { background: #c8e6c9; }
-        .health-status.warning { background: #fff3e0; }
-        .health-status.unhealthy { background: #ffebee; }
-        .optimization-action, .strategy-success, .recent-action {
-            padding: 10px;
-            margin: 5px 0;
-            border-radius: 4px;
-            background: #f5f5f5;
-        }
-        .recent-action.success { background: #c8e6c9; }
-        .recent-action.failure { background: #ffebee; }
-        .emergency-override {
-            padding: 10px;
-            margin: 10px 0;
-            border-radius: 4px;
-        }
-        .emergency-override.active {
-            background: #ffebee;
-            color: #d32f2f;
-        }
-        .emergency-override button {
-            margin-left: 10px;
-            padding: 5px 10px;
-            border-radius: 4px;
-            border: none;
-            cursor: pointer;
-        }
-        .emergency-override.active button {
-            background: #d32f2f;
-            color: white;
-        }
-        .rollback {
-            color: #d32f2f;
-            font-style: italic;
-            margin-left: 10px;
-        }
-    </style>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>XPlain Dashboard</title>
+    <link rel="stylesheet" href="css/styles.css">
+    <script src="js/chart.js"></script>
+    <script src="js/signalr/signalr.min.js"></script>
+    <script src="js/loadtest-metrics.js"></script>
 </head>
 <body>
-    <h1>Cache Monitoring Dashboard</h1>
-    <div class="container">
-        <div id="cache-metrics" class="panel">
-            <h3>Cache Metrics</h3>
-            Loading...
+    <div class="dashboard-container">
+        <header>
+            <h1>XPlain Monitoring Dashboard</h1>
+        </header>
+
+        <section class="metrics-section">
+            <h2>Cache Performance Metrics</h2>
+            <div class="metrics-grid">
+                <div class="metric-card">
+                    <h3>Cache Hit Rate</h3>
+                    <div id="cacheHitRate">-</div>
+                </div>
+                <div class="metric-card">
+                    <h3>Response Time</h3>
+                    <div id="responseTime">-</div>
+                </div>
+                <div class="metric-card">
+                    <h3>Memory Usage</h3>
+                    <div id="memoryUsage">-</div>
+                </div>
+                <div class="metric-card">
+                    <h3>ML Prediction Accuracy</h3>
+                    <div id="predictionAccuracy">-</div>
+                </div>
+            </div>
+        </section>
+
+        <section class="load-test-section">
+            <h2>Load Test Control</h2>
+            <div class="load-test-controls">
+                <select id="testProfile"></select>
+                <button id="startTest">Start Test</button>
+                <button id="stopTest">Stop Test</button>
+                <button id="generateReport">Generate Report</button>
+            </div>
+
+            <div class="metrics-grid">
+                <div class="metric-card">
+                    <h3>Active Users</h3>
+                    <div id="activeUsers">0</div>
+                </div>
+                <div class="metric-card">
+                    <h3>Avg Response Time</h3>
+                    <div id="avgResponseTime">0ms</div>
+                </div>
+                <div class="metric-card">
+                    <h3>Error Rate</h3>
+                    <div id="errorRate">0%</div>
+                </div>
+                <div class="metric-card">
+                    <h3>Cache Hit Rate</h3>
+                    <div id="cacheHitRate">0%</div>
+                </div>
+                <div class="metric-card">
+                    <h3>Prediction Accuracy</h3>
+                    <div id="predictionAccuracy">0%</div>
+                </div>
+            </div>
+
+            <div class="charts-grid">
+                <div class="chart-container">
+                    <h3>Response Time Distribution</h3>
+                    <canvas id="responseTimeChart"></canvas>
+                </div>
+                <div class="chart-container">
+                    <h3>Cache Performance</h3>
+                    <canvas id="cacheChart"></canvas>
+                </div>
+                <div class="chart-container">
+                    <h3>Traffic Pattern</h3>
+                    <canvas id="trafficChart"></canvas>
+                </div>
+                <div class="chart-container">
+                    <h3>System Load</h3>
+                    <canvas id="systemChart"></canvas>
+                </div>
+            </div>
+        </section>
+
+        <div id="reportModal" class="modal">
+            <div class="modal-content">
+                <span class="close">&times;</span>
+                <div id="reportContent"></div>
+            </div>
         </div>
-        <div id="cache-health" class="panel">
-            <h3>Cache Health</h3>
-            Loading...
-        </div>
-        <div id="cache-alerts" class="panel">
-            <h3>Active Alerts</h3>
-            Loading...
-        </div>
-        <div id="optimization-metrics" class="panel">
-            <h3>Optimization Metrics</h3>
-            Loading...
-        </div>
+
+        <div id="notifications" class="notifications-container"></div>
+
+        <section class="alerts-section">
+            <h2>Active Alerts</h2>
+            <div id="alertsList" class="alerts-list">
+                <!-- Alerts will be dynamically inserted here -->
+            </div>
+        </section>
+
+        <section class="stress-test-section">
+            <h2>Stress Testing</h2>
+            <div class="stress-test-controls">
+                <div class="control-group">
+                    <label for="initialUsers">Initial Users:</label>
+                    <input type="number" id="initialUsers" value="10" min="1">
+                </div>
+                <div class="control-group">
+                    <label for="loadIncreaseFactor">Load Increase Factor:</label>
+                    <input type="number" id="loadIncreaseFactor" value="1.5" min="1.1" step="0.1">
+                </div>
+                <div class="control-group">
+                    <label for="stabilityThreshold">Stability Threshold:</label>
+                    <input type="number" id="stabilityThreshold" value="0.2" min="0.1" max="0.5" step="0.1">
+                </div>
+                <button id="startStressTest">Run Stress Test</button>
+            </div>
+
+            <div class="stress-test-results">
+                <div class="summary-stats">
+                    <div class="stat-card">
+                        <h3>Max Stable Users</h3>
+                        <div id="maxUsers">-</div>
+                    </div>
+                    <div class="stat-card">
+                        <h3>Max Cache Items</h3>
+                        <div id="maxCache">-</div>
+                    </div>
+                    <div class="stat-card">
+                        <h3>Max Predictions/s</h3>
+                        <div id="maxPredictions">-</div>
+                    </div>
+                    <div class="stat-card">
+                        <h3>Max Mitigation Load</h3>
+                        <div id="maxMitigation">-</div>
+                    </div>
+                </div>
+
+                <div class="charts-grid">
+                    <div class="chart-container">
+                        <h3>System Boundaries</h3>
+                        <canvas id="boundariesChart"></canvas>
+                    </div>
+                    <div class="chart-container">
+                        <h3>Performance Metrics</h3>
+                        <canvas id="performanceChart"></canvas>
+                    </div>
+                </div>
+
+                <div id="recommendations" class="recommendations-section">
+                    <!-- Recommendations will be inserted here -->
+                </div>
+
+                <div id="stressTestErrors" class="errors-section">
+                    <!-- Errors will be inserted here -->
+                </div>
+            </div>
+        </section>
     </div>
+
     <script src="js/dashboard.js"></script>
 </body>
 </html>
