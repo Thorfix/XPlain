@@ -53,7 +53,10 @@ namespace XPlain.Services
 
         private async Task UpdateDegradationPatterns(string metric, double currentValue)
         {
-            await base.UpdateDegradationPatterns(metric, currentValue);
+            var history = _metricHistory[metric];
+            
+
+
             await AnalyzePrecursorPatterns(metric, currentValue);
         }
 
@@ -278,7 +281,7 @@ namespace XPlain.Services
                 "memoryusage" => currentValue > baseline * 1.2,
                 "averageresponsetime" => currentValue > baseline * 1.5,
                 _ => false
-                DetectedPattern = null
+                _ => false
             };
         }
 
