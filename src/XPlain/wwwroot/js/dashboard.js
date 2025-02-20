@@ -435,4 +435,60 @@ function startRealTimeUpdates() {
     }, 5000);
 }
 
+async function initializeThresholdConfig() {
+    try {
+        const response = await fetch('/api/cache/mitigation/thresholds');
+        const thresholds = await response.json();
+        
+        // Set initial values in the form
+        Object.entries(thresholds).forEach(([metric, config]) => {
+            document.querySelector(`input[name="${metric}.warning"]`).value = config.warningThreshold;
+            document.querySelector(`input[name="${metric}.critical"]`).value = config.criticalThreshold;
+            document.querySelector(`input[name="${metric}.confidence"]`).value = config.minConfidence;
+        });
+    } catch (error) {
+        console.error('Error loading threshold configuration:', error);
+    }
+}
+
+async function saveThresholds() {
+    const form = document.getElementById('thresholdConfigForm');
+    const thresholds = {};
+    
+    ['CacheHitRate', 'MemoryUsage', 'AverageResponseTime'].forEach(metric => {
+        thresholds[metric] = {
+            warningThreshold: parseFloat(form.querySelector(`input[name="${metric}.warning"]`).value),
+            criticalThreshold: parseFloat(form.querySelector(`input[name="${metric}.critical"]`).value),
+            minConfidence: parseFloat(form.querySelector(`input[name="${metric}.confidence"]`).value)
+        };
+    });
+
+    try {
+        await fetch('/api/cache/mitigation/thresholds', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify(thresholds)
+        });
+
+        // Close modal
+        const modal = bootstrap.Modal.getInstance(document.getElementById('thresholdConfigModal'));
+        modal.hide();
+
+        // Refresh dashboard
+        fetchMetrics();
+        fetchPredictions();
+    } catch (error) {
+        console.error('Error saving thresholds:', error);
+        alert('Failed to save thresholds');
+    }
+}
+
+// Initialize threshold configuration when modal is shown
+document.getElementById('thresholdConfigModal').addEventListener('show.bs.modal', initializeThresholdConfig);
+
+// Save thresholds when save button is clicked
+document.getElementById('saveThresholds').addEventListener('click', saveThresholds);
+
 window.addEventListener('load', initializeDashboard);
