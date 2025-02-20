@@ -37,5 +37,8 @@ namespace XPlain.Services
         public int RateLimitErrors { get; init; }
         public DateTime WindowStartTime { get; init; }
         public int RequestsInCurrentWindow { get; init; }
+        public decimal DailyCostIncurred { get; init; }
+        public decimal DailyCostLimit { get; init; }
+        public int RetryAttempts { get; init; }
     }
 }

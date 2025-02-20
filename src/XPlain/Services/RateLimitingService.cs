@@ -3,6 +3,7 @@ using System.Collections.Concurrent;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Options;
+using Microsoft.Extensions.Logging;
 using XPlain.Configuration;
 using System.Collections.Generic;
 using System.Linq;
@@ -13,16 +14,70 @@ namespace XPlain.Services
     {
         private readonly ConcurrentDictionary<string, ProviderRateLimiter> _limiters = new();
         private readonly IOptions<RateLimitSettings> _settings;
+        private readonly ILogger<RateLimitingService> _logger;
+        private readonly ConcurrentDictionary<string, CostTracker> _costTrackers = new();
 
-        public RateLimitingService(IOptions<RateLimitSettings> settings)
+        public RateLimitingService(
+            IOptions<RateLimitSettings> settings,
+            ILogger<RateLimitingService> logger)
         {
             _settings = settings;
+            _logger = logger;
         }
 
         public async Task AcquirePermitAsync(string provider, int priority = 0, CancellationToken cancellationToken = default)
         {
-            var limiter = _limiters.GetOrAdd(provider, key => new ProviderRateLimiter(_settings.Value));
-            await limiter.AcquireAsync(priority, cancellationToken);
+            var settings = GetProviderSettings(provider);
+            var limiter = _limiters.GetOrAdd(provider, key => new ProviderRateLimiter(settings, _logger));
+            var costTracker = _costTrackers.GetOrAdd(provider, key => new CostTracker(settings));
+
+            if (costTracker.WouldExceedDailyLimit())
+            {
+                _logger.LogError($"Daily cost limit would be exceeded for provider {provider}");
+                throw new CostLimitExceededException($"Daily cost limit of ${settings.DailyCostLimit} would be exceeded for provider {provider}");
+            }
+
+            int retryCount = 0;
+            int delayMs = settings.InitialRetryDelayMs;
+
+            while (true)
+            {
+                try
+                {
+                    await limiter.AcquireAsync(priority, cancellationToken);
+                    costTracker.TrackRequest();
+                    return;
+                }
+                catch (RateLimitExceededException) when (retryCount < settings.DefaultRetryCount)
+                {
+                    _logger.LogWarning($"Rate limit exceeded for provider {provider}, attempt {retryCount + 1} of {settings.DefaultRetryCount}");
+                    await Task.Delay(delayMs, cancellationToken);
+                    delayMs = (int)Math.Min(delayMs * settings.RetryBackoffMultiplier, settings.MaxRetryDelayMs);
+                    retryCount++;
+                }
+            }
+        }
+
+        private RateLimitSettings GetProviderSettings(string provider)
+        {
+            var baseSettings = _settings.Value;
+            if (!baseSettings.ProviderSpecificSettings.TryGetValue(provider, out var providerSettings))
+            {
+                return baseSettings;
+            }
+
+            return new RateLimitSettings
+            {
+                RequestsPerWindow = providerSettings.RequestsPerWindow ?? baseSettings.RequestsPerWindow,
+                WindowSeconds = providerSettings.WindowSeconds ?? baseSettings.WindowSeconds,
+                MaxConcurrentRequests = providerSettings.MaxConcurrentRequests ?? baseSettings.MaxConcurrentRequests,
+                DefaultRetryCount = baseSettings.DefaultRetryCount,
+                InitialRetryDelayMs = baseSettings.InitialRetryDelayMs,
+                MaxRetryDelayMs = baseSettings.MaxRetryDelayMs,
+                RetryBackoffMultiplier = baseSettings.RetryBackoffMultiplier,
+                CostPerRequest = providerSettings.CostPerRequest ?? baseSettings.CostPerRequest,
+                DailyCostLimit = providerSettings.DailyCostLimit ?? baseSettings.DailyCostLimit
+            };
         }
 
         public void ReleasePermit(string provider)
@@ -157,5 +212,51 @@ namespace XPlain.Services
     public class RateLimitExceededException : Exception
     {
         public RateLimitExceededException(string message) : base(message) { }
+    }
+
+    public class CostLimitExceededException : Exception
+    {
+        public CostLimitExceededException(string message) : base(message) { }
+    }
+
+    internal class CostTracker
+    {
+        private readonly RateLimitSettings _settings;
+        private decimal _dailyCost;
+        private DateTime _lastReset = DateTime.UtcNow;
+        private readonly object _lock = new();
+
+        public CostTracker(RateLimitSettings settings)
+        {
+            _settings = settings;
+        }
+
+        public bool WouldExceedDailyLimit()
+        {
+            lock (_lock)
+            {
+                CheckAndResetDaily();
+                return _dailyCost + _settings.CostPerRequest > _settings.DailyCostLimit;
+            }
+        }
+
+        public void TrackRequest()
+        {
+            lock (_lock)
+            {
+                CheckAndResetDaily();
+                _dailyCost += _settings.CostPerRequest;
+            }
+        }
+
+        private void CheckAndResetDaily()
+        {
+            var now = DateTime.UtcNow;
+            if (now.Date > _lastReset.Date)
+            {
+                _dailyCost = 0;
+                _lastReset = now;
+            }
+        }
     }
 }
