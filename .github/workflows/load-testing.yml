@@ -18,8 +18,8 @@ on:
         required: true
         default: '30'
         type: number
-  schedule:
-    - cron: '0 */6 * * *'  # Run every 6 hours
+#  schedule:
+#    - cron: '0 */6 * * *'  # Run every 6 hours
   push:
     branches: [ main ]
     paths:
