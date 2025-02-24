@@ -1,82 +1,60 @@
-namespace XPlain.Services;
+using System;
+using System.Threading;
+using System.Threading.Tasks;
 
-public class ProgressIndicator : IDisposable
+namespace XPlain.Services
 {
-    private readonly Timer _timer;
-    private readonly string[] _frames;
-    private int _currentFrame;
-    private bool _isFirst = true;
-    private readonly int _updateIntervalMs;
-    private bool _disposed;
-
-    public ProgressIndicator(int updateIntervalMs = 100)
+    public class ProgressIndicator : IDisposable
     {
-        _updateIntervalMs = updateIntervalMs;
-        _frames = new[] { "⣾", "⣽", "⣻", "⢿", "⡿", "⣟", "⣯", "⣷" };
-        _timer = new Timer(UpdateFrame, null, Timeout.Infinite, Timeout.Infinite);
-    }
+        private readonly string[] _indicators;
+        private readonly int _delay;
+        private readonly CancellationTokenSource _cts;
+        private Task _task;
+        private bool _isDisposed;
 
-    public void Start()
-    {
-        if (_disposed) return;
-        _timer.Change(0, _updateIntervalMs);
-    }
-
-    public void Stop()
-    {
-        if (_disposed) return;
-        _timer.Change(Timeout.Infinite, Timeout.Infinite);
-        ClearLastFrame();
-    }
-
-    private void UpdateFrame(object? state)
-    {
-        if (_disposed || Console.IsOutputRedirected) return;
-
-        try
+        public ProgressIndicator(string[] indicators = null, int delay = 100)
         {
-            if (_isFirst)
+            _indicators = indicators ?? new[] { "⣾", "⣽", "⣻", "⢿", "⡿", "⣟", "⣯", "⣷" };
+            _delay = delay;
+            _cts = new CancellationTokenSource();
+        }
+
+        public void Start()
+        {
+            if (_task != null) return;
+
+            _task = Task.Run(async () =>
             {
-                _isFirst = false;
-                Console.Write(_frames[0]);
-            }
-            else
+                if (Console.IsOutputRedirected) return;
+
+                var index = 0;
+                while (!_cts.Token.IsCancellationRequested)
+                {
+                    var indicator = _indicators[index++ % _indicators.Length];
+                    Console.Write(indicator);
+                    await Task.Delay(_delay, _cts.Token);
+                    Console.Write("\b \b");
+                }
+            });
+        }
+
+        public void Stop()
+        {
+            _cts.Cancel();
+            if (_task != null && !_task.IsCompleted)
             {
-                Console.Write("\b");
-                Console.Write(_frames[_currentFrame]);
+                _task.Wait(500); // Wait for task to complete, but don't wait forever
             }
-
-            _currentFrame = (_currentFrame + 1) % _frames.Length;
+            _task = null;
         }
-        catch
+
+        public void Dispose()
         {
-            // Ignore console errors
-        }
-    }
+            if (_isDisposed) return;
 
-    private void ClearLastFrame()
-    {
-        if (Console.IsOutputRedirected) return;
-
-        try
-        {
-            if (!_isFirst)
-            {
-                Console.Write("\b \b");
-            }
+            Stop();
+            _cts.Dispose();
+            _isDisposed = true;
         }
-        catch
-        {
-            // Ignore console errors
-        }
-    }
-
-    public void Dispose()
-    {
-        if (_disposed) return;
-        
-        _disposed = true;
-        Stop();
-        _timer.Dispose();
     }
 }

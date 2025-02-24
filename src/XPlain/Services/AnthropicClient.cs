@@ -33,11 +33,16 @@ public class AnthropicClient : BaseLLMProvider, IAnthropicClient, IDisposable
     };
 
     public AnthropicClient(
+        ILogger<AnthropicClient> logger,
+        HttpClient httpClient,
         IOptions<AnthropicSettings> settings,
         ICacheProvider cacheProvider,
         IRateLimitingService rateLimitingService,
-        StreamingSettings streamingSettings)
-        : base(cacheProvider, rateLimitingService, streamingSettings)
+        LLMProviderMetrics metrics,
+        IOptions<LLMSettings> llmSettings,
+        IInputValidator inputValidator,
+        IOptions<StreamingSettings> streamingSettings)
+        : base(logger, httpClient, rateLimitingService, metrics, llmSettings, inputValidator)
     {
         _settings = settings.Value;
         _rateLimitingService = rateLimitingService;

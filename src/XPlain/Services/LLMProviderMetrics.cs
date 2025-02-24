@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Concurrent;
+using System.Collections.Generic;
 
 namespace XPlain.Services
 {
@@ -7,68 +8,95 @@ namespace XPlain.Services
     {
         private readonly ConcurrentDictionary<string, ProviderStats> _providerStats = new();
 
-        public void RecordSuccess(string providerName, TimeSpan duration)
+        private class ProviderStats
+        {
+            public long SuccessCount { get; set; }
+            public long FailureCount { get; set; }
+            public List<double> ResponseTimes { get; } = new List<double>();
+            public DateTime LastSuccess { get; set; }
+            public DateTime LastFailure { get; set; }
+        }
+
+        public void RecordSuccess(string providerName, TimeSpan responseTime)
         {
             var stats = _providerStats.GetOrAdd(providerName, _ => new ProviderStats());
-            stats.RecordSuccess(duration);
+            
+            lock (stats)
+            {
+                stats.SuccessCount++;
+                stats.ResponseTimes.Add(responseTime.TotalMilliseconds);
+                stats.LastSuccess = DateTime.UtcNow;
+                
+                // Keep response times history bounded
+                if (stats.ResponseTimes.Count > 1000)
+                {
+                    stats.ResponseTimes.RemoveRange(0, stats.ResponseTimes.Count - 1000);
+                }
+            }
         }
 
         public void RecordFailure(string providerName)
         {
             var stats = _providerStats.GetOrAdd(providerName, _ => new ProviderStats());
-            stats.RecordFailure();
-        }
-
-        public ProviderStats GetStats(string providerName)
-        {
-            return _providerStats.GetOrAdd(providerName, _ => new ProviderStats());
-        }
-    }
-
-    public class ProviderStats
-    {
-        private long _totalRequests;
-        private long _failedRequests;
-        private long _totalDurationTicks;
-        private readonly object _lock = new();
-
-        public void RecordSuccess(TimeSpan duration)
-        {
-            lock (_lock)
+            
+            lock (stats)
             {
-                _totalRequests++;
-                _totalDurationTicks += duration.Ticks;
+                stats.FailureCount++;
+                stats.LastFailure = DateTime.UtcNow;
             }
         }
 
-        public void RecordFailure()
+        public Dictionary<string, object> GetMetrics(string providerName)
         {
-            lock (_lock)
+            if (!_providerStats.TryGetValue(providerName, out var stats))
             {
-                _totalRequests++;
-                _failedRequests++;
+                return new Dictionary<string, object>
+                {
+                    ["success_count"] = 0,
+                    ["failure_count"] = 0,
+                    ["success_rate"] = 0,
+                    ["avg_response_time_ms"] = 0,
+                    ["last_success"] = null,
+                    ["last_failure"] = null
+                };
+            }
+
+            lock (stats)
+            {
+                double avgResponseTime = 0;
+                if (stats.ResponseTimes.Count > 0)
+                {
+                    avgResponseTime = stats.ResponseTimes.Average();
+                }
+
+                double successRate = 0;
+                if (stats.SuccessCount + stats.FailureCount > 0)
+                {
+                    successRate = (double)stats.SuccessCount / (stats.SuccessCount + stats.FailureCount);
+                }
+
+                return new Dictionary<string, object>
+                {
+                    ["success_count"] = stats.SuccessCount,
+                    ["failure_count"] = stats.FailureCount,
+                    ["success_rate"] = successRate,
+                    ["avg_response_time_ms"] = avgResponseTime,
+                    ["last_success"] = stats.LastSuccess,
+                    ["last_failure"] = stats.LastFailure
+                };
             }
         }
 
-        public double SuccessRate
+        public Dictionary<string, Dictionary<string, object>> GetAllMetrics()
         {
-            get
+            var result = new Dictionary<string, Dictionary<string, object>>();
+            
+            foreach (var provider in _providerStats.Keys)
             {
-                if (_totalRequests == 0) return 1.0;
-                return 1.0 - ((double)_failedRequests / _totalRequests);
+                result[provider] = GetMetrics(provider);
             }
+            
+            return result;
         }
-
-        public TimeSpan AverageLatency
-        {
-            get
-            {
-                if (_totalRequests == 0) return TimeSpan.Zero;
-                return TimeSpan.FromTicks(_totalDurationTicks / (_totalRequests - _failedRequests));
-            }
-        }
-
-        public long TotalRequests => _totalRequests;
-        public long FailedRequests => _failedRequests;
     }
 }

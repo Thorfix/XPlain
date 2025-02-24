@@ -19,6 +19,7 @@ namespace XPlain.Services
         protected readonly TimeSpan _timeout;
         protected readonly IInputValidator _inputValidator;
 
+        // Original constructor with full parameters
         protected BaseLLMProvider(
             ILogger logger,
             HttpClient httpClient,
@@ -33,6 +34,24 @@ namespace XPlain.Services
             _metrics = metrics ?? throw new ArgumentNullException(nameof(metrics));
             _timeout = TimeSpan.FromSeconds(settings?.Value?.TimeoutSeconds ?? 30);
             _inputValidator = inputValidator ?? throw new ArgumentNullException(nameof(inputValidator));
+            
+            _circuitBreaker = new CircuitBreaker(
+                maxFailures: 3,
+                resetTimeout: TimeSpan.FromMinutes(5));
+        }
+        
+        // Simplified constructor for backward compatibility
+        protected BaseLLMProvider(
+            ICacheProvider cacheProvider,
+            IRateLimitingService rateLimitingService,
+            StreamingSettings streamingSettings)
+        {
+            _logger = new Logger<BaseLLMProvider>(new LoggerFactory());
+            _httpClient = new HttpClient();
+            _rateLimitingService = rateLimitingService ?? throw new ArgumentNullException(nameof(rateLimitingService));
+            _metrics = new LLMProviderMetrics();
+            _timeout = TimeSpan.FromSeconds(30);
+            _inputValidator = new DefaultInputValidator();
             
             _circuitBreaker = new CircuitBreaker(
                 maxFailures: 3,
@@ -53,8 +72,26 @@ namespace XPlain.Services
             var validatedPrompt = await ValidateAndSanitizePromptAsync(prompt);
             return await GetCompletionInternalAsync(validatedPrompt);
         }
+        
+        public async IAsyncEnumerable<string> GetCompletionStreamAsync(string prompt)
+        {
+            // Validate and sanitize the input before passing to the provider
+            var validatedPrompt = await ValidateAndSanitizePromptAsync(prompt);
+            
+            await foreach (var chunk in GetCompletionStreamInternalAsync(validatedPrompt))
+            {
+                yield return chunk;
+            }
+        }
 
         protected abstract Task<string> GetCompletionInternalAsync(string validatedPrompt);
+        
+        protected virtual async IAsyncEnumerable<string> GetCompletionStreamInternalAsync(string validatedPrompt)
+        {
+            // Default implementation for providers that don't support streaming
+            var response = await GetCompletionInternalAsync(validatedPrompt);
+            yield return response;
+        }
 
         protected async Task<string> ValidateAndSanitizePromptAsync(string prompt)
         {

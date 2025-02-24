@@ -1,8 +1,10 @@
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
+using Microsoft.Extensions.Logging;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Mvc;
 using System.CommandLine;
 using System.CommandLine.Parsing;
 using System.ComponentModel;
@@ -1004,6 +1006,25 @@ file class Program
         }
 
 
+        internal static async Task<string> CalculateCodeHashAsync(string codeDirectory)
+        {
+            using var sha256 = System.Security.Cryptography.SHA256.Create();
+            var context = new System.Text.StringBuilder();
+
+            var files = Directory.GetFiles(codeDirectory, "*.*", SearchOption.AllDirectories)
+                .Where(f => Path.GetExtension(f) is ".cs" or ".fs" or ".vb" or ".js" or ".ts" or ".py" or ".java"
+                    or ".cpp" or ".h")
+                .OrderBy(f => f);
+
+            foreach (var file in files)
+            {
+                context.AppendLine(await File.ReadAllTextAsync(file));
+            }
+
+            var hashBytes = sha256.ComputeHash(System.Text.Encoding.UTF8.GetBytes(context.ToString()));
+            return Convert.ToBase64String(hashBytes).Replace("/", "_").Replace("+", "-");
+        }
+
         internal static string BuildCodeContext(string codeDirectory)
         {
             var context = new System.Text.StringBuilder();
@@ -1052,6 +1073,12 @@ file class Program
             services.AddSingleton<ICacheMonitoringService, CacheMonitoringService>();
             services.AddSingleton<ICacheProvider, FileBasedCacheProvider>();
             
+            // Configure streaming settings
+            var streamingSettings = new StreamingSettings();
+            configuration.GetSection("Streaming").Bind(streamingSettings);
+            services.AddSingleton(Options.Create(streamingSettings));
+            services.AddSingleton(streamingSettings);
+            
             // Configure ML model monitoring and alerting
             services.AddSingleton<IModelPerformanceMonitor, ModelPerformanceMonitor>();
             services.AddSingleton<IAutomaticMitigationService, AutomaticMitigationService>();
@@ -1071,6 +1098,7 @@ file class Program
             services.AddSingleton<MetricsCollectionService>();
             services.AddHostedService<MetricsCollectionService>(); // Register as hosted service
             services.AddSingleton<ICacheEventListener>(sp => sp.GetRequiredService<MetricsCollectionService>()); // Register as event listener
+            services.AddSingleton<LLMProviderMetrics>();
             
             // Configure ML model settings
             services.AddSingleton<IMLModelTrainingService, MLModelTrainingService>();

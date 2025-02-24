@@ -1,96 +1,140 @@
-namespace XPlain.Services;
+using System;
+using System.Threading;
 
-public class CircuitBreaker
+namespace XPlain.Services
 {
-    private readonly object _lock = new();
-    private readonly double _failureThreshold;
-    private readonly int _resetTimeoutMs;
-    private CircuitState _state = CircuitState.Closed;
-    private DateTime _lastStateChange = DateTime.UtcNow;
-    private int _totalRequests;
-    private int _failedRequests;
-    private readonly Queue<DateTime> _recentFailures = new();
-
-    public CircuitBreaker(double failureThreshold, int resetTimeoutMs)
+    public enum CircuitState
     {
-        _failureThreshold = failureThreshold;
-        _resetTimeoutMs = resetTimeoutMs;
+        Closed,     // Normal operation - requests flow through
+        Open,       // Failing - requests are blocked
+        HalfOpen    // Testing - limited requests allowed
     }
 
-    public bool CanProcess()
+    public class CircuitBreaker
     {
-        lock (_lock)
-        {
-            CleanupOldFailures();
+        private readonly int _maxFailures;
+        private readonly TimeSpan _resetTimeout;
+        private volatile CircuitState _state = CircuitState.Closed;
+        private int _failureCount;
+        private DateTime _lastStateChange = DateTime.UtcNow;
+        private DateTime _nextRetryTime = DateTime.MaxValue;
+        private readonly object _syncLock = new();
 
-            switch (_state)
+        public CircuitBreaker(
+            int maxFailures = 3, 
+            TimeSpan? resetTimeout = null)
+        {
+            _maxFailures = maxFailures > 0 ? maxFailures : throw new ArgumentOutOfRangeException(nameof(maxFailures));
+            _resetTimeout = resetTimeout ?? TimeSpan.FromMinutes(1);
+        }
+
+        public CircuitBreaker(
+            double failureThreshold = 0.7,
+            int resetTimeoutMs = 30000)
+        {
+            _maxFailures = (int)Math.Max(1, Math.Ceiling(10 * failureThreshold));
+            _resetTimeout = TimeSpan.FromMilliseconds(resetTimeoutMs);
+        }
+
+        public CircuitState CurrentState => _state;
+        public int FailureCount => _failureCount;
+        public DateTime LastStateChange => _lastStateChange;
+        public DateTime NextRetryTime => _nextRetryTime;
+
+        public bool IsAllowed()
+        {
+            return CanProcess();
+        }
+
+        public bool CanProcess()
+        {
+            lock (_syncLock)
             {
-                case CircuitState.Closed:
-                    return true;
-                case CircuitState.Open:
-                    if ((DateTime.UtcNow - _lastStateChange).TotalMilliseconds >= _resetTimeoutMs)
-                    {
-                        _state = CircuitState.HalfOpen;
-                        _lastStateChange = DateTime.UtcNow;
+                switch (_state)
+                {
+                    case CircuitState.Closed:
                         return true;
-                    }
-                    return false;
-                case CircuitState.HalfOpen:
-                    return true;
-                default:
-                    return false;
+
+                    case CircuitState.Open:
+                        if (DateTime.UtcNow >= _nextRetryTime)
+                        {
+                            TransitionToHalfOpen();
+                            return true;
+                        }
+                        return false;
+
+                    case CircuitState.HalfOpen:
+                        return true;
+
+                    default:
+                        return false;
+                }
             }
         }
-    }
 
-    public void RecordSuccess()
-    {
-        lock (_lock)
+        public void RecordSuccess()
         {
-            if (_state == CircuitState.HalfOpen)
+            lock (_syncLock)
             {
-                _state = CircuitState.Closed;
-                _lastStateChange = DateTime.UtcNow;
-                _totalRequests = 0;
-                _failedRequests = 0;
-                _recentFailures.Clear();
+                switch (_state)
+                {
+                    case CircuitState.HalfOpen:
+                        Reset();
+                        break;
+                }
             }
-            _totalRequests++;
         }
-    }
 
-    public void RecordFailure()
-    {
-        lock (_lock)
+        public void RecordFailure()
         {
-            _totalRequests++;
-            _failedRequests++;
-            _recentFailures.Enqueue(DateTime.UtcNow);
-
-            if (_state == CircuitState.HalfOpen ||
-                (_state == CircuitState.Closed && (double)_failedRequests / _totalRequests >= _failureThreshold))
+            lock (_syncLock)
             {
-                _state = CircuitState.Open;
-                _lastStateChange = DateTime.UtcNow;
+                switch (_state)
+                {
+                    case CircuitState.Closed:
+                        _failureCount++;
+                        if (_failureCount >= _maxFailures)
+                        {
+                            TransitionToOpen();
+                        }
+                        break;
+
+                    case CircuitState.HalfOpen:
+                        TransitionToOpen();
+                        break;
+                }
             }
         }
-    }
 
-    private void CleanupOldFailures()
-    {
-        var cutoff = DateTime.UtcNow.AddMilliseconds(-_resetTimeoutMs);
-        while (_recentFailures.Count > 0 && _recentFailures.Peek() < cutoff)
+        public void OnFailure()
         {
-            _recentFailures.Dequeue();
-            if (_failedRequests > 0) _failedRequests--;
-            if (_totalRequests > 0) _totalRequests--;
+            RecordFailure();
         }
-    }
 
-    private enum CircuitState
-    {
-        Closed,
-        Open,
-        HalfOpen
+        public void OnSuccess()
+        {
+            RecordSuccess();
+        }
+
+        private void TransitionToOpen()
+        {
+            _state = CircuitState.Open;
+            _lastStateChange = DateTime.UtcNow;
+            _nextRetryTime = DateTime.UtcNow.Add(_resetTimeout);
+        }
+
+        private void TransitionToHalfOpen()
+        {
+            _state = CircuitState.HalfOpen;
+            _lastStateChange = DateTime.UtcNow;
+        }
+
+        private void Reset()
+        {
+            _state = CircuitState.Closed;
+            _failureCount = 0;
+            _lastStateChange = DateTime.UtcNow;
+            _nextRetryTime = DateTime.MaxValue;
+        }
     }
 }
