@@ -1072,6 +1072,7 @@ file class Program
             services.AddSingleton(Options.Create(cacheSettings));
             services.AddSingleton<ICacheMonitoringService, CacheMonitoringService>();
             services.AddSingleton<ICacheProvider, FileBasedCacheProvider>();
+            services.AddSingleton<LLMProviderMetrics>();
             
             // Configure streaming settings
             var streamingSettings = new StreamingSettings();

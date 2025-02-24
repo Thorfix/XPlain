@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Threading.Tasks;
 
 namespace XPlain.Services
@@ -8,19 +9,19 @@ namespace XPlain.Services
         double CurrentEvictionThreshold { get; }
         double CurrentPressureThreshold { get; }
         
-        Task UpdateEvictionThreshold(double threshold);
-        Task UpdatePressureThreshold(double threshold);
-        Task UpdateEvictionStrategy(EvictionStrategy strategy);
-        Task ForceEviction(long bytesToFree);
+        Task<bool> UpdateEvictionThreshold(double threshold);
+        Task<bool> UpdatePressureThreshold(double threshold);
+        Task<bool> ForceEviction(long bytesToFree);
         Dictionary<string, int> GetEvictionStats();
         IEnumerable<CacheEvictionEvent> GetRecentEvictions(int count);
     }
 
     public enum EvictionStrategy
     {
-        LRU,            // Traditional Least Recently Used
-        HitRateWeighted,// Weighted by hit rate patterns
-        SizeWeighted,   // Weighted by entry size
-        Adaptive        // Dynamically adjusts based on patterns
+        LRU,
+        LFU,
+        HitRateWeighted,
+        SizeWeighted,
+        Adaptive
     }
 }

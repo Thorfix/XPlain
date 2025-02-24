@@ -47,7 +47,31 @@ public class AnthropicClient : BaseLLMProvider, IAnthropicClient, IDisposable
         _settings = settings.Value;
         _rateLimitingService = rateLimitingService;
         
-        _httpClient = new HttpClient(new StreamingHttpHandler(streamingSettings))
+        _httpClient = new HttpClient(new StreamingHttpHandler(streamingSettings.Value))
+        {
+            BaseAddress = new Uri(_settings.ApiEndpoint)
+        };
+        _httpClient.DefaultRequestHeaders.Add("x-api-key", _settings.ApiToken);
+        _httpClient.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
+        _httpClient.DefaultRequestHeaders.Add("anthropic-version", "2023-06-01");
+
+        _circuitBreaker = new CircuitBreaker(
+            _settings.CircuitBreakerFailureThreshold,
+            _settings.CircuitBreakerResetTimeoutMs);
+    }
+
+    // Simplified constructor for backward compatibility
+    public AnthropicClient(
+        ICacheProvider cacheProvider,
+        IRateLimitingService rateLimitingService,
+        IOptions<AnthropicSettings> settings,
+        IOptions<StreamingSettings> streamingSettings)
+        : base(cacheProvider, rateLimitingService, streamingSettings.Value)
+    {
+        _settings = settings.Value;
+        _rateLimitingService = rateLimitingService;
+        
+        _httpClient = new HttpClient(new StreamingHttpHandler(streamingSettings.Value))
         {
             BaseAddress = new Uri(_settings.ApiEndpoint)
         };
