@@ -3,11 +3,13 @@ using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using XPlain.Configuration;
 using System.Net;
 using System.Collections.Generic;
 using System.Runtime.CompilerServices;
+using XPlain.Services.Validation;
 
 namespace XPlain.Services;
 
@@ -66,7 +68,13 @@ public class AnthropicClient : BaseLLMProvider, IAnthropicClient, IDisposable
         IRateLimitingService rateLimitingService,
         IOptions<AnthropicSettings> settings,
         IOptions<StreamingSettings> streamingSettings)
-        : base(cacheProvider, rateLimitingService, streamingSettings.Value)
+        : base(
+            new Logger<AnthropicClient>(new LoggerFactory()),
+            new HttpClient(),
+            rateLimitingService,
+            new LLMProviderMetrics(),
+            new OptionsWrapper<LLMSettings>(settings.Value),
+            new DefaultInputValidator())
     {
         _settings = settings.Value;
         _rateLimitingService = rateLimitingService;

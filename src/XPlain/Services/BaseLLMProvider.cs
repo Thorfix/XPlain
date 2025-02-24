@@ -73,16 +73,7 @@ namespace XPlain.Services
             return await GetCompletionInternalAsync(validatedPrompt);
         }
         
-        public async IAsyncEnumerable<string> GetCompletionStreamAsync(string prompt)
-        {
-            // Validate and sanitize the input before passing to the provider
-            var validatedPrompt = await ValidateAndSanitizePromptAsync(prompt);
-            
-            await foreach (var chunk in GetCompletionStreamInternalAsync(validatedPrompt))
-            {
-                yield return chunk;
-            }
-        }
+
 
         protected abstract Task<string> GetCompletionInternalAsync(string validatedPrompt);
         
@@ -91,6 +82,32 @@ namespace XPlain.Services
             // Default implementation for providers that don't support streaming
             var response = await GetCompletionInternalAsync(validatedPrompt);
             yield return response;
+        }
+        
+        public virtual IAsyncEnumerable<string> GetCompletionStreamAsync(string prompt)
+        {
+            // Validate and sanitize the input before passing to the provider
+            return GetCompletionStreamAsyncInternal(prompt);
+        }
+        
+        private async IAsyncEnumerable<string> GetCompletionStreamAsyncInternal(string prompt)
+        {
+            try
+            {
+                var validatedPrompt = await ValidateAndSanitizePromptAsync(prompt);
+                await foreach (var chunk in GetCompletionStreamInternalAsync(validatedPrompt))
+                {
+                    yield return chunk;
+                }
+            }
+            catch (Exception ex)
+            {
+                var llmEx = ex as LLMProviderException ?? ClassifyException(ex);
+                _logger.LogError(llmEx, $"Error in streaming completion from {ProviderName}: {llmEx.Message}");
+                
+                // Return error message as a single chunk
+                yield return $"Error: {llmEx.Message}";
+            }
         }
 
         protected async Task<string> ValidateAndSanitizePromptAsync(string prompt)

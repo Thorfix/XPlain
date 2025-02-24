@@ -293,14 +293,51 @@ namespace XPlain.Services
             };
         }
 
+        private readonly List<ICacheEventListener> _eventListeners = new List<ICacheEventListener>();
+        
         public async Task AddEventListener(ICacheEventListener listener)
         {
-            // Placeholder implementation
+            if (listener == null) return;
+            
+            lock (_eventListeners)
+            {
+                if (!_eventListeners.Contains(listener))
+                {
+                    _eventListeners.Add(listener);
+                }
+            }
         }
 
         public async Task RemoveEventListener(ICacheEventListener listener)
         {
-            // Placeholder implementation
+            if (listener == null) return;
+            
+            lock (_eventListeners)
+            {
+                _eventListeners.Remove(listener);
+            }
+        }
+        
+        private async Task NotifyListeners(string key, double responseTime, bool isHit)
+        {
+            var listeners = new List<ICacheEventListener>();
+            
+            lock (_eventListeners)
+            {
+                listeners.AddRange(_eventListeners);
+            }
+            
+            foreach (var listener in listeners)
+            {
+                try
+                {
+                    await listener.OnCacheAccess(key, responseTime, isHit);
+                }
+                catch (Exception)
+                {
+                    // Suppress exceptions from listeners to prevent cache operations from failing
+                }
+            }
         }
 
         public async Task PreWarmKey(string key)

@@ -11,8 +11,11 @@ using System.ComponentModel;
 using System.ComponentModel.DataAnnotations;
 using System.Reflection;
 using System.Text.Json;
+using System.Text.RegularExpressions;
+using System.Threading;
 using XPlain.Configuration;
 using XPlain.Services;
+using XPlain.Services.Validation;
 
 namespace XPlain;
 
@@ -179,7 +182,7 @@ file class Program
                     // Process the command with validated options
                     try
                     {
-                        await ProcessCommand(options);
+                        await ProcessCommandInternal(options);
                     }
                     catch (ValidationException ex)
                     {
@@ -1018,7 +1021,14 @@ file class Program
 
             foreach (var file in files)
             {
-                context.AppendLine(await File.ReadAllTextAsync(file));
+                try
+                {
+                    context.AppendLine(await File.ReadAllTextAsync(file));
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"Warning: Could not read file {file}: {ex.Message}");
+                }
             }
 
             var hashBytes = sha256.ComputeHash(System.Text.Encoding.UTF8.GetBytes(context.ToString()));
@@ -1060,6 +1070,13 @@ file class Program
             // Create service collection
             IServiceCollection services = new ServiceCollection();
 
+            // Add logging services
+            services.AddLogging(builder =>
+            {
+                builder.AddConsole();
+                builder.SetMinimumLevel(LogLevel.Information);
+            });
+
             // Configure rate limiting settings
             var rateLimitSettings = new RateLimitSettings();
             configuration.GetSection("RateLimit").Bind(rateLimitSettings);
@@ -1100,6 +1117,11 @@ file class Program
             services.AddHostedService<MetricsCollectionService>(); // Register as hosted service
             services.AddSingleton<ICacheEventListener>(sp => sp.GetRequiredService<MetricsCollectionService>()); // Register as event listener
             services.AddSingleton<LLMProviderMetrics>();
+            
+            // Configure fallback settings
+            var fallbackSettings = new LLMFallbackSettings();
+            configuration.GetSection("LLMFallback").Bind(fallbackSettings);
+            services.AddSingleton(Options.Create(fallbackSettings));
             
             // Configure ML model settings
             services.AddSingleton<IMLModelTrainingService, MLModelTrainingService>();

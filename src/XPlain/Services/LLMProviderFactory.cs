@@ -65,17 +65,25 @@ namespace XPlain.Services
         {
             var validator = GetValidator(providerName);
 
-            if (!await validator.ValidateSchemaAsync(response))
-                throw new ResponseValidationException($"Invalid response schema from {providerName}", ResponseValidationType.Schema);
+            try
+            {
+                if (!await validator.ValidateSchemaAsync(response))
+                    throw new ResponseValidationException($"Invalid response schema from {providerName}", ResponseValidationType.Schema);
 
-            if (!await validator.ValidateQualityAsync(response))
-                throw new ResponseValidationException($"Response quality check failed for {providerName}", ResponseValidationType.Quality);
+                if (!await validator.ValidateQualityAsync(response))
+                    throw new ResponseValidationException($"Response quality check failed for {providerName}", ResponseValidationType.Quality);
 
-            if (!await validator.ValidateFormatAsync(response))
-                throw new ResponseValidationException($"Invalid response format from {providerName}", ResponseValidationType.Format);
+                if (!await validator.ValidateFormatAsync(response))
+                    throw new ResponseValidationException($"Invalid response format from {providerName}", ResponseValidationType.Format);
 
-            if (!await validator.DetectErrorsAsync(response))
-                throw new ResponseValidationException($"Error detected in response from {providerName}", ResponseValidationType.Error);
+                if (!await validator.DetectErrorsAsync(response))
+                    throw new ResponseValidationException($"Error detected in response from {providerName}", ResponseValidationType.Error);
+            }
+            catch (Exception ex) when (!(ex is ResponseValidationException))
+            {
+                _logger.LogError(ex, $"Error validating response from {providerName}");
+                throw new ResponseValidationException($"Error validating response: {ex.Message}", ResponseValidationType.Error, ex);
+            }
         }
 
         /// <summary>
