@@ -49,6 +49,9 @@ namespace XPlain.Configuration
                 
             if (MemoryUsageAlertThresholdMB < 50 || MemoryUsageAlertThresholdMB > 10000)
                 throw new ValidationException("Memory usage alert threshold must be between 50 and 10000 MB");
+                
+            if (MetricDataPointsRetention < 1 || MetricDataPointsRetention > 10000)
+                throw new ValidationException("Metric data points retention must be between 1 and 10000");
         }
     }
 }

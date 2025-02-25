@@ -6,13 +6,6 @@ using System.Linq;
 namespace XPlain.Services
 {
     // Required supporting classes for CacheMonitoringService
-public class PredictionResult
-{
-    public double Value { get; set; }
-    public double Confidence { get; set; }
-    public TimeSpan TimeToImpact { get; set; }
-}
-
 public class PredictionThresholds
 {
     public double WarningThreshold { get; set; }
@@ -88,15 +81,6 @@ public class PreWarmingMonitoringMetrics
     public PreWarmingMetrics Metrics { get; set; }
 }
 
-public class TrendAnalysis
-{
-    public string Trend { get; set; }
-    public double CurrentValue { get; set; }
-    public double ProjectedValue { get; set; }
-    public DateTime ProjectionTime { get; set; }
-    public double ChangePercent { get; set; }
-}
-
 public class CacheAlert
 {
     public string Id { get; set; } = Guid.NewGuid().ToString();
@@ -117,15 +101,6 @@ public class CacheHealthStatus
     public DateTime LastUpdate { get; set; } = DateTime.UtcNow;
     public Dictionary<string, double> PerformanceMetrics { get; set; } = new();
     public Dictionary<string, PredictionResult> Predictions { get; set; } = new();
-}
-
-public class AutomaticMitigationService
-{
-    public Task ApplyMitigations()
-    {
-        // Mock implementation
-        return Task.CompletedTask;
-    }
 }
 
 public class CacheMonitoringService : ICacheMonitoringService

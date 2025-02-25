@@ -223,18 +223,11 @@ namespace XPlain.Services
                     }
                 }
                 
-                // Now try to acquire a permit briefly to confirm availability
-                var cts = CancellationTokenSource.CreateLinkedTokenSource(
-                    cancellationToken,
-                    new CancellationTokenSource(TimeSpan.FromSeconds(1)).Token);
-                    
-                await limiter.AcquireAsync(0, cts.Token);
-                limiter.Release();
                 return true;
             }
             catch (Exception ex)
             {
-                _logger.LogWarning(ex, $"Could not acquire permit for provider {provider}");
+                _logger.LogWarning(ex, $"Could not check availability for provider {provider}");
                 return false;
             }
         }

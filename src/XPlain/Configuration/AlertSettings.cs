@@ -47,6 +47,9 @@ namespace XPlain.Configuration
                 
             if (AutoResolveWarningsAfterSeconds < 1 || AutoResolveWarningsAfterSeconds > 86400)
                 throw new ValidationException("Auto-resolve warnings after seconds must be between 1 and 86400");
+                
+            if (MaxAlertHistorySize < 100 || MaxAlertHistorySize > 10000)
+                throw new ValidationException("Max alert history size must be between 100 and 10000");
         }
     }
 }

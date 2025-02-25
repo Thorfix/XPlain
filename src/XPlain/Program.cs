@@ -1159,11 +1159,13 @@ file class Program
             // Configure alert settings
             var alertSettings = new AlertSettings();
             configuration.GetSection("Alert").Bind(alertSettings);
+            alertSettings.Validate();
             services.AddSingleton(Options.Create(alertSettings));
 
             // Configure metrics settings
             var metricsSettings = new MetricsSettings();
             configuration.GetSection("Metrics").Bind(metricsSettings);
+            metricsSettings.Validate();
             services.AddSingleton(Options.Create(metricsSettings));
             services.AddSingleton<TimeSeriesMetricsStore>();
             services.AddSingleton<MetricsCollectionService>();

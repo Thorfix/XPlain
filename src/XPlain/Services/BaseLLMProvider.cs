@@ -186,7 +186,7 @@ namespace XPlain.Services
 
             LLMProviderException lastException = null;
             var startTime = DateTime.UtcNow;
-            for (int attempt = 0; attempt < maxRetries; attempt++)
+            for (int attempt = 0; attempt <= maxRetries; attempt++)
             {
                 try
                 {
@@ -231,7 +231,7 @@ namespace XPlain.Services
                     _metrics.RecordFailure(ProviderName);
                     _logger.LogWarning(ex, $"Attempt {attempt + 1} failed for {ProviderName}");
                     
-                    if (attempt < maxRetries - 1 && lastException.IsTransient)
+                    if (attempt < maxRetries && lastException.IsTransient)
                     {
                         var baseDelay = TimeSpan.FromSeconds(Math.Pow(2, attempt)); // Exponential backoff
                         var jitter = TimeSpan.FromMilliseconds(Random.Shared.Next(-500, 500)); // Add jitter
