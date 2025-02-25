@@ -8,6 +8,12 @@ using XPlain.Configuration;
 
 namespace XPlain.Services
 {
+    public class CacheAccessStats
+    {
+        public long AccessCount { get; set; }
+        public long PreWarmCount { get; set; }
+        public DateTime LastAccess { get; set; } = DateTime.UtcNow;
+    }
     public class FileBasedCacheProvider : ICacheProvider, ICacheEventListener
     {
         private ICacheEvictionPolicy _evictionPolicy;
@@ -568,7 +574,7 @@ namespace XPlain.Services
                 EvictionStrategy.LRU => new LRUEvictionPolicy(),
                 EvictionStrategy.HitRateWeighted => new HitRateWeightedEvictionPolicy(_accessStats),
                 EvictionStrategy.SizeWeighted => new SizeWeightedEvictionPolicy(),
-                EvictionStrategy.Adaptive => new AdaptiveEvictionPolicy(_accessStats),
+                EvictionStrategy.Adaptive => new AdaptiveCacheEvictionPolicy(_accessStats),
                 _ => throw new ArgumentException("Unknown eviction strategy")
             };
 

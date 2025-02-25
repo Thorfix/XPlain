@@ -1,275 +1,165 @@
 using System;
 using System.Collections.Generic;
-using System.Threading.Tasks;
 using System.Linq;
+using System.Threading.Tasks;
 
 namespace XPlain.Services
 {
-    public class PrecursorPattern
-    {
-        public string TargetIssue { get; set; }
-        public TimeSpan LeadTime { get; set; }
-        public double Confidence { get; set; }
-        public List<PrecursorSequence> Sequences { get; set; } = new List<PrecursorSequence>();
-    }
-
-    public class PrecursorSequence
-    {
-        public string MetricName { get; set; }
-        public string Pattern { get; set; }
-    }
-
-    public class PredictionResult
-    {
-        public double Value { get; set; }
-        public double Confidence { get; set; }
-        public TimeSpan TimeToImpact { get; set; }
-    }
-
-    public class PredictedAlert
-    {
-        public string Type { get; set; }
-        public string Message { get; set; }
-        public string Severity { get; set; }
-        public double Confidence { get; set; }
-        public TimeSpan TimeToImpact { get; set; }
-        public Dictionary<string, object> Metadata { get; set; } = new Dictionary<string, object>();
-    }
-
-    public class TrendAnalysis
-    {
-        public string Trend { get; set; }
-        public double CurrentValue { get; set; }
-        public double ProjectedValue { get; set; }
-        public DateTime ProjectionTime { get; set; }
-        public double ChangePercent { get; set; }
-    }
-
     public class MLPredictionService
     {
-        private readonly Dictionary<string, double> _mockPredictions = new();
-        private readonly Random _random = new(42);  // Fixed seed for reproducible mock predictions
-        
+        private readonly Random _random = new Random();
+        private readonly Dictionary<string, List<PredictedAlert>> _mockAlerts = new Dictionary<string, List<PredictedAlert>>();
+        private readonly List<PrecursorPattern> _mockPatterns = new List<PrecursorPattern>();
+
         public MLPredictionService()
         {
-            // Initialize with some default predictions for testing
-            for (int i = 0; i < 10; i++)
+            // Initialize with some mock data
+            InitializeMockData();
+        }
+
+        private void InitializeMockData()
+        {
+            // Create some mock alerts
+            _mockAlerts["CachePerformance"] = new List<PredictedAlert>
             {
-                _mockPredictions[$"query_{i}"] = _random.NextDouble() * 0.8 + 0.2; // Range 0.2-1.0
-            }
-        }
-        
-        /// <summary>
-        /// Predicts the value (utility) of caching a specific query
-        /// </summary>
-        /// <param name="query">The query to evaluate</param>
-        /// <returns>A value between 0-1 indicating caching utility</returns>
-        public Task<double> PredictQueryValueAsync(string query)
-        {
-            // For now, return a mock prediction
-            if (_mockPredictions.TryGetValue(query, out double value))
-            {
-                return Task.FromResult(value);
-            }
-            
-            // Generate a new prediction for this query
-            var prediction = _random.NextDouble() * 0.7 + 0.3; // Range 0.3-1.0
-            _mockPredictions[query] = prediction;
-            
-            return Task.FromResult(prediction);
-        }
-        
-        /// <summary>
-        /// Predicts optimal timings for pre-warming a set of queries
-        /// </summary>
-        /// <param name="queries">List of queries to evaluate</param>
-        /// <returns>Dictionary mapping queries to their optimal pre-warming times</returns>
-        public Task<Dictionary<string, DateTime>> PredictOptimalTimingsAsync(List<string> queries)
-        {
-            var now = DateTime.UtcNow;
-            var result = new Dictionary<string, DateTime>();
-            
-            foreach (var query in queries)
-            {
-                // For mock implementation, assign random times in the next 24 hours
-                var hoursOffset = _random.NextDouble() * 24;
-                result[query] = now.AddHours(hoursOffset);
-            }
-            
-            return Task.FromResult(result);
-        }
-        
-        /// <summary>
-        /// Predicts the hit rate for a query over the next time period
-        /// </summary>
-        /// <param name="query">The query to evaluate</param>
-        /// <param name="timeWindowHours">The prediction window in hours</param>
-        /// <returns>Predicted hit rate (0-1)</returns>
-        public Task<double> PredictHitRateAsync(string query, int timeWindowHours = 24)
-        {
-            // Mock implementation
-            var baseValue = _mockPredictions.GetValueOrDefault(query, 0.5);
-            var adjustedValue = baseValue * (1.0 - (timeWindowHours / 100.0));  // Decay with longer windows
-            
-            return Task.FromResult(Math.Max(0.1, Math.Min(0.95, adjustedValue)));
-        }
-        
-        /// <summary>
-        /// Predicts queries that are likely to be requested soon
-        /// </summary>
-        /// <param name="timeWindowHours">Prediction window in hours</param>
-        /// <returns>Dictionary of queries with their likelihood scores</returns>
-        public Task<Dictionary<string, double>> PredictUpcomingQueriesAsync(int timeWindowHours = 24)
-        {
-            // Mock implementation - return a subset of queries with highest scores
-            var result = new Dictionary<string, double>();
-            
-            foreach (var entry in _mockPredictions.OrderByDescending(p => p.Value).Take(5))
-            {
-                result[entry.Key] = entry.Value * (1.0 - (timeWindowHours / 100.0));
-            }
-            
-            return Task.FromResult(result);
-        }
-        
-        /// <summary>
-        /// Trains the prediction model with new data
-        /// </summary>
-        /// <param name="trainingData">Training data</param>
-        public Task TrainAsync(Dictionary<string, object> trainingData)
-        {
-            // Mock implementation - just log the training
-            Console.WriteLine($"Training ML model with {trainingData.Count} data points");
-            return Task.CompletedTask;
-        }
-        
-        public Task<List<PrecursorPattern>> GetActivePrecursorPatterns()
-        {
-            // Mock implementation
-            var patterns = new List<PrecursorPattern>
-            {
-                new PrecursorPattern
+                new PredictedAlert
                 {
-                    TargetIssue = "HighMemoryUsage",
-                    LeadTime = TimeSpan.FromMinutes(15),
-                    Confidence = 0.85,
-                    Sequences = new List<PrecursorSequence>
-                    {
-                        new PrecursorSequence { MetricName = "QueryRate", Pattern = "Rapid increase" },
-                        new PrecursorSequence { MetricName = "CacheHitRate", Pattern = "Decreasing" }
-                    }
+                    Type = "CacheHitRate",
+                    Message = "Cache hit rate predicted to drop below warning threshold",
+                    Severity = "Warning",
+                    Confidence = 0.8,
+                    TimeToImpact = TimeSpan.FromMinutes(30)
                 },
-                new PrecursorPattern
+                new PredictedAlert
                 {
-                    TargetIssue = "LowHitRate",
-                    LeadTime = TimeSpan.FromMinutes(30),
+                    Type = "MemoryUsage",
+                    Message = "Memory usage predicted to reach warning level",
+                    Severity = "Warning",
                     Confidence = 0.75,
-                    Sequences = new List<PrecursorSequence>
-                    {
-                        new PrecursorSequence { MetricName = "UniqueQueries", Pattern = "Increasing" }
-                    }
+                    TimeToImpact = TimeSpan.FromMinutes(45)
                 }
             };
-            
-            return Task.FromResult(patterns);
+
+            // Create some mock precursor patterns
+            _mockPatterns.Add(new PrecursorPattern
+            {
+                TargetIssue = "High Response Time",
+                Confidence = 0.85,
+                LeadTime = TimeSpan.FromMinutes(20),
+                Sequences = new List<MetricSequence>
+                {
+                    new MetricSequence
+                    {
+                        MetricName = "MemoryUsage",
+                        Correlation = 0.8,
+                        Values = new List<double> { 60, 65, 70, 75, 80 }
+                    },
+                    new MetricSequence
+                    {
+                        MetricName = "CacheHitRate",
+                        Correlation = -0.7,
+                        Values = new List<double> { 0.8, 0.75, 0.7, 0.65, 0.6 }
+                    }
+                }
+            });
         }
-        
-        public Task<Dictionary<string, PredictionResult>> PredictPerformanceMetrics()
+
+        public async Task<double> PredictQueryValueAsync(string query)
         {
-            // Mock implementation
-            var results = new Dictionary<string, PredictionResult>
+            // Simple mock implementation that returns a random value
+            await Task.Delay(10); // Simulate processing time
+            return 0.1 + _random.NextDouble() * 0.8; // Return a value between 0.1 and 0.9
+        }
+
+        public async Task<Dictionary<string, DateTime>> PredictOptimalTimingsAsync(List<string> keys)
+        {
+            var result = new Dictionary<string, DateTime>();
+            var now = DateTime.UtcNow;
+
+            foreach (var key in keys)
+            {
+                // Add a random time in the future (between 5 minutes and 2 hours)
+                var minutesOffset = 5 + _random.Next(115);
+                result[key] = now.AddMinutes(minutesOffset);
+            }
+
+            return result;
+        }
+
+        public async Task<List<PredictedAlert>> GetPredictedAlerts()
+        {
+            // Return the mock alerts for cache performance
+            return _mockAlerts["CachePerformance"];
+        }
+
+        public List<PrecursorPattern> GetActivePrecursorPatterns()
+        {
+            // Return the mock precursor patterns
+            return _mockPatterns;
+        }
+
+        public async Task<Dictionary<string, PredictionResult>> PredictPerformanceMetrics()
+        {
+            var now = DateTime.UtcNow;
+            return new Dictionary<string, PredictionResult>
             {
                 ["CacheHitRate"] = new PredictionResult
                 {
-                    Value = 0.65 + (_random.NextDouble() * 0.2 - 0.1), // 0.55-0.75
-                    Confidence = 0.8 + (_random.NextDouble() * 0.15), // 0.8-0.95
-                    TimeToImpact = TimeSpan.FromMinutes(_random.Next(5, 30))
+                    Value = 0.6 + (_random.NextDouble() * 0.3),
+                    Confidence = 0.7 + (_random.NextDouble() * 0.25),
+                    TimeToImpact = TimeSpan.FromMinutes(15 + _random.Next(45))
                 },
                 ["MemoryUsage"] = new PredictionResult
                 {
-                    Value = 70 + (_random.Next(-10, 20)), // 60-90
-                    Confidence = 0.75 + (_random.NextDouble() * 0.2), // 0.75-0.95
-                    TimeToImpact = TimeSpan.FromMinutes(_random.Next(10, 45))
+                    Value = 70 + (_random.NextDouble() * 20),
+                    Confidence = 0.75 + (_random.NextDouble() * 0.2),
+                    TimeToImpact = TimeSpan.FromMinutes(10 + _random.Next(50))
                 },
                 ["AverageResponseTime"] = new PredictionResult
                 {
-                    Value = 120 + (_random.Next(-20, 40)), // 100-160
-                    Confidence = 0.7 + (_random.NextDouble() * 0.25), // 0.7-0.95
-                    TimeToImpact = TimeSpan.FromMinutes(_random.Next(5, 20))
+                    Value = 150 + (_random.NextDouble() * 100),
+                    Confidence = 0.65 + (_random.NextDouble() * 0.25),
+                    TimeToImpact = TimeSpan.FromMinutes(5 + _random.Next(25))
                 }
             };
-            
-            return Task.FromResult(results);
         }
-        
-        public Task<List<PredictedAlert>> GetPredictedAlerts()
+
+        public async Task<Dictionary<string, TrendAnalysis>> AnalyzeTrends()
         {
-            // Mock implementation
-            var alerts = new List<PredictedAlert>
-            {
-                new PredictedAlert
-                {
-                    Type = "MemoryPressure",
-                    Message = "Predicted memory pressure in next 15 minutes",
-                    Severity = "Warning",
-                    Confidence = 0.85,
-                    TimeToImpact = TimeSpan.FromMinutes(15),
-                    Metadata = new Dictionary<string, object>
-                    {
-                        ["predicted_memory_usage"] = 85,
-                        ["current_memory_usage"] = 70
-                    }
-                },
-                new PredictedAlert
-                {
-                    Type = "CacheEfficiency",
-                    Message = "Hit rate likely to drop below 60% in next 30 minutes",
-                    Severity = "Info",
-                    Confidence = 0.7,
-                    TimeToImpact = TimeSpan.FromMinutes(30),
-                    Metadata = new Dictionary<string, object>
-                    {
-                        ["predicted_hit_rate"] = 0.58,
-                        ["current_hit_rate"] = 0.72
-                    }
-                }
-            };
-            
-            return Task.FromResult(alerts);
-        }
-        
-        public Task<Dictionary<string, TrendAnalysis>> AnalyzeTrends()
-        {
-            // Mock implementation
-            var trends = new Dictionary<string, TrendAnalysis>
+            var now = DateTime.UtcNow;
+            return new Dictionary<string, TrendAnalysis>
             {
                 ["CacheHitRate"] = new TrendAnalysis
                 {
-                    Trend = "Decreasing",
-                    CurrentValue = 0.72,
-                    ProjectedValue = 0.65,
-                    ProjectionTime = DateTime.UtcNow.AddHours(1),
-                    ChangePercent = -9.7
+                    Trend = GetRandomTrend(),
+                    CurrentValue = 0.7 + (_random.NextDouble() * 0.2),
+                    ProjectedValue = 0.6 + (_random.NextDouble() * 0.3),
+                    ProjectionTime = now.AddHours(1),
+                    ChangePercent = -5 - (_random.NextDouble() * 15) // -5% to -20%
                 },
                 ["MemoryUsage"] = new TrendAnalysis
                 {
-                    Trend = "Increasing",
-                    CurrentValue = 70,
-                    ProjectedValue = 82,
-                    ProjectionTime = DateTime.UtcNow.AddHours(1),
-                    ChangePercent = 17.1
+                    Trend = GetRandomTrend(),
+                    CurrentValue = 70 + (_random.NextDouble() * 10),
+                    ProjectedValue = 80 + (_random.NextDouble() * 15),
+                    ProjectionTime = now.AddHours(1),
+                    ChangePercent = 5 + (_random.NextDouble() * 15) // 5% to 20%
                 },
-                ["QueryFrequency"] = new TrendAnalysis
+                ["ResponseTime"] = new TrendAnalysis
                 {
-                    Trend = "Stable",
-                    CurrentValue = 120,
-                    ProjectedValue = 125,
-                    ProjectionTime = DateTime.UtcNow.AddHours(1),
-                    ChangePercent = 4.2
+                    Trend = GetRandomTrend(),
+                    CurrentValue = 100 + (_random.NextDouble() * 50),
+                    ProjectedValue = 120 + (_random.NextDouble() * 80),
+                    ProjectionTime = now.AddHours(1),
+                    ChangePercent = 10 + (_random.NextDouble() * 20) // 10% to 30%
                 }
             };
-            
-            return Task.FromResult(trends);
+        }
+
+        private string GetRandomTrend()
+        {
+            var trends = new[] { "Increasing", "Decreasing", "Stable" };
+            return trends[_random.Next(trends.Length)];
         }
     }
 }

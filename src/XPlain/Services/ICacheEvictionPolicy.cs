@@ -4,6 +4,14 @@ using System.Threading.Tasks;
 
 namespace XPlain.Services
 {
+    public class CacheEvictionEvent
+    {
+        public string Reason { get; set; }
+        public DateTime Timestamp { get; set; } = DateTime.UtcNow;
+        public string Key { get; set; }
+        public long BytesFreed { get; set; }
+    }
+    
     public interface ICacheEvictionPolicy
     {
         double CurrentEvictionThreshold { get; }
