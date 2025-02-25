@@ -23,6 +23,125 @@ namespace XPlain.Tests.Services
 
         // Comprehensive tests for compression functionality
     
+    [Fact]
+    public async Task Compression_OptimizesMemoryForExtremelyLargeData()
+    {
+        // This test validates that compression handles extremely large data (20MB+) efficiently
+        // with bounded memory usage, avoiding excessive memory allocation during compression/decompression
+        
+        // Arrange
+        // Create a very large repeating pattern (40MB) that will compress very well
+        var dataSize = 40 * 1024 * 1024; // 40MB
+        var chunkSize = 1024 * 1024; // Use 1MB chunks to build the string efficiently
+        var chunk = new string('x', chunkSize);
+        
+        var sb = new System.Text.StringBuilder(dataSize);
+        for (int i = 0; i < dataSize / chunkSize; i++)
+        {
+            sb.Append(chunk);
+        }
+        var extremelyLargeValue = sb.ToString();
+        var key = "extreme_memory_test_key";
+        
+        var settings = new CacheSettings
+        {
+            CacheEnabled = true,
+            CacheDirectory = _testDirectory,
+            CompressionEnabled = true,
+            CompressionAlgorithm = CompressionAlgorithm.GZip, // GZip is typically more memory-efficient
+            CompressionLevel = CompressionLevel.Fastest, // Use fastest compression for large data
+            MinSizeForCompressionBytes = 1024,
+            // Enable memory-optimized processing
+            AutoAdjustCompressionLevel = true,
+            MaxSizeForHighCompressionBytes = 5 * 1024 * 1024 // 5MB threshold
+        };
+        
+        var provider = new FileBasedCacheProvider(
+            Options.Create(settings),
+            metricsService: null,
+            mlPredictionService: null);
+
+        // Force garbage collection to get accurate memory measurements
+        GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, true, true);
+        GC.WaitForPendingFinalizers();
+        var memoryBefore = GC.GetTotalMemory(true);
+        
+        // Act - Store the extremely large value
+        var sw = Stopwatch.StartNew();
+        await provider.SetAsync(key, extremelyLargeValue);
+        sw.Stop();
+        var compressionTime = sw.ElapsedMilliseconds;
+        
+        // Measure memory after storage
+        var memoryAfterCompression = GC.GetTotalMemory(false);
+        
+        // Force garbage collection again
+        GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, true, true);
+        GC.WaitForPendingFinalizers();
+        var memoryAfterGC = GC.GetTotalMemory(true);
+        
+        // Read it back (decompress)
+        sw.Restart();
+        var retrievedValue = await provider.GetAsync<string>(key);
+        sw.Stop();
+        var decompressionTime = sw.ElapsedMilliseconds;
+        
+        // Measure memory after retrieval
+        var memoryAfterDecompression = GC.GetTotalMemory(false);
+        
+        // Get stats to check compression results
+        var stats = provider.GetCacheStats();
+        
+        // Assert
+        // 1. Value integrity
+        Assert.Equal(extremelyLargeValue.Length, retrievedValue.Length);
+        Assert.Equal(extremelyLargeValue[0], retrievedValue[0]);
+        Assert.Equal(extremelyLargeValue[extremelyLargeValue.Length - 1], retrievedValue[retrievedValue.Length - 1]);
+        
+        // 2. Compression should be very effective (>99% for repeating data)
+        Assert.True(stats.CompressionRatio < 0.01,
+            $"Compression ratio for highly-repetitive data should be excellent, got {stats.CompressionRatio}");
+        
+        // 3. Memory usage during compression should be reasonable - shouldn't spike to more than 
+        // 2x the original data size
+        var compressionMemoryOverhead = memoryAfterCompression - memoryBefore;
+        Assert.True(compressionMemoryOverhead < extremelyLargeValue.Length,
+            $"Memory overhead during compression ({compressionMemoryOverhead / (1024*1024)}MB) " +
+            $"should be less than original data size ({extremelyLargeValue.Length / (1024*1024)}MB)");
+        
+        // 4. Memory should be reclaimable after compression
+        var memoryRetainedAfterGC = memoryAfterGC - memoryBefore;
+        Assert.True(memoryRetainedAfterGC < extremelyLargeValue.Length / 2,
+            $"Memory after GC ({memoryRetainedAfterGC / (1024*1024)}MB) should be much less than " + 
+            $"the original data size ({extremelyLargeValue.Length / (1024*1024)}MB)");
+        
+        // 5. Memory usage during decompression should be efficient
+        var decompressionMemoryOverhead = memoryAfterDecompression - memoryAfterGC;
+        // Need to account for the decompressed value in memory, so allow for 1.5x the original size
+        Assert.True(decompressionMemoryOverhead < extremelyLargeValue.Length * 1.5,
+            $"Memory during decompression ({decompressionMemoryOverhead / (1024*1024)}MB) is too high");
+        
+        // 6. Compression/decompression should complete in reasonable time
+        Assert.True(compressionTime < 10000, $"Compression took too long: {compressionTime}ms");
+        Assert.True(decompressionTime < 10000, $"Decompression took too long: {decompressionTime}ms");
+        
+        // Log detailed metrics
+        Console.WriteLine("=== Extremely Large Data Compression Memory Test ===");
+        Console.WriteLine($"Data size: {extremelyLargeValue.Length / (1024*1024)}MB");
+        Console.WriteLine($"Compression time: {compressionTime}ms");
+        Console.WriteLine($"Decompression time: {decompressionTime}ms");
+        Console.WriteLine($"Compression ratio: {stats.CompressionRatio:F5}");
+        Console.WriteLine($"Memory before: {memoryBefore / (1024*1024)}MB");
+        Console.WriteLine($"Memory after compression: {memoryAfterCompression / (1024*1024)}MB");
+        Console.WriteLine($"Memory overhead during compression: {compressionMemoryOverhead / (1024*1024)}MB");
+        Console.WriteLine($"Memory after GC: {memoryAfterGC / (1024*1024)}MB");
+        Console.WriteLine($"Memory retained after GC: {memoryRetainedAfterGC / (1024*1024)}MB");
+        Console.WriteLine($"Memory after decompression: {memoryAfterDecompression / (1024*1024)}MB");
+        Console.WriteLine($"Memory overhead during decompression: {decompressionMemoryOverhead / (1024*1024)}MB");
+        Console.WriteLine($"Compressed size: {(extremelyLargeValue.Length * stats.CompressionRatio) / (1024*1024):F2}MB");
+        Console.WriteLine($"Bytes saved: {stats.CompressionSavingsBytes / (1024*1024):F2}MB");
+    }
+    
     public FileBasedCacheProviderTests()
         {
             _testDirectory = Path.Combine(Path.GetTempPath(), $"XPlainTests_{Guid.NewGuid()}");
