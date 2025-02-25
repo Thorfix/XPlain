@@ -1530,6 +1530,123 @@ namespace XPlain.Tests.Services
         }
         
         [Fact]
+        public async Task CompressionComparison_DifferentAlgorithmsAndData()
+        {
+            // Arrange
+            var testDataSets = new Dictionary<string, string>
+            {
+                ["Json"] = System.Text.Json.JsonSerializer.Serialize(new { 
+                    items = Enumerable.Range(0, 100).Select(i => new { id = i, value = $"Item value {i}" }).ToArray(),
+                    metadata = new { created = DateTime.Now, author = "Test" }
+                }),
+                ["Text"] = string.Join("\n", Enumerable.Range(0, 500).Select(i => $"Line {i} of sample text for testing compression efficiency with repeating patterns.")),
+                ["Binary"] = Convert.ToBase64String(Enumerable.Range(0, 1000).SelectMany(i => BitConverter.GetBytes(i)).ToArray()),
+                ["Mixed"] = "START-" + new string('x', 10000) + "-MIDDLE-" + string.Join(",", Enumerable.Range(0, 500)) + "-END"
+            };
+            
+            var algorithms = new[] { CompressionAlgorithm.GZip, CompressionAlgorithm.Brotli };
+            var compressionLevels = new[] { CompressionLevel.Fastest, CompressionLevel.Optimal, CompressionLevel.SmallestSize };
+            
+            var results = new Dictionary<string, Dictionary<string, Dictionary<string, (double ratio, double timeMs)>>>();
+            
+            // Act - Test each combination of data, algorithm and compression level
+            foreach (var (dataType, testData) in testDataSets)
+            {
+                results[dataType] = new Dictionary<string, Dictionary<string, (double ratio, double timeMs)>>();
+                
+                foreach (var algorithm in algorithms)
+                {
+                    results[dataType][algorithm.ToString()] = new Dictionary<string, (double ratio, double timeMs)>();
+                    
+                    foreach (var level in compressionLevels)
+                    {
+                        var compressionSettings = new CacheSettings
+                        {
+                            CacheEnabled = true,
+                            CacheDirectory = Path.Combine(_testDirectory, $"{dataType}_{algorithm}_{level}"),
+                            CompressionEnabled = true,
+                            CompressionAlgorithm = algorithm,
+                            CompressionLevel = level,
+                            MinSizeForCompressionBytes = 0 // Force compression regardless of size
+                        };
+                        
+                        Directory.CreateDirectory(compressionSettings.CacheDirectory);
+                        
+                        var provider = new FileBasedCacheProvider(
+                            Options.Create(compressionSettings),
+                            metricsService: null,
+                            mlPredictionService: null);
+                        
+                        var stopwatch = System.Diagnostics.Stopwatch.StartNew();
+                        await provider.SetAsync("test_key", testData);
+                        stopwatch.Stop();
+                        
+                        var stats = provider.GetCacheStats();
+                        var ratio = (double)stats.CompressedStorageUsageBytes / stats.StorageUsageBytes;
+                        
+                        results[dataType][algorithm.ToString()][level.ToString()] = (ratio, stopwatch.ElapsedMilliseconds);
+                        
+                        // Verify data integrity
+                        var retrieved = await provider.GetAsync<string>("test_key");
+                        Assert.Equal(testData, retrieved);
+                    }
+                }
+            }
+            
+            // Assert
+            foreach (var (dataType, algorithmResults) in results)
+            {
+                foreach (var (algorithm, levelResults) in algorithmResults)
+                {
+                    // Verify compression efficiency increases with compression level
+                    var fastestRatio = levelResults[CompressionLevel.Fastest.ToString()].ratio;
+                    var optimalRatio = levelResults[CompressionLevel.Optimal.ToString()].ratio;
+                    var smallestRatio = levelResults[CompressionLevel.SmallestSize.ToString()].ratio;
+                    
+                    // Higher compression levels should give equal or better compression
+                    Assert.True(optimalRatio <= fastestRatio * 1.1); // Allow small margin due to compression algorithms' internal behavior
+                    Assert.True(smallestRatio <= optimalRatio * 1.1);
+                    
+                    // Higher levels should take more time
+                    var fastestTime = levelResults[CompressionLevel.Fastest.ToString()].timeMs;
+                    var optimalTime = levelResults[CompressionLevel.Optimal.ToString()].timeMs;
+                    var smallestTime = levelResults[CompressionLevel.SmallestSize.ToString()].timeMs;
+                    
+                    // This relationship isn't always strict due to system variability, but generally holds
+                    // We use a loose assertion to avoid test flakiness
+                    Assert.True(smallestTime >= fastestTime * 0.7);
+                }
+                
+                // All data types should show compression benefits
+                var bestRatio = algorithmResults.SelectMany(a => a.Value)
+                    .Min(r => r.Value.ratio);
+                    
+                Assert.True(bestRatio < 1.0, $"Data type {dataType} should benefit from compression");
+                
+                if (dataType == "Text" || dataType == "Json")
+                {
+                    // Text and JSON should compress very well
+                    Assert.True(bestRatio < 0.3, $"Text-based data type {dataType} should compress very well");
+                }
+            }
+            
+            // Output detailed results to console for analysis
+            Console.WriteLine("=== Compression Test Results ===");
+            foreach (var (dataType, algorithmResults) in results)
+            {
+                Console.WriteLine($"\nData Type: {dataType}");
+                foreach (var (algorithm, levelResults) in algorithmResults)
+                {
+                    Console.WriteLine($"  Algorithm: {algorithm}");
+                    foreach (var (level, metrics) in levelResults)
+                    {
+                        Console.WriteLine($"    {level}: Ratio={metrics.ratio:F3}, Time={metrics.timeMs:F1}ms");
+                    }
+                }
+            }
+        }
+        
+        [Fact]
         public async Task CompressionDisabled_SkipsCompression()
         {
             // Arrange
