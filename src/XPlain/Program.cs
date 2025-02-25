@@ -1135,7 +1135,6 @@ file class Program
             configuration.GetSection("Cache").Bind(cacheSettings);
             services.AddSingleton(Options.Create(cacheSettings));
             services.AddSingleton<IEncryptionProvider, EncryptionProvider>();
-            services.AddSingleton<IEncryptionProvider, EncryptionProvider>();
             services.AddSingleton<ICacheProvider, FileBasedCacheProvider>();
             services.AddSingleton<MLPredictionService>();
             services.AddSingleton<ICacheMonitoringService, CacheMonitoringService>();

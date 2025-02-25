@@ -199,33 +199,44 @@ namespace XPlain.Services
                             true);
                     }
 
-                    using var cts = new CancellationTokenSource(_timeout);
-                    using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cts.Token);
+                    // Acquire a permit before executing the action
+                    await _rateLimitingService.AcquirePermitAsync(ProviderName);
                     
-                    var timeoutTask = Task.Delay(_timeout, linkedCts.Token);
-                    var actionTask = action(linkedCts.Token);
-                    
-                    var completedTask = await Task.WhenAny(actionTask, timeoutTask);
-                    
-                    if (completedTask == timeoutTask)
+                    try
                     {
-                        linkedCts.Cancel(); // Cancel the action task
-                        throw new TimeoutException($"Request timed out after {_timeout.TotalSeconds} seconds");
-                    }
+                        using var cts = new CancellationTokenSource(_timeout);
+                        using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cts.Token);
+                        
+                        var timeoutTask = Task.Delay(_timeout, linkedCts.Token);
+                        var actionTask = action(linkedCts.Token);
+                        
+                        var completedTask = await Task.WhenAny(actionTask, timeoutTask);
+                        
+                        if (completedTask == timeoutTask)
+                        {
+                            linkedCts.Cancel(); // Cancel the action task
+                            throw new TimeoutException($"Request timed out after {_timeout.TotalSeconds} seconds");
+                        }
 
-                    linkedCts.Cancel(); // Cancel the timeout task
-                    
-                    if (actionTask.IsFaulted)
+                        linkedCts.Cancel(); // Cancel the timeout task
+                        
+                        if (actionTask.IsFaulted)
+                        {
+                            if (actionTask.Exception?.InnerException != null)
+                                throw actionTask.Exception.InnerException;
+                            throw new Exception("Unknown error in action task");
+                        }
+
+                        var finalResult = await actionTask;
+                        _circuitBreaker.OnSuccess();
+                        _metrics.RecordSuccess(ProviderName, DateTime.UtcNow - startTime);
+                        return finalResult;
+                    }
+                    finally
                     {
-                        if (actionTask.Exception?.InnerException != null)
-                            throw actionTask.Exception.InnerException;
-                        throw new Exception("Unknown error in action task");
+                        // Always release the permit when we're done
+                        _rateLimitingService.ReleasePermit(ProviderName);
                     }
-
-                    var finalResult = await actionTask;
-                    _circuitBreaker.OnSuccess();
-                    _metrics.RecordSuccess(ProviderName, DateTime.UtcNow - startTime);
-                    return finalResult;
                 }
                 catch (Exception ex) when (!(ex is LLMProviderException))
                 {

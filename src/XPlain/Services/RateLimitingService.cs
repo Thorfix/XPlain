@@ -210,17 +210,26 @@ namespace XPlain.Services
                     {
                         try
                         {
-                            var timeoutToken = CancellationTokenSource.CreateLinkedTokenSource(
+                            var timeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+                            var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(
                                 cancellationToken, 
-                                new CancellationTokenSource(TimeSpan.FromSeconds(5)).Token).Token;
+                                timeoutCts.Token);
                                 
-                            await Task.Delay(timeToNextWindow, timeoutToken);
+                            await Task.Delay(timeToNextWindow, linkedCts.Token);
                         }
                         catch (TaskCanceledException)
                         {
                             return false;
                         }
                     }
+                }
+                
+                // Don't actually acquire the permit here, just check if we would be able to
+                var costTracker = _costTrackers.GetOrAdd(provider, key => new CostTracker(settings));
+                if (costTracker.WouldExceedDailyLimit())
+                {
+                    _logger.LogWarning($"Daily cost limit would be exceeded for provider {provider}");
+                    return false;
                 }
                 
                 return true;

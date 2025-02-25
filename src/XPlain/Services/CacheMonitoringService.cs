@@ -5,7 +5,7 @@ using System.Linq;
 
 namespace XPlain.Services
 {
-    // Required supporting classes for CacheMonitoringService
+    // Supporting classes for CacheMonitoringService
 public class PredictionThresholds
 {
     public double WarningThreshold { get; set; }
@@ -81,26 +81,20 @@ public class PreWarmingMonitoringMetrics
     public PreWarmingMetrics Metrics { get; set; }
 }
 
-public class CacheAlert
+public class PredictionResult
 {
-    public string Id { get; set; } = Guid.NewGuid().ToString();
-    public string Type { get; set; }
-    public string Message { get; set; }
-    public string Severity { get; set; }
-    public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
-    public Dictionary<string, object> Metadata { get; set; } = new();
+    public double Value { get; set; }
+    public double Confidence { get; set; }
+    public TimeSpan TimeToImpact { get; set; }
+    public List<string> SignificantFactors { get; set; } = new();
 }
 
-public class CacheHealthStatus
+public class TrendAnalysis
 {
-    public bool IsHealthy { get; set; } = true;
-    public double HitRatio { get; set; }
-    public double MemoryUsageMB { get; set; }
-    public double AverageResponseTimeMs { get; set; }
-    public int ActiveAlerts { get; set; }
-    public DateTime LastUpdate { get; set; } = DateTime.UtcNow;
-    public Dictionary<string, double> PerformanceMetrics { get; set; } = new();
-    public Dictionary<string, PredictionResult> Predictions { get; set; } = new();
+    public string Trend { get; set; }
+    public double ChangeRate { get; set; }
+    public double Confidence { get; set; }
+    public Dictionary<string, double> CorrelatedMetrics { get; set; } = new();
 }
 
 public class CacheMonitoringService : ICacheMonitoringService

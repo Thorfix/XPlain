@@ -8,7 +8,6 @@ using XPlain.Configuration;
 
 namespace XPlain.Services
 {
-
     public class ModelPerformanceMonitor : IModelPerformanceMonitor
     {
         private readonly ILogger<ModelPerformanceMonitor> _logger;

@@ -255,7 +255,7 @@ public class AnthropicClient : BaseLLMProvider, IAnthropicClient, IDisposable
         }
     }
 
-    private async Task<T> ExecuteWithRetryAsync<T>(
+    private new async Task<T> ExecuteWithRetryAsync<T>(
         Func<CancellationToken, Task<T>> operation,
         int priority = 0,
         CancellationToken cancellationToken = default)
