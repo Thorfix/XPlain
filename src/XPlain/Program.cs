@@ -19,6 +19,9 @@ using XPlain.Services.Validation;
 
 namespace XPlain;
 
+/// <summary>
+/// Defines thresholds for monitoring cache performance
+/// </summary>
 public class MonitoringThresholds
 {
     public double HitRateWarningThreshold { get; set; } = 0.6;
@@ -27,6 +30,18 @@ public class MonitoringThresholds
     public double MemoryUsageErrorThreshold { get; set; } = 0.95;
     public int ResponseTimeWarningThresholdMs { get; set; } = 500;
     public int ResponseTimeErrorThresholdMs { get; set; } = 1000;
+    
+    public void Validate()
+    {
+        if (HitRateWarningThreshold <= HitRateErrorThreshold)
+            throw new ValidationException("Hit rate warning threshold must be greater than error threshold");
+            
+        if (MemoryUsageWarningThreshold >= MemoryUsageErrorThreshold)
+            throw new ValidationException("Memory usage warning threshold must be less than error threshold");
+            
+        if (ResponseTimeWarningThresholdMs >= ResponseTimeErrorThresholdMs)
+            throw new ValidationException("Response time warning threshold must be less than error threshold");
+    }
 }
 
 file class Program
@@ -284,7 +299,7 @@ file class Program
                         Console.WriteLine($"- {type}: {count} queries");
                     }
                     Console.WriteLine($"\n## Average Response Times");
-                    foreach (var (type, time) in output.AverageResponseTimes)
+                    foreach (var (type, time) in output.PerformanceByQueryType)
                     {
                         Console.WriteLine($"- {type}: {time}");
                     }
@@ -310,10 +325,10 @@ file class Program
                     {
                         Console.WriteLine($"  {type}: {count} queries");
                     }
-                    Console.WriteLine($"\nAverage Response Times:");
-                    foreach (var (type, time) in output.AverageResponseTimes)
+                    Console.WriteLine($"\nPerformance By Query Type:");
+                    foreach (var (type, perf) in output.PerformanceByQueryType)
                     {
-                        Console.WriteLine($"  {type}: {time}");
+                        Console.WriteLine($"  {type}: {perf}");
                     }
                     Console.WriteLine($"\nLast Updated: {output.LastUpdate:yyyy-MM-dd HH:mm:ss UTC}");
                     break;
@@ -1119,6 +1134,8 @@ file class Program
             var streamingSettings = new StreamingSettings();
             configuration.GetSection("Streaming").Bind(streamingSettings);
             services.AddSingleton(Options.Create(streamingSettings));
+            services.AddSingleton<StreamingHttpHandler>(provider => 
+                new StreamingHttpHandler(provider.GetRequiredService<IOptions<StreamingSettings>>().Value));
             
             // Register LLMProviderMetrics to track performance
             services.AddSingleton<LLMProviderMetrics>();

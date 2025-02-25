@@ -53,11 +53,5 @@ namespace XPlain.Services
         public Dictionary<string, object> CustomMetrics { get; set; } = new();
     }
 
-    public class MonitoringThresholds
-    {
-        public double MemoryUsageThresholdPercent { get; set; } = 90.0;
-        public double HitRateThresholdPercent { get; set; } = 50.0;
-        public double LatencyThresholdMs { get; set; } = 1000.0;
-        public long MaxItemCount { get; set; } = 10000;
-    }
+    // Using the MonitoringThresholds class from the main namespace
 }

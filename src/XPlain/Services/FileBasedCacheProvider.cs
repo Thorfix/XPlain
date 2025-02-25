@@ -90,12 +90,7 @@ namespace XPlain.Services
             public Dictionary<string, object> Metadata { get; set; } = new();
         }
 
-        // Small cache eviction event classes
-        public class CacheEvictionEvent
-        {
-            public string Reason { get; set; }
-            public DateTime Timestamp { get; set; } = DateTime.UtcNow;
-        }
+        // Using the CacheEvictionEvent class from ICacheEvictionPolicy
 
         public async Task<bool> UpdateResourceAllocation(Dictionary<string, double> newLimits)
         {
@@ -424,7 +419,7 @@ namespace XPlain.Services
             }
         }
 
-        public async Task PreWarmKey(string key)
+        private async Task RefreshKey(string key)
         {
             if (_cache.ContainsKey(key))
             {
@@ -506,6 +501,47 @@ namespace XPlain.Services
 
             // Use half the average invalidation interval, but keep within reasonable bounds
             return TimeSpan.FromMinutes(Math.Max(5, Math.Min(avgInvalidationInterval * 0.5, 60)));
+        }
+        
+        public async Task<List<CacheAnalyticsEntry>> GetAnalyticsHistoryAsync(DateTime startTime)
+        {
+            // Simple implementation - just return some mock data
+            var result = new List<CacheAnalyticsEntry>();
+            
+            // Generate some mock entries spanning from startTime to now
+            var now = DateTime.UtcNow;
+            var interval = (now - startTime).TotalHours / 10; // 10 data points
+            
+            for (int i = 0; i < 10; i++)
+            {
+                var timestamp = startTime.AddHours(interval * i);
+                var hitRatio = 0.5 + (0.4 * Math.Sin(i * 0.5)); // Between 0.1 and 0.9
+                var stats = new CacheStats
+                {
+                    HitRatio = hitRatio,
+                    Hits = (long)(100 * hitRatio),
+                    Misses = (long)(100 * (1 - hitRatio)),
+                    CachedItemCount = 50 + (i * 5)
+                };
+                
+                result.Add(new CacheAnalyticsEntry
+                {
+                    Timestamp = timestamp,
+                    Stats = stats,
+                    MemoryUsageMB = 20 + (i * 2),
+                    QueryCount = 50 + (i * 5)
+                });
+            }
+            
+            return result;
+        }
+        
+        public class CacheAnalyticsEntry
+        {
+            public DateTime Timestamp { get; set; }
+            public CacheStats Stats { get; set; }
+            public double MemoryUsageMB { get; set; }
+            public int QueryCount { get; set; }
         }
 
         private double CalculateResourceThreshold()

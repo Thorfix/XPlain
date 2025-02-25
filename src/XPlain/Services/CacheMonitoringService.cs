@@ -5,7 +5,130 @@ using System.Linq;
 
 namespace XPlain.Services
 {
-    public class CacheMonitoringService : ICacheMonitoringService
+    // Required supporting classes for CacheMonitoringService
+public class PredictionResult
+{
+    public double Value { get; set; }
+    public double Confidence { get; set; }
+    public TimeSpan TimeToImpact { get; set; }
+}
+
+public class PredictionThresholds
+{
+    public double WarningThreshold { get; set; }
+    public double CriticalThreshold { get; set; }
+    public double MinConfidence { get; set; }
+}
+
+public class PredictedAlert
+{
+    public string Type { get; set; }
+    public string Message { get; set; }
+    public string Severity { get; set; }
+    public double Confidence { get; set; }
+    public TimeSpan TimeToImpact { get; set; }
+    public Dictionary<string, object> Metadata { get; set; } = new();
+}
+
+public class CircuitBreakerStatus
+{
+    public string Status { get; set; }
+    public int FailureCount { get; set; }
+    public DateTime LastStateChange { get; set; }
+}
+
+public class CircuitBreakerEvent
+{
+    public string EventType { get; set; }
+    public DateTime Timestamp { get; set; }
+    public string Details { get; set; }
+}
+
+public class CircuitBreakerState
+{
+    public string Status { get; set; }
+    public DateTime LastStateChange { get; set; }
+    public int FailureCount { get; set; }
+    public DateTime NextRetryTime { get; set; }
+    public List<CircuitBreakerEvent> RecentEvents { get; set; } = new();
+}
+
+public class EncryptionStatus
+{
+    public bool IsEnabled { get; set; }
+    public string CurrentKeyId { get; set; }
+    public DateTime KeyCreatedAt { get; set; }
+    public DateTime NextRotationDue { get; set; }
+    public int KeysInRotation { get; set; }
+    public bool AutoRotationEnabled { get; set; }
+}
+
+public class MaintenanceLogEntry
+{
+    public string Operation { get; set; }
+    public string Status { get; set; }
+    public TimeSpan Duration { get; set; }
+    public DateTime Timestamp { get; set; } = DateTime.UtcNow;
+    public Dictionary<string, object> Metadata { get; set; } = new();
+}
+
+public class PolicySwitchEvent
+{
+    public string FromPolicy { get; set; }
+    public string ToPolicy { get; set; }
+    public DateTime Timestamp { get; set; } = DateTime.UtcNow;
+    public Dictionary<string, double> PerformanceImpact { get; set; } = new();
+}
+
+public class PreWarmingMonitoringMetrics
+{
+    public int BatchSize { get; set; }
+    public PreWarmPriority Priority { get; set; }
+    public DateTime Timestamp { get; set; }
+    public PreWarmingMetrics Metrics { get; set; }
+}
+
+public class TrendAnalysis
+{
+    public string Trend { get; set; }
+    public double CurrentValue { get; set; }
+    public double ProjectedValue { get; set; }
+    public DateTime ProjectionTime { get; set; }
+    public double ChangePercent { get; set; }
+}
+
+public class CacheAlert
+{
+    public string Id { get; set; } = Guid.NewGuid().ToString();
+    public string Type { get; set; }
+    public string Message { get; set; }
+    public string Severity { get; set; }
+    public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
+    public Dictionary<string, object> Metadata { get; set; } = new();
+}
+
+public class CacheHealthStatus
+{
+    public bool IsHealthy { get; set; } = true;
+    public double HitRatio { get; set; }
+    public double MemoryUsageMB { get; set; }
+    public double AverageResponseTimeMs { get; set; }
+    public int ActiveAlerts { get; set; }
+    public DateTime LastUpdate { get; set; } = DateTime.UtcNow;
+    public Dictionary<string, double> PerformanceMetrics { get; set; } = new();
+    public Dictionary<string, PredictionResult> Predictions { get; set; } = new();
+}
+
+public class AutomaticMitigationService
+{
+    public Task ApplyMitigations()
+    {
+        // Mock implementation
+        return Task.CompletedTask;
+    }
+}
+
+public class CacheMonitoringService : ICacheMonitoringService
     {
         private readonly ICacheProvider _cacheProvider;
         private readonly List<CacheAlert> _activeAlerts;
@@ -472,10 +595,17 @@ namespace XPlain.Services
             throw new NotImplementedException();
         }
 
-        public async Task UpdateMonitoringThresholdsAsync(MonitoringThresholds thresholds)
+        public async Task<bool> UpdateMonitoringThresholdsAsync(MonitoringThresholds thresholds)
         {
-            // Implementation to update thresholds
-            throw new NotImplementedException();
+            // Validate thresholds before applying
+            try {
+                thresholds.Validate();
+                _thresholds = thresholds;
+                return true;
+            }
+            catch (Exception) {
+                return false;
+            }
         }
 
         public async Task<MonitoringThresholds> GetCurrentThresholdsAsync()

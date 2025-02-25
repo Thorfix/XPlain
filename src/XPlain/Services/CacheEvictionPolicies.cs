@@ -205,11 +205,5 @@ namespace XPlain.Services
         }
     }
 
-    // Used by the FileBasedCacheProvider's dummy eviction policy
-    public class CacheAccessStats
-    {
-        public long AccessCount { get; set; }
-        public long PreWarmCount { get; set; }
-        public DateTime LastAccess { get; set; } = DateTime.UtcNow;
-    }
+    // CacheAccessStats is now defined directly in FileBasedCacheProvider
 }

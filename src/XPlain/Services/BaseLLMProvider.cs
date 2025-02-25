@@ -45,10 +45,20 @@ namespace XPlain.Services
         protected BaseLLMProvider(
             ICacheProvider cacheProvider,
             IRateLimitingService rateLimitingService,
-            StreamingSettings streamingSettings)
+            IOptions<StreamingSettings> streamingSettings)
         {
             _logger = new Logger<BaseLLMProvider>(new LoggerFactory());
-            _httpClient = new HttpClient();
+            
+            // Configure HTTP client with streaming handler if available
+            if (streamingSettings != null)
+            {
+                _httpClient = new HttpClient(new StreamingHttpHandler(streamingSettings.Value));
+            }
+            else
+            {
+                _httpClient = new HttpClient();
+            }
+            
             _rateLimitingService = rateLimitingService ?? throw new ArgumentNullException(nameof(rateLimitingService));
             _metrics = new LLMProviderMetrics();
             _timeout = TimeSpan.FromSeconds(30);
