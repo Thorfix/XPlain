@@ -15,6 +15,9 @@ namespace XPlain.Tests.Services
         private readonly Mock<ILLMProvider> _llmProviderMock;
         private readonly CacheSettings _defaultSettings;
         private readonly FileBasedCacheProvider _cacheProvider;
+        
+        // Add stopwatch for performance tracking in tests
+        private readonly Stopwatch _stopwatch = new Stopwatch();
 
         public FileBasedCacheProviderTests()
         {
