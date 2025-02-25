@@ -1,7 +1,4 @@
 using System;
-using System.Collections.Generic;
-using System.Threading.Tasks;
-using Microsoft.Extensions.Logging;
 
 namespace XPlain.Services
 {
@@ -10,34 +7,38 @@ namespace XPlain.Services
         private readonly int _maxFailures;
         private readonly TimeSpan _resetTimeout;
         private int _failureCount;
-        private DateTime _lastFailure = DateTime.MinValue;
-        private readonly object _syncLock = new();
-        private bool _isOpen;
+        private DateTime _lastFailureTime;
+        private DateTime _lastStateChange;
+        private CircuitState _state;
 
-        public CircuitBreaker(int maxFailures = 3, TimeSpan? resetTimeout = null)
+        public enum CircuitState
+        {
+            Closed,
+            Open,
+            HalfOpen
+        }
+
+        public CircuitState CurrentState => _state;
+        public DateTime LastStateChange => _lastStateChange;
+        public int FailureCount => _failureCount;
+        public DateTime NextRetryTime => _lastFailureTime.Add(_resetTimeout);
+
+        public CircuitBreaker(int maxFailures, TimeSpan resetTimeout)
         {
             _maxFailures = maxFailures;
-            _resetTimeout = resetTimeout ?? TimeSpan.FromMinutes(5);
+            _resetTimeout = resetTimeout;
+            _state = CircuitState.Closed;
+            _lastStateChange = DateTime.UtcNow;
+        }
+
+        public CircuitBreaker(int maxFailures, int resetTimeoutMs) 
+            : this(maxFailures, TimeSpan.FromMilliseconds(resetTimeoutMs))
+        {
         }
 
         public CircuitBreaker(double failureThreshold, int resetTimeoutMs)
+            : this((int)(failureThreshold * 10), TimeSpan.FromMilliseconds(resetTimeoutMs))
         {
-            _maxFailures = (int)(1.0 / (1.0 - failureThreshold));
-            _resetTimeout = TimeSpan.FromMilliseconds(resetTimeoutMs);
-        }
-
-        public bool CanProcess()
-        {
-            lock (_syncLock)
-            {
-                if (_isOpen && DateTime.UtcNow - _lastFailure > _resetTimeout)
-                {
-                    // Auto-reset after timeout
-                    _isOpen = false;
-                    _failureCount = 0;
-                }
-                return !_isOpen;
-            }
         }
 
         public bool IsAllowed()
@@ -45,26 +46,21 @@ namespace XPlain.Services
             return CanProcess();
         }
 
-        public void RecordSuccess()
+        public bool CanProcess()
         {
-            lock (_syncLock)
+            if (_state == CircuitState.Open)
             {
-                _failureCount = 0;
-                _isOpen = false;
-            }
-        }
-
-        public void RecordFailure()
-        {
-            lock (_syncLock)
-            {
-                _failureCount++;
-                _lastFailure = DateTime.UtcNow;
-                if (_failureCount >= _maxFailures)
+                // Check if the timeout has elapsed since the last failure
+                if (DateTime.UtcNow - _lastFailureTime > _resetTimeout)
                 {
-                    _isOpen = true;
+                    // Move to half-open state to test if the issue is resolved
+                    SetState(CircuitState.HalfOpen);
+                    return true;
                 }
+                return false;
             }
+            
+            return true;
         }
 
         public void OnSuccess()
@@ -72,9 +68,46 @@ namespace XPlain.Services
             RecordSuccess();
         }
 
+        public void RecordSuccess()
+        {
+            if (_state == CircuitState.HalfOpen)
+            {
+                // Reset the failure count and return to closed state on success
+                _failureCount = 0;
+                SetState(CircuitState.Closed);
+            }
+        }
+
         public void OnFailure()
         {
             RecordFailure();
+        }
+
+        public void RecordFailure()
+        {
+            _lastFailureTime = DateTime.UtcNow;
+            
+            if (_state == CircuitState.HalfOpen)
+            {
+                // Immediately trip back to open state on a failure in half-open state
+                SetState(CircuitState.Open);
+                return;
+            }
+            
+            _failureCount++;
+            if (_failureCount >= _maxFailures)
+            {
+                SetState(CircuitState.Open);
+            }
+        }
+        
+        private void SetState(CircuitState newState)
+        {
+            if (_state != newState)
+            {
+                _state = newState;
+                _lastStateChange = DateTime.UtcNow;
+            }
         }
     }
 }

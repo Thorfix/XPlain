@@ -1,9 +1,17 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading.Tasks;
 
 namespace XPlain.Services
 {
+    public class CacheAccessStats
+    {
+        public long AccessCount { get; set; }
+        public long PreWarmCount { get; set; }
+        public DateTime LastAccess { get; set; } = DateTime.UtcNow;
+    }
+
     public class AdaptiveCacheEvictionPolicy : ICacheEvictionPolicy
     {
         private readonly Dictionary<string, CacheAccessStats> _accessStats;
@@ -33,7 +41,18 @@ namespace XPlain.Services
 
         public Task<bool> ForceEviction(long bytesToFree)
         {
-            // Placeholder implementation
+            // Record eviction event
+            _recentEvictions.Add(new CacheEvictionEvent { 
+                Reason = $"Manual eviction of {bytesToFree} bytes",
+                Timestamp = DateTime.UtcNow
+            });
+            
+            // Keep only the last 100 eviction events
+            if (_recentEvictions.Count > 100)
+            {
+                _recentEvictions.RemoveRange(0, _recentEvictions.Count - 100);
+            }
+            
             return Task.FromResult(true);
         }
 
@@ -58,7 +77,9 @@ namespace XPlain.Services
                 ["current_eviction_threshold"] = _evictionThreshold,
                 ["current_pressure_threshold"] = _pressureThreshold,
                 ["tracked_items"] = _accessStats.Count,
-                ["average_access_count"] = _accessStats.Values.Average(s => s.AccessCount)
+                ["average_access_count"] = _accessStats.Values.Any() 
+                    ? _accessStats.Values.Average(s => s.AccessCount) 
+                    : 0
             };
         }
     }

@@ -206,6 +206,7 @@ namespace XPlain.Services
                 }
                 
                 await NotifyPreWarmListeners(key, true);
+                await RefreshKey(key);
                 return true;
             }
             catch (Exception)
@@ -843,13 +844,6 @@ namespace XPlain.Services
             public DateTime ExpirationTime { get; set; }
             public long Size { get; set; }
             public bool IsExpired => DateTime.UtcNow > ExpirationTime;
-        }
-
-        private class CacheAccessStats
-        {
-            public long AccessCount { get; set; }
-            public long PreWarmCount { get; set; }
-            public DateTime LastAccess { get; set; }
         }
     }
 }

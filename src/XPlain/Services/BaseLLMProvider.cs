@@ -45,7 +45,7 @@ namespace XPlain.Services
         protected BaseLLMProvider(
             ICacheProvider cacheProvider,
             IRateLimitingService rateLimitingService,
-            IOptions<StreamingSettings> streamingSettings)
+            IOptions<StreamingSettings> streamingSettings = null)
         {
             _logger = new Logger<BaseLLMProvider>(new LoggerFactory());
             

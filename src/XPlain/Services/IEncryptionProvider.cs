@@ -13,5 +13,9 @@ namespace XPlain.Services
         
         IEnumerable<string> GetActiveKeyIds();
         Dictionary<string, DateTime> GetKeyRotationSchedule();
+        
+        byte[] Encrypt(byte[] data);
+        byte[] Decrypt(byte[] data);
+        bool RotateKey();
     }
 }

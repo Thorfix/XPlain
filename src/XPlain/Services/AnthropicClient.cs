@@ -76,10 +76,9 @@ public class AnthropicClient : BaseLLMProvider, IAnthropicClient, IDisposable
         _settings = settings.Value;
         _rateLimitingService = rateLimitingService;
         
-        _httpClient = new HttpClient(new StreamingHttpHandler(streamingSettings?.Value ?? new StreamingSettings()))
-        {
-            BaseAddress = new Uri(_settings.ApiEndpoint)
-        };
+        // Reuse the HttpClient created by the base class
+        _httpClient = base._httpClient;
+        _httpClient.BaseAddress = new Uri(_settings.ApiEndpoint);
         _httpClient.DefaultRequestHeaders.Add("x-api-key", _settings.ApiToken);
         _httpClient.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
         _httpClient.DefaultRequestHeaders.Add("anthropic-version", "2023-06-01");
