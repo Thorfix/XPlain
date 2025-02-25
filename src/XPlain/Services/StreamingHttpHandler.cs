@@ -1,68 +1,42 @@
-using System.Net;
+using System;
+using System.Net.Http;
+using System.Threading;
+using System.Threading.Tasks;
+using XPlain.Configuration;
 
-namespace XPlain.Services;
-
-/// <summary>
-/// HTTP message handler that provides better stability for streaming responses
-/// </summary>
-public class StreamingHttpHandler : DelegatingHandler
+namespace XPlain.Services
 {
-    private readonly TimeSpan _timeout;
-    private readonly int _maxRetries;
-    private readonly TimeSpan _initialRetryDelay;
-
-    public StreamingHttpHandler(StreamingSettings settings)
+    public class StreamingHttpHandler : DelegatingHandler
     {
-        _timeout = TimeSpan.FromSeconds(settings.StreamingTimeoutSeconds);
-        _maxRetries = settings.MaxStreamingRetries;
-        _initialRetryDelay = TimeSpan.FromMilliseconds(settings.InitialRetryDelayMs);
-        InnerHandler = new HttpClientHandler
-        {
-            AutomaticDecompression = DecompressionMethods.GZip | DecompressionMethods.Deflate
-        };
-    }
+        private readonly StreamingSettings _settings;
 
-    protected override async Task<HttpResponseMessage> SendAsync(
-        HttpRequestMessage request,
-        CancellationToken cancellationToken)
-    {
-        var retryCount = 0;
-        var delay = _initialRetryDelay;
-
-        while (true)
+        public StreamingHttpHandler(StreamingSettings settings)
         {
+            _settings = settings ?? throw new ArgumentNullException(nameof(settings));
+            InnerHandler = new HttpClientHandler();
+        }
+
+        protected override async Task<HttpResponseMessage> SendAsync(
+            HttpRequestMessage request, 
+            CancellationToken cancellationToken)
+        {
+            // Set timeout for streaming requests
+            var timeoutToken = new CancellationTokenSource(
+                TimeSpan.FromSeconds(_settings.StreamingTimeoutSeconds)).Token;
+            
+            // Create a linked token that will cancel if either the original token
+            // or the timeout token is cancelled
+            using var linkedCts = 
+                CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeoutToken);
+
             try
             {
-                using var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-                cts.CancelAfter(_timeout);
-
-                var response = await base.SendAsync(request, cts.Token);
-                
-                if ((int)response.StatusCode >= 500 && retryCount < _maxRetries)
-                {
-                    await Task.Delay(delay, cancellationToken);
-                    delay = TimeSpan.FromMilliseconds(delay.TotalMilliseconds * 2);
-                    retryCount++;
-                    continue;
-                }
-
-                response.EnsureSuccessStatusCode();
-                return response;
+                return await base.SendAsync(request, linkedCts.Token);
             }
-            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+            catch (OperationCanceledException) when (timeoutToken.IsCancellationRequested)
             {
-                if (retryCount >= _maxRetries)
-                    throw new TimeoutException($"Request timed out after {_timeout.TotalSeconds} seconds");
-
-                await Task.Delay(delay, cancellationToken);
-                delay = TimeSpan.FromMilliseconds(delay.TotalMilliseconds * 2);
-                retryCount++;
-            }
-            catch (HttpRequestException ex) when (retryCount < _maxRetries)
-            {
-                await Task.Delay(delay, cancellationToken);
-                delay = TimeSpan.FromMilliseconds(delay.TotalMilliseconds * 2);
-                retryCount++;
+                throw new TimeoutException(
+                    $"The request timed out after {_settings.StreamingTimeoutSeconds} seconds");
             }
         }
     }

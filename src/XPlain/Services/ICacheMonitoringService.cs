@@ -4,44 +4,47 @@ using System.Threading.Tasks;
 
 namespace XPlain.Services
 {
-    public interface ICacheMonitoringService
+    public interface ICacheMonitoringService : IDisposable
     {
-        Task<CircuitBreakerStatus> GetCircuitBreakerStatusAsync();
         Task<CacheHealthStatus> GetHealthStatusAsync();
-        Task<List<CacheAlert>> GetActiveAlertsAsync();
-        Task<bool> IsHealthyAsync();
         Task<Dictionary<string, double>> GetPerformanceMetricsAsync();
-        Task<double> GetCurrentHitRatioAsync();
-        Task<Dictionary<string, CachePerformanceMetrics>> GetQueryPerformanceAsync();
-        Task<double> GetMemoryUsageAsync();
-        Task<long> GetStorageUsageAsync();
-        Task<int> GetCachedItemCountAsync();
+        Task<List<CacheAlert>> GetActiveAlertsAsync();
         Task<List<CacheAnalytics>> GetAnalyticsHistoryAsync(TimeSpan period);
         Task<List<string>> GetOptimizationRecommendationsAsync();
-        Task<string> GeneratePerformanceReportAsync(string format);
-        Task<CacheAlert> CreateAlertAsync(string type, string message, string severity, Dictionary<string, object>? metadata = null);
-        Task<bool> ResolveAlertAsync(string alertId);
-        Task<List<CacheAlert>> GetAlertHistoryAsync(DateTime since);
-        Task UpdateMonitoringThresholdsAsync(MonitoringThresholds thresholds);
         Task<MonitoringThresholds> GetCurrentThresholdsAsync();
-        Task<bool> TriggerMaintenanceAsync();
-        Task<bool> OptimizeCacheAsync();
-        Task<CircuitBreakerState> GetCircuitBreakerStateAsync();
-        Task<List<CircuitBreakerEvent>> GetCircuitBreakerHistoryAsync(DateTime since);
-        Task<bool> IsCircuitBreakerTrippedAsync();
-        Task<EncryptionStatus> GetEncryptionStatusAsync();
-        Task<DateTime> GetNextKeyRotationTimeAsync();
-        Task<Dictionary<string, DateTime>> GetKeyRotationScheduleAsync();
-        Task<List<string>> GetActiveEncryptionKeysAsync();
-        Task<List<MaintenanceLogEntry>> GetMaintenanceLogsAsync(DateTime since);
-        Task<Dictionary<string, int>> GetEvictionStatisticsAsync();
-        Task<List<CacheEvictionEvent>> GetRecentEvictionsAsync(int count);
-        Task RecordPolicySwitchAsync(PolicySwitchEvent switchEvent);
-        Task LogMaintenanceEventAsync(string operation, string status, TimeSpan duration, Dictionary<string, object>? metadata = null);
-        
-        // New ML-related methods
-        Task<Dictionary<string, PredictionResult>> GetPerformancePredictionsAsync();
-        Task<List<PredictedAlert>> GetPredictedAlertsAsync();
-        Task<Dictionary<string, TrendAnalysis>> GetMetricTrendsAsync();
+        Task<bool> UpdateMonitoringThresholdsAsync(MonitoringThresholds thresholds);
+        Task<string> GeneratePerformanceReportAsync(string format);
+        Task<bool> CreateAlertAsync(string type, string message, string severity, Dictionary<string, object>? metadata = null);
+        Task<bool> ResolveAlertAsync(string alertId);
+    }
+
+    public class CacheHealthStatus
+    {
+        public bool IsHealthy { get; set; } = true;
+        public double HitRatio { get; set; }
+        public double MemoryUsageMB { get; set; }
+        public double AverageResponseTimeMs { get; set; }
+        public int ActiveAlerts { get; set; }
+        public DateTime LastUpdate { get; set; } = DateTime.UtcNow;
+        public Dictionary<string, double> PerformanceMetrics { get; set; } = new();
+    }
+
+    public class CacheAlert
+    {
+        public string Id { get; set; } = Guid.NewGuid().ToString();
+        public string Type { get; set; }
+        public string Message { get; set; }
+        public string Severity { get; set; }
+        public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
+        public Dictionary<string, object> Metadata { get; set; } = new();
+    }
+
+    public class CacheAnalytics
+    {
+        public DateTime Timestamp { get; set; } = DateTime.UtcNow;
+        public CacheStats Stats { get; set; }
+        public double MemoryUsageMB { get; set; }
+        public double CpuUsagePercent { get; set; }
+        public Dictionary<string, object> CustomMetrics { get; set; } = new();
     }
 }

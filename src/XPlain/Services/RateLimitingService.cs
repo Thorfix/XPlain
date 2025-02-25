@@ -7,9 +7,102 @@ using Microsoft.Extensions.Logging;
 using XPlain.Configuration;
 using System.Collections.Generic;
 using System.Linq;
+using System.Threading.Channels; // For older .NET versions that don't have PriorityQueue
 
 namespace XPlain.Services
 {
+    public class ProviderRateLimiter
+    {
+        private readonly SemaphoreSlim _concurrencyLimiter;
+        private readonly object _syncLock = new();
+        private readonly RateLimitSettings _settings;
+        private DateTime _windowStart;
+        private int _requestsInWindow;
+        private int _totalRequests;
+        private int _rateLimitErrors;
+        private readonly Queue<(TaskCompletionSource<bool>, int)> _queue = new();
+        private readonly ILogger<RateLimitingService> _logger;
+
+        public ProviderRateLimiter(RateLimitSettings settings, ILogger<RateLimitingService> logger)
+        {
+            _settings = settings;
+            _logger = logger;
+            _concurrencyLimiter = new SemaphoreSlim(settings.MaxConcurrentRequests);
+            _windowStart = DateTime.UtcNow;
+        }
+
+        public async Task AcquireAsync(int priority, CancellationToken cancellationToken)
+        {
+            var tcs = new TaskCompletionSource<bool>();
+            lock (_syncLock)
+            {
+                _queue.Enqueue((tcs, priority));
+            }
+
+            await ProcessQueueAsync();
+            await tcs.Task;
+            await _concurrencyLimiter.WaitAsync(cancellationToken);
+            
+            lock (_syncLock)
+            {
+                var now = DateTime.UtcNow;
+                if (now - _windowStart > TimeSpan.FromSeconds(_settings.WindowSeconds))
+                {
+                    _windowStart = now;
+                    _requestsInWindow = 0;
+                }
+
+                if (_requestsInWindow >= _settings.RequestsPerWindow)
+                {
+                    _rateLimitErrors++;
+                    throw new RateLimitExceededException($"Rate limit exceeded: {_settings.RequestsPerWindow} requests per {_settings.WindowSeconds} seconds");
+                }
+
+                _requestsInWindow++;
+                _totalRequests++;
+            }
+        }
+
+        private async Task ProcessQueueAsync()
+        {
+            (TaskCompletionSource<bool> nextTcs, int priority) = (null, 0);
+            
+            lock (_syncLock)
+            {
+                if (_queue.Count > 0)
+                {
+                    nextTcs = _queue.Dequeue().Item1;
+                }
+            }
+            
+            if (nextTcs != null)
+            {
+                nextTcs.TrySetResult(true);
+            }
+        }
+
+        public void Release()
+        {
+            _concurrencyLimiter.Release();
+        }
+
+        public RateLimitMetrics GetMetrics()
+        {
+            lock (_syncLock)
+            {
+                return new RateLimitMetrics
+                {
+                    QueuedRequests = _queue.Count,
+                    ActiveRequests = _settings.MaxConcurrentRequests - _concurrencyLimiter.CurrentCount,
+                    TotalRequestsProcessed = _totalRequests,
+                    RateLimitErrors = _rateLimitErrors,
+                    WindowStartTime = _windowStart,
+                    RequestsInCurrentWindow = _requestsInWindow
+                };
+            }
+        }
+    }
+    
     public class RateLimitingService : IRateLimitingService
     {
         private readonly ConcurrentDictionary<string, ProviderRateLimiter> _limiters = new();
@@ -96,6 +189,101 @@ namespace XPlain.Services
             }
             return new RateLimitMetrics();
         }
+        
+        public async Task<bool> WaitForAvailabilityAsync(string provider, CancellationToken cancellationToken = default)
+        {
+            try
+            {
+                var settings = GetProviderSettings(provider);
+                var limiter = _limiters.GetOrAdd(provider, key => new ProviderRateLimiter(settings, _logger));
+                
+                // Check if we're currently at or near rate limit
+                var currentMetrics = limiter.GetMetrics();
+                
+                if (currentMetrics.RequestsInCurrentWindow >= settings.RequestsPerWindow * 0.9)
+                {
+                    // We're close to the rate limit, wait for next window
+                    var timeToNextWindow = TimeSpan.FromSeconds(settings.WindowSeconds) - 
+                        (DateTime.UtcNow - currentMetrics.WindowStartTime);
+                    
+                    if (timeToNextWindow > TimeSpan.Zero && timeToNextWindow < TimeSpan.FromSeconds(settings.WindowSeconds))
+                    {
+                        try
+                        {
+                            var timeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+                            var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(
+                                cancellationToken, 
+                                timeoutCts.Token);
+                                
+                            await Task.Delay(timeToNextWindow, linkedCts.Token);
+                        }
+                        catch (TaskCanceledException)
+                        {
+                            return false;
+                        }
+                    }
+                }
+                
+                // Don't actually acquire the permit here, just check if we would be able to
+                var costTracker = _costTrackers.GetOrAdd(provider, key => new CostTracker(settings));
+                if (costTracker.WouldExceedDailyLimit())
+                {
+                    _logger.LogWarning($"Daily cost limit would be exceeded for provider {provider}");
+                    return false;
+                }
+                
+                return true;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, $"Could not check availability for provider {provider}");
+                return false;
+            }
+        }
+
+        public bool CanMakeRequest(string provider)
+        {
+            return WaitForAvailabilityAsync(provider).GetAwaiter().GetResult();
+        }
+
+        private class PriorityQueue<TValue, TPriority>
+        {
+            private readonly List<(TValue Value, TPriority Priority)> _items = new();
+            
+            public int Count => _items.Count;
+            
+            public void Enqueue(TValue value, TPriority priority)
+            {
+                _items.Add((value, priority));
+                _items.Sort((a, b) => Comparer<TPriority>.Default.Compare(a.Priority, b.Priority));
+            }
+            
+            public bool TryPeek(out TValue value, out TPriority priority)
+            {
+                if (_items.Count == 0)
+                {
+                    value = default;
+                    priority = default;
+                    return false;
+                }
+                
+                value = _items[0].Value;
+                priority = _items[0].Priority;
+                return true;
+            }
+            
+            public TValue Dequeue()
+            {
+                if (_items.Count == 0)
+                {
+                    throw new InvalidOperationException("Queue is empty");
+                }
+                
+                var result = _items[0].Value;
+                _items.RemoveAt(0);
+                return result;
+            }
+        }
 
         private class ProviderRateLimiter
         {
@@ -108,7 +296,7 @@ namespace XPlain.Services
             private int _totalRequests;
             private int _rateLimitErrors;
 
-            public ProviderRateLimiter(RateLimitSettings settings)
+            public ProviderRateLimiter(RateLimitSettings settings, ILogger<RateLimitingService> logger)
             {
                 _settings = settings;
                 _concurrencyLimiter = new SemaphoreSlim(settings.MaxConcurrentRequests);

@@ -2,22 +2,28 @@ using System;
 
 namespace XPlain.Services.Validation
 {
+    public enum ValidationErrorType
+    {
+        EmptyInput,
+        InvalidContent,
+        TooLong,
+        ProhibitedContent,
+        Malformed
+    }
+
     public class InputValidationException : Exception
     {
-        public string ProviderType { get; }
-        public string ValidationError { get; }
+        public ValidationErrorType ValidationError { get; }
 
-        public InputValidationException(string message, string providerType, string validationError) 
+        public InputValidationException(string message, ValidationErrorType validationError)
             : base(message)
         {
-            ProviderType = providerType;
             ValidationError = validationError;
         }
 
-        public InputValidationException(string message, string providerType, string validationError, Exception innerException)
+        public InputValidationException(string message, ValidationErrorType validationError, Exception innerException)
             : base(message, innerException)
         {
-            ProviderType = providerType;
             ValidationError = validationError;
         }
     }

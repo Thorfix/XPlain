@@ -3,11 +3,13 @@ using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using XPlain.Configuration;
 using System.Net;
 using System.Collections.Generic;
 using System.Runtime.CompilerServices;
+using XPlain.Services.Validation;
 
 namespace XPlain.Services;
 
@@ -22,6 +24,8 @@ public class AnthropicClient : BaseLLMProvider, IAnthropicClient, IDisposable
     public override string ProviderName => "Anthropic";
     public override string ModelName => _settings.DefaultModel;
 
+    // Static list of retryable HTTP status codes
+
     private static readonly HashSet<HttpStatusCode> RetryableStatusCodes = new()
     {
         HttpStatusCode.TooManyRequests,
@@ -33,19 +37,48 @@ public class AnthropicClient : BaseLLMProvider, IAnthropicClient, IDisposable
     };
 
     public AnthropicClient(
+        ILogger<AnthropicClient> logger,
+        HttpClient httpClient,
         IOptions<AnthropicSettings> settings,
         ICacheProvider cacheProvider,
         IRateLimitingService rateLimitingService,
-        StreamingSettings streamingSettings)
-        : base(cacheProvider, rateLimitingService, streamingSettings)
+        LLMProviderMetrics metrics,
+        IOptions<LLMSettings> llmSettings,
+        IInputValidator inputValidator,
+        IOptions<StreamingSettings> streamingSettings = null)
+        : base(logger, httpClient, rateLimitingService, metrics, llmSettings, inputValidator)
     {
         _settings = settings.Value;
         _rateLimitingService = rateLimitingService;
         
-        _httpClient = new HttpClient(new StreamingHttpHandler(streamingSettings))
-        {
-            BaseAddress = new Uri(_settings.ApiEndpoint)
-        };
+        // Configure HttpClient headers
+        _httpClient.BaseAddress = new Uri(_settings.ApiEndpoint);
+        _httpClient.DefaultRequestHeaders.Add("x-api-key", _settings.ApiToken);
+        _httpClient.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
+        _httpClient.DefaultRequestHeaders.Add("anthropic-version", "2023-06-01");
+
+        _circuitBreaker = new CircuitBreaker(
+            _settings.CircuitBreakerFailureThreshold,
+            _settings.CircuitBreakerResetTimeoutMs);
+    }
+
+    // Simplified constructor for backward compatibility
+    public AnthropicClient(
+        ICacheProvider cacheProvider,
+        IRateLimitingService rateLimitingService,
+        IOptions<AnthropicSettings> settings,
+        IOptions<StreamingSettings> streamingSettings = null)
+        : base(
+            cacheProvider,
+            rateLimitingService,
+            streamingSettings)
+    {
+        _settings = settings.Value;
+        _rateLimitingService = rateLimitingService;
+        
+        // Reuse the HttpClient created by the base class
+        _httpClient = base._httpClient;
+        _httpClient.BaseAddress = new Uri(_settings.ApiEndpoint);
         _httpClient.DefaultRequestHeaders.Add("x-api-key", _settings.ApiToken);
         _httpClient.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
         _httpClient.DefaultRequestHeaders.Add("anthropic-version", "2023-06-01");
@@ -222,7 +255,7 @@ public class AnthropicClient : BaseLLMProvider, IAnthropicClient, IDisposable
         }
     }
 
-    private async Task<T> ExecuteWithRetryAsync<T>(
+    private new async Task<T> ExecuteWithRetryAsync<T>(
         Func<CancellationToken, Task<T>> operation,
         int priority = 0,
         CancellationToken cancellationToken = default)

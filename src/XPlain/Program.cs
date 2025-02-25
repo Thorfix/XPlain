@@ -1,18 +1,56 @@
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
+using Microsoft.Extensions.Logging;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Mvc;
 using System.CommandLine;
 using System.CommandLine.Parsing;
 using System.ComponentModel;
 using System.ComponentModel.DataAnnotations;
 using System.Reflection;
 using System.Text.Json;
+using System.Text.RegularExpressions;
+using System.Threading;
 using XPlain.Configuration;
 using XPlain.Services;
+using XPlain.Services.Validation;
 
 namespace XPlain;
+
+/// <summary>
+/// Defines thresholds for monitoring cache performance
+/// </summary>
+public class MonitoringThresholds
+{
+    public double HitRateWarningThreshold { get; set; } = 0.6;
+    public double HitRateErrorThreshold { get; set; } = 0.4;
+    public double MemoryUsageWarningThreshold { get; set; } = 0.8;
+    public double MemoryUsageErrorThreshold { get; set; } = 0.95;
+    public int ResponseTimeWarningThresholdMs { get; set; } = 500;
+    public int ResponseTimeErrorThresholdMs { get; set; } = 1000;
+    public double MinHitRatio { get; set; } = 0.2;
+    public double MaxMemoryUsageMB { get; set; } = 1024;
+    
+    public void Validate()
+    {
+        if (HitRateWarningThreshold <= HitRateErrorThreshold)
+            throw new ValidationException("Hit rate warning threshold must be greater than error threshold");
+            
+        if (MemoryUsageWarningThreshold >= MemoryUsageErrorThreshold)
+            throw new ValidationException("Memory usage warning threshold must be less than error threshold");
+            
+        if (ResponseTimeWarningThresholdMs >= ResponseTimeErrorThresholdMs)
+            throw new ValidationException("Response time warning threshold must be less than error threshold");
+            
+        if (MinHitRatio < 0 || MinHitRatio > 1)
+            throw new ValidationException("Minimum hit ratio must be between 0 and 1");
+            
+        if (MaxMemoryUsageMB <= 0)
+            throw new ValidationException("Maximum memory usage must be greater than zero");
+    }
+}
 
 file class Program
     {
@@ -177,7 +215,7 @@ file class Program
                     // Process the command with validated options
                     try
                     {
-                        await ProcessCommand(options);
+                        await ProcessCommandInternal(options);
                     }
                     catch (ValidationException ex)
                     {
@@ -269,7 +307,7 @@ file class Program
                         Console.WriteLine($"- {type}: {count} queries");
                     }
                     Console.WriteLine($"\n## Average Response Times");
-                    foreach (var (type, time) in output.AverageResponseTimes)
+                    foreach (var (type, time) in output.PerformanceByQueryType)
                     {
                         Console.WriteLine($"- {type}: {time}");
                     }
@@ -295,10 +333,10 @@ file class Program
                     {
                         Console.WriteLine($"  {type}: {count} queries");
                     }
-                    Console.WriteLine($"\nAverage Response Times:");
-                    foreach (var (type, time) in output.AverageResponseTimes)
+                    Console.WriteLine($"\nPerformance By Query Type:");
+                    foreach (var (type, perf) in output.PerformanceByQueryType)
                     {
-                        Console.WriteLine($"  {type}: {time}");
+                        Console.WriteLine($"  {type}: {perf}");
                     }
                     Console.WriteLine($"\nLast Updated: {output.LastUpdate:yyyy-MM-dd HH:mm:ss UTC}");
                     break;
@@ -1004,6 +1042,46 @@ file class Program
         }
 
 
+        internal static async Task<string> CalculateCodeHashAsync(string codeDirectory)
+        {
+            using var sha256 = System.Security.Cryptography.SHA256.Create();
+            var context = new System.Text.StringBuilder();
+
+            try 
+            {
+                if (!Directory.Exists(codeDirectory))
+                {
+                    Console.WriteLine($"Warning: Directory not found: {codeDirectory}");
+                    return "invalid-directory-hash";
+                }
+
+                var files = Directory.GetFiles(codeDirectory, "*.*", SearchOption.AllDirectories)
+                    .Where(f => Path.GetExtension(f) is ".cs" or ".fs" or ".vb" or ".js" or ".ts" or ".py" or ".java"
+                        or ".cpp" or ".h")
+                    .OrderBy(f => f);
+
+                foreach (var file in files)
+                {
+                    try
+                    {
+                        context.AppendLine(await File.ReadAllTextAsync(file));
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.WriteLine($"Warning: Could not read file {file}: {ex.Message}");
+                    }
+                }
+
+                var hashBytes = sha256.ComputeHash(System.Text.Encoding.UTF8.GetBytes(context.ToString()));
+                return Convert.ToBase64String(hashBytes).Replace("/", "_").Replace("+", "-");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error calculating code hash: {ex.Message}");
+                return "error-calculating-hash";
+            }
+        }
+
         internal static string BuildCodeContext(string codeDirectory)
         {
             var context = new System.Text.StringBuilder();
@@ -1039,6 +1117,13 @@ file class Program
             // Create service collection
             IServiceCollection services = new ServiceCollection();
 
+            // Add logging services
+            services.AddLogging(builder =>
+            {
+                builder.AddConsole();
+                builder.SetMinimumLevel(LogLevel.Information);
+            });
+
             // Configure rate limiting settings
             var rateLimitSettings = new RateLimitSettings();
             configuration.GetSection("RateLimit").Bind(rateLimitSettings);
@@ -1049,8 +1134,21 @@ file class Program
             var cacheSettings = new CacheSettings();
             configuration.GetSection("Cache").Bind(cacheSettings);
             services.AddSingleton(Options.Create(cacheSettings));
-            services.AddSingleton<ICacheMonitoringService, CacheMonitoringService>();
+            services.AddSingleton<IEncryptionProvider, EncryptionProvider>();
             services.AddSingleton<ICacheProvider, FileBasedCacheProvider>();
+            services.AddSingleton<MLPredictionService>();
+            services.AddSingleton<ICacheMonitoringService, CacheMonitoringService>();
+            services.AddSingleton<LLMProviderMetrics>();
+            
+            // Configure streaming settings
+            var streamingSettings = new StreamingSettings();
+            configuration.GetSection("Streaming").Bind(streamingSettings);
+            services.AddSingleton(Options.Create(streamingSettings));
+            services.AddSingleton<StreamingHttpHandler>(provider => 
+                new StreamingHttpHandler(provider.GetRequiredService<IOptions<StreamingSettings>>().Value));
+            
+            // Register LLMProviderMetrics to track performance
+            services.AddSingleton<LLMProviderMetrics>();
             
             // Configure ML model monitoring and alerting
             services.AddSingleton<IModelPerformanceMonitor, ModelPerformanceMonitor>();
@@ -1061,16 +1159,24 @@ file class Program
             // Configure alert settings
             var alertSettings = new AlertSettings();
             configuration.GetSection("Alert").Bind(alertSettings);
+            alertSettings.Validate();
             services.AddSingleton(Options.Create(alertSettings));
 
             // Configure metrics settings
             var metricsSettings = new MetricsSettings();
             configuration.GetSection("Metrics").Bind(metricsSettings);
+            metricsSettings.Validate();
             services.AddSingleton(Options.Create(metricsSettings));
             services.AddSingleton<TimeSeriesMetricsStore>();
             services.AddSingleton<MetricsCollectionService>();
             services.AddHostedService<MetricsCollectionService>(); // Register as hosted service
             services.AddSingleton<ICacheEventListener>(sp => sp.GetRequiredService<MetricsCollectionService>()); // Register as event listener
+            services.AddSingleton<LLMProviderMetrics>();
+            
+            // Configure fallback settings
+            var fallbackSettings = new LLMFallbackSettings();
+            configuration.GetSection("LLMFallback").Bind(fallbackSettings);
+            services.AddSingleton(Options.Create(fallbackSettings));
             
             // Configure ML model settings
             services.AddSingleton<IMLModelTrainingService, MLModelTrainingService>();
@@ -1106,6 +1212,12 @@ file class Program
             llmSettings.Validate();
             services.AddSingleton(Options.Create(llmSettings));
 
+            // Add model performance monitoring and related services
+            services.AddSingleton<IModelPerformanceMonitor, ModelPerformanceMonitor>();
+            services.AddSingleton<IAutomaticMitigationService, AutomaticMitigationService>();
+            services.AddSingleton<IAlertManagementService, AlertManagementService>();
+            services.AddSingleton<INotificationService, NotificationService>();
+
             // Configure provider-specific settings based on selected provider
             switch (llmSettings.Provider.ToLowerInvariant())
             {
@@ -1129,6 +1241,7 @@ file class Program
             // Add common services
             services.AddHttpClient();
             services.AddSingleton<LLMProviderFactory>();
+            services.AddSingleton<IEncryptionProvider, EncryptionProvider>();
             
             // Add ASP.NET Core services
             services.AddEndpointsApiExplorer();

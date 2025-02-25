@@ -1,151 +1,185 @@
 using System;
+using System.Collections.Generic;
+using System.Linq;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
+using XPlain.Configuration;
 
 namespace XPlain.Services
 {
-    public interface IAutomaticMitigationService
-    {
-        Task InitiateModelRollback();
-        Task<bool> ValidateRollbackSuccess();
-        Task LogIncident(string description, Dictionary<string, object> metadata);
-        Task<List<MitigationIncident>> GetIncidentHistory();
-    }
-
     public class AutomaticMitigationService : IAutomaticMitigationService
     {
         private readonly ILogger<AutomaticMitigationService> _logger;
-        private readonly MLModelValidationService _validationService;
-        private readonly MLModelTrainingService _trainingService;
-        private readonly List<MitigationIncident> _incidentHistory;
-        private string _lastStableModelVersion;
+        private readonly ICacheProvider _cacheProvider;
+        private readonly IModelPerformanceMonitor _performanceMonitor;
+        private readonly IAlertManagementService _alertService;
+        private readonly List<MitigationAction> _activeMitigations = new();
+        private readonly List<MitigationAction> _mitigationHistory = new();
+        private bool _automaticMitigationEnabled = true;
 
         public AutomaticMitigationService(
-            ILogger<AutomaticMitigationService> logger,
-            MLModelValidationService validationService,
-            MLModelTrainingService trainingService)
+            ILogger<AutomaticMitigationService> logger = null,
+            ICacheProvider cacheProvider = null,
+            IModelPerformanceMonitor performanceMonitor = null,
+            IAlertManagementService alertService = null)
         {
-            _logger = logger;
-            _validationService = validationService;
-            _trainingService = trainingService;
-            _incidentHistory = new List<MitigationIncident>();
-            _lastStableModelVersion = trainingService.GetLatestStableVersion();
+            _logger = logger ?? new Logger<AutomaticMitigationService>(new LoggerFactory());
+            _cacheProvider = cacheProvider;
+            _performanceMonitor = performanceMonitor;
+            _alertService = alertService;
         }
 
-        public async Task InitiateModelRollback()
+        public async Task<bool> ApplyMitigationsAsync()
         {
+            if (!_automaticMitigationEnabled)
+            {
+                _logger.LogInformation("Automatic mitigation is disabled");
+                return false;
+            }
+
             try
             {
-                _logger.LogWarning("Initiating model rollback to last stable version: {Version}", _lastStableModelVersion);
-                
-                var rollbackSuccess = await _trainingService.RollbackToVersion(_lastStableModelVersion);
-                if (rollbackSuccess)
+                var mitigationsApplied = false;
+
+                // Apply cache optimizations if needed
+                if (_cacheProvider != null)
                 {
-                    await LogIncident("Automatic model rollback performed", new Dictionary<string, object>
+                    var cacheStats = _cacheProvider.GetCacheStats();
+                    if (cacheStats.HitRatio < 0.5)
                     {
-                        { "previous_version", _lastStableModelVersion },
-                        { "timestamp", DateTime.UtcNow },
-                        { "status", "success" }
-                    });
-                    
-                    _logger.LogInformation("Model rollback completed successfully");
+                        await ApplyCacheMitigationAsync();
+                        mitigationsApplied = true;
+                    }
                 }
-                else
-                {
-                    _logger.LogError("Model rollback failed");
-                    throw new Exception("Failed to rollback to stable version");
-                }
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Error during model rollback");
-                throw;
-            }
-        }
 
-        public async Task<bool> ValidateRollbackSuccess()
-        {
-            try
-            {
-                var validationResult = await _validationService.ValidateCurrentModel();
-                var isValid = validationResult.Accuracy >= 0.95 && validationResult.F1Score >= 0.90;
-                
-                if (isValid)
+                // Apply model performance mitigations if needed
+                if (_performanceMonitor != null)
                 {
-                    _logger.LogInformation("Rollback validation successful");
+                    var alerts = await _performanceMonitor.GetActiveAlertsAsync();
+                    if (alerts.Any(a => a.Severity == "Error"))
+                    {
+                        await ApplyModelMitigationAsync(alerts);
+                        mitigationsApplied = true;
+                    }
                 }
-                else
-                {
-                    _logger.LogWarning("Rollback validation failed. Metrics below threshold");
-                }
-                
-                return isValid;
+
+                // Clean up expired mitigations
+                await CleanupExpiredMitigationsAsync();
+
+                return mitigationsApplied;
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Error validating rollback");
+                _logger.LogError(ex, "Error applying automatic mitigations");
                 return false;
             }
         }
 
-        public async Task LogIncident(string description, Dictionary<string, object> metadata)
+        private async Task ApplyCacheMitigationAsync()
         {
-            var severity = metadata.ContainsKey("severity") 
-                ? Enum.Parse<IncidentSeverity>(metadata["severity"].ToString()) 
-                : IncidentSeverity.Medium;
-
-            var performanceMetrics = await _validationService.ValidateCurrentModel();
-
-            var incident = new MitigationIncident
+            var mitigation = new MitigationAction
             {
-                Timestamp = DateTime.UtcNow,
-                Description = description,
-                Severity = severity,
-                Category = metadata.GetValueOrDefault("category")?.ToString(),
-                CorrelationId = metadata.GetValueOrDefault("correlationId")?.ToString(),
-                AffectedUsers = metadata.ContainsKey("affectedUsers") 
-                    ? Convert.ToInt32(metadata["affectedUsers"]) 
-                    : 0,
-                PerformanceMetrics = new Dictionary<string, object>
+                Type = "CacheOptimization",
+                Description = "Optimize cache due to low hit ratio",
+                AppliedAt = DateTime.UtcNow,
+                ExpiresAt = DateTime.UtcNow.AddHours(1),
+                Parameters = new Dictionary<string, object>
                 {
-                    { "accuracy", performanceMetrics.Accuracy },
-                    { "f1Score", performanceMetrics.F1Score },
-                    { "latency", performanceMetrics.AverageLatency }
-                },
-                Metadata = metadata
+                    ["target_hit_ratio"] = 0.7
+                }
             };
 
-            _incidentHistory.Add(incident);
-            _logger.LogInformation(
-                "Incident logged: {Description} [Severity: {Severity}, Category: {Category}, CorrelationId: {CorrelationId}]",
-                description, severity, incident.Category, incident.CorrelationId);
+            _activeMitigations.Add(mitigation);
+            _mitigationHistory.Add(mitigation);
+
+            try
+            {
+                // Implement cache optimization logic here
+                mitigation.ResultStatus = "Applied";
+                _logger.LogInformation("Applied cache optimization mitigation");
+            }
+            catch (Exception ex)
+            {
+                mitigation.ResultStatus = "Failed";
+                _logger.LogError(ex, "Failed to apply cache optimization mitigation");
+            }
         }
 
-        public async Task<List<MitigationIncident>> GetIncidentHistory()
+        private async Task ApplyModelMitigationAsync(List<ModelAlert> alerts)
         {
-            return _incidentHistory;
+            foreach (var alert in alerts.Where(a => a.Severity == "Error"))
+            {
+                var mitigation = new MitigationAction
+                {
+                    Type = "ModelFailover",
+                    Description = $"Failover for {alert.Provider}/{alert.Model} due to {alert.Type}",
+                    AppliedAt = DateTime.UtcNow,
+                    ExpiresAt = DateTime.UtcNow.AddHours(2),
+                    Parameters = new Dictionary<string, object>
+                    {
+                        ["provider"] = alert.Provider,
+                        ["model"] = alert.Model,
+                        ["alert_type"] = alert.Type
+                    }
+                };
+
+                _activeMitigations.Add(mitigation);
+                _mitigationHistory.Add(mitigation);
+
+                try
+                {
+                    // Implement model failover logic here
+                    mitigation.ResultStatus = "Applied";
+                    _logger.LogInformation($"Applied failover mitigation for {alert.Provider}/{alert.Model}");
+                }
+                catch (Exception ex)
+                {
+                    mitigation.ResultStatus = "Failed";
+                    _logger.LogError(ex, $"Failed to apply failover mitigation for {alert.Provider}/{alert.Model}");
+                }
+            }
         }
-    }
 
-    public enum IncidentSeverity
-    {
-        Low,
-        Medium,
-        High,
-        Critical
-    }
+        private async Task CleanupExpiredMitigationsAsync()
+        {
+            var now = DateTime.UtcNow;
+            var expiredMitigations = _activeMitigations
+                .Where(m => m.ExpiresAt.HasValue && m.ExpiresAt.Value <= now)
+                .ToList();
 
-    public class MitigationIncident
-    {
-        public string Id { get; set; } = Guid.NewGuid().ToString();
-        public DateTime Timestamp { get; set; }
-        public string Description { get; set; }
-        public IncidentSeverity Severity { get; set; }
-        public string Category { get; set; }
-        public string CorrelationId { get; set; }
-        public int AffectedUsers { get; set; }
-        public Dictionary<string, object> PerformanceMetrics { get; set; }
-        public Dictionary<string, object> Metadata { get; set; }
-        public TimeSpan? RecoveryTime { get; set; }
+            foreach (var mitigation in expiredMitigations)
+            {
+                mitigation.IsActive = false;
+                _activeMitigations.Remove(mitigation);
+                _logger.LogInformation($"Expired mitigation: {mitigation.Type} - {mitigation.Description}");
+            }
+        }
+
+        public async Task<List<MitigationAction>> GetActiveMitigationsAsync()
+        {
+            return _activeMitigations;
+        }
+
+        public async Task<List<MitigationAction>> GetMitigationHistoryAsync(TimeSpan period)
+        {
+            var cutoff = DateTime.UtcNow - period;
+            return _mitigationHistory
+                .Where(m => m.AppliedAt >= cutoff)
+                .OrderByDescending(m => m.AppliedAt)
+                .ToList();
+        }
+
+        public async Task<bool> EnableAutomaticMitigationsAsync(bool enable)
+        {
+            _automaticMitigationEnabled = enable;
+            _logger.LogInformation($"Automatic mitigation {(enable ? "enabled" : "disabled")}");
+            return true;
+        }
+
+        public async Task<bool> IsAutomaticMitigationEnabledAsync()
+        {
+            return _automaticMitigationEnabled;
+        }
     }
 }

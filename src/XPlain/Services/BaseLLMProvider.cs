@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Net.Http;
 using System.Threading;
 using System.Threading.Tasks;
@@ -19,6 +20,7 @@ namespace XPlain.Services
         protected readonly TimeSpan _timeout;
         protected readonly IInputValidator _inputValidator;
 
+        // Original constructor with full parameters
         protected BaseLLMProvider(
             ILogger logger,
             HttpClient httpClient,
@@ -33,6 +35,51 @@ namespace XPlain.Services
             _metrics = metrics ?? throw new ArgumentNullException(nameof(metrics));
             _timeout = TimeSpan.FromSeconds(settings?.Value?.TimeoutSeconds ?? 30);
             _inputValidator = inputValidator ?? throw new ArgumentNullException(nameof(inputValidator));
+            
+            _circuitBreaker = new CircuitBreaker(
+                maxFailures: 3,
+                resetTimeout: TimeSpan.FromMinutes(5));
+        }
+        
+        // Simplified constructor for backward compatibility
+        protected BaseLLMProvider(
+            ICacheProvider cacheProvider,
+            IRateLimitingService rateLimitingService,
+            IOptions<StreamingSettings> streamingSettings = null)
+        {
+            _logger = new Logger<BaseLLMProvider>(new LoggerFactory());
+            
+            // Configure HTTP client with streaming handler if available
+            if (streamingSettings != null)
+            {
+                _httpClient = new HttpClient(new StreamingHttpHandler(streamingSettings.Value));
+            }
+            else
+            {
+                _httpClient = new HttpClient();
+            }
+            
+            _rateLimitingService = rateLimitingService ?? throw new ArgumentNullException(nameof(rateLimitingService));
+            _metrics = new LLMProviderMetrics();
+            _timeout = TimeSpan.FromSeconds(30);
+            _inputValidator = new DefaultInputValidator();
+            
+            _circuitBreaker = new CircuitBreaker(
+                maxFailures: 3,
+                resetTimeout: TimeSpan.FromMinutes(5));
+        }
+
+        // Default constructor for testing
+        protected BaseLLMProvider()
+        {
+            _logger = new Logger<BaseLLMProvider>(new LoggerFactory());
+            _httpClient = new HttpClient();
+            _rateLimitingService = new RateLimitingService(
+                Options.Create(new RateLimitSettings()), 
+                new Logger<RateLimitingService>(new LoggerFactory()));
+            _metrics = new LLMProviderMetrics();
+            _timeout = TimeSpan.FromSeconds(30);
+            _inputValidator = new DefaultInputValidator();
             
             _circuitBreaker = new CircuitBreaker(
                 maxFailures: 3,
@@ -53,8 +100,39 @@ namespace XPlain.Services
             var validatedPrompt = await ValidateAndSanitizePromptAsync(prompt);
             return await GetCompletionInternalAsync(validatedPrompt);
         }
+        
+
 
         protected abstract Task<string> GetCompletionInternalAsync(string validatedPrompt);
+        
+        protected virtual async IAsyncEnumerable<string> GetCompletionStreamInternalAsync(string validatedPrompt)
+        {
+            // Default implementation for providers that don't support streaming
+            var response = await GetCompletionInternalAsync(validatedPrompt);
+            yield return response;
+        }
+        
+        public virtual async IAsyncEnumerable<string> GetCompletionStreamAsync(string prompt)
+        {
+            // Validate and sanitize the input before passing to the provider
+            try
+            {
+                var validatedPrompt = await ValidateAndSanitizePromptAsync(prompt);
+                await foreach (var chunk in GetCompletionStreamInternalAsync(validatedPrompt))
+                {
+                    yield return chunk;
+                }
+            }
+            catch (Exception ex)
+            {
+                var llmEx = ex as LLMProviderException ?? ClassifyException(ex);
+                _logger.LogError(llmEx, $"Error in streaming completion from {ProviderName}: {llmEx.Message}");
+                
+                // Return error message as a single chunk
+                yield return $"Error: {llmEx.Message}";
+            }
+        }
+
 
         protected async Task<string> ValidateAndSanitizePromptAsync(string prompt)
         {
@@ -99,7 +177,7 @@ namespace XPlain.Services
             };
         }
 
-        protected async Task<T> ExecuteWithRetryAsync<T>(Func<Task<T>> action, int maxRetries = 3)
+        protected async Task<T> ExecuteWithRetryAsync<T>(Func<CancellationToken, Task<T>> action, int maxRetries = 3)
         {
             if (!_circuitBreaker.IsAllowed())
             {
@@ -108,11 +186,12 @@ namespace XPlain.Services
 
             LLMProviderException lastException = null;
             var startTime = DateTime.UtcNow;
-            for (int attempt = 0; attempt < maxRetries; attempt++)
+            for (int attempt = 0; attempt <= maxRetries; attempt++)
             {
                 try
                 {
-                    if (!await _rateLimitingService.WaitForAvailabilityAsync(ProviderName))
+                    bool available = await _rateLimitingService.WaitForAvailabilityAsync(ProviderName);
+                    if (!available)
                     {
                         throw new LLMProviderException(
                             "Rate limit exceeded", 
@@ -120,31 +199,44 @@ namespace XPlain.Services
                             true);
                     }
 
-                    using var cts = new CancellationTokenSource(_timeout);
-                    using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cts.Token);
+                    // Acquire a permit before executing the action
+                    await _rateLimitingService.AcquirePermitAsync(ProviderName);
                     
-                    var timeoutTask = Task.Delay(_timeout, linkedCts.Token);
-                    var actionTask = action();
-                    
-                    var completedTask = await Task.WhenAny(actionTask, timeoutTask);
-                    
-                    if (completedTask == timeoutTask)
+                    try
                     {
-                        linkedCts.Cancel(); // Cancel the action task
-                        throw new TimeoutException($"Request timed out after {_timeout.TotalSeconds} seconds");
-                    }
+                        using var cts = new CancellationTokenSource(_timeout);
+                        using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cts.Token);
+                        
+                        var timeoutTask = Task.Delay(_timeout, linkedCts.Token);
+                        var actionTask = action(linkedCts.Token);
+                        
+                        var completedTask = await Task.WhenAny(actionTask, timeoutTask);
+                        
+                        if (completedTask == timeoutTask)
+                        {
+                            linkedCts.Cancel(); // Cancel the action task
+                            throw new TimeoutException($"Request timed out after {_timeout.TotalSeconds} seconds");
+                        }
 
-                    linkedCts.Cancel(); // Cancel the timeout task
-                    
-                    if (actionTask.IsFaulted)
+                        linkedCts.Cancel(); // Cancel the timeout task
+                        
+                        if (actionTask.IsFaulted)
+                        {
+                            if (actionTask.Exception?.InnerException != null)
+                                throw actionTask.Exception.InnerException;
+                            throw new Exception("Unknown error in action task");
+                        }
+
+                        var finalResult = await actionTask;
+                        _circuitBreaker.OnSuccess();
+                        _metrics.RecordSuccess(ProviderName, DateTime.UtcNow - startTime);
+                        return finalResult;
+                    }
+                    finally
                     {
-                        throw await actionTask;
+                        // Always release the permit when we're done
+                        _rateLimitingService.ReleasePermit(ProviderName);
                     }
-
-                    var finalResult = await actionTask;
-                    _circuitBreaker.OnSuccess();
-                    _metrics.RecordSuccess(ProviderName, DateTime.UtcNow - startTime);
-                    return finalResult;
                 }
                 catch (Exception ex) when (!(ex is LLMProviderException))
                 {
@@ -152,7 +244,7 @@ namespace XPlain.Services
                     _metrics.RecordFailure(ProviderName);
                     _logger.LogWarning(ex, $"Attempt {attempt + 1} failed for {ProviderName}");
                     
-                    if (attempt < maxRetries - 1 && lastException.IsTransient)
+                    if (attempt < maxRetries && lastException.IsTransient)
                     {
                         var baseDelay = TimeSpan.FromSeconds(Math.Pow(2, attempt)); // Exponential backoff
                         var jitter = TimeSpan.FromMilliseconds(Random.Shared.Next(-500, 500)); // Add jitter

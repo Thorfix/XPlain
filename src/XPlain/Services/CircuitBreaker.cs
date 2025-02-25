@@ -1,96 +1,113 @@
-namespace XPlain.Services;
+using System;
 
-public class CircuitBreaker
+namespace XPlain.Services
 {
-    private readonly object _lock = new();
-    private readonly double _failureThreshold;
-    private readonly int _resetTimeoutMs;
-    private CircuitState _state = CircuitState.Closed;
-    private DateTime _lastStateChange = DateTime.UtcNow;
-    private int _totalRequests;
-    private int _failedRequests;
-    private readonly Queue<DateTime> _recentFailures = new();
-
-    public CircuitBreaker(double failureThreshold, int resetTimeoutMs)
+    public class CircuitBreaker
     {
-        _failureThreshold = failureThreshold;
-        _resetTimeoutMs = resetTimeoutMs;
-    }
+        private readonly int _maxFailures;
+        private readonly TimeSpan _resetTimeout;
+        private int _failureCount;
+        private DateTime _lastFailureTime;
+        private DateTime _lastStateChange;
+        private CircuitState _state;
 
-    public bool CanProcess()
-    {
-        lock (_lock)
+        public enum CircuitState
         {
-            CleanupOldFailures();
-
-            switch (_state)
-            {
-                case CircuitState.Closed:
-                    return true;
-                case CircuitState.Open:
-                    if ((DateTime.UtcNow - _lastStateChange).TotalMilliseconds >= _resetTimeoutMs)
-                    {
-                        _state = CircuitState.HalfOpen;
-                        _lastStateChange = DateTime.UtcNow;
-                        return true;
-                    }
-                    return false;
-                case CircuitState.HalfOpen:
-                    return true;
-                default:
-                    return false;
-            }
+            Closed,
+            Open,
+            HalfOpen
         }
-    }
 
-    public void RecordSuccess()
-    {
-        lock (_lock)
+        public CircuitState CurrentState => _state;
+        public DateTime LastStateChange => _lastStateChange;
+        public int FailureCount => _failureCount;
+        public DateTime NextRetryTime => _lastFailureTime.Add(_resetTimeout);
+
+        public CircuitBreaker(int maxFailures, TimeSpan resetTimeout)
+        {
+            _maxFailures = maxFailures;
+            _resetTimeout = resetTimeout;
+            _state = CircuitState.Closed;
+            _lastStateChange = DateTime.UtcNow;
+        }
+
+        public CircuitBreaker(int maxFailures, int resetTimeoutMs) 
+            : this(maxFailures, TimeSpan.FromMilliseconds(resetTimeoutMs))
+        {
+        }
+
+        public CircuitBreaker(double failureThreshold, int resetTimeoutMs)
+            : this((int)(failureThreshold * 10), TimeSpan.FromMilliseconds(resetTimeoutMs))
+        {
+        }
+
+        public bool IsAllowed()
+        {
+            return CanProcess();
+        }
+
+        public bool CanProcess()
+        {
+            if (_state == CircuitState.Open)
+            {
+                // Check if the timeout has elapsed since the last failure
+                if (DateTime.UtcNow - _lastFailureTime > _resetTimeout)
+                {
+                    // Move to half-open state to test if the issue is resolved
+                    SetState(CircuitState.HalfOpen);
+                    return true;
+                }
+                return false;
+            }
+            
+            return true;
+        }
+
+        public void OnSuccess()
+        {
+            RecordSuccess();
+        }
+
+        public void RecordSuccess()
         {
             if (_state == CircuitState.HalfOpen)
             {
-                _state = CircuitState.Closed;
-                _lastStateChange = DateTime.UtcNow;
-                _totalRequests = 0;
-                _failedRequests = 0;
-                _recentFailures.Clear();
+                // Reset the failure count and return to closed state on success
+                _failureCount = 0;
+                SetState(CircuitState.Closed);
             }
-            _totalRequests++;
         }
-    }
 
-    public void RecordFailure()
-    {
-        lock (_lock)
+        public void OnFailure()
         {
-            _totalRequests++;
-            _failedRequests++;
-            _recentFailures.Enqueue(DateTime.UtcNow);
+            RecordFailure();
+        }
 
-            if (_state == CircuitState.HalfOpen ||
-                (_state == CircuitState.Closed && (double)_failedRequests / _totalRequests >= _failureThreshold))
+        public void RecordFailure()
+        {
+            _lastFailureTime = DateTime.UtcNow;
+            
+            if (_state == CircuitState.HalfOpen)
             {
-                _state = CircuitState.Open;
+                // Immediately trip back to open state on a failure in half-open state
+                SetState(CircuitState.Open);
+                return;
+            }
+            
+            _failureCount++;
+            if (_failureCount >= _maxFailures)
+            {
+                SetState(CircuitState.Open);
+            }
+        }
+        
+        private void SetState(CircuitState newState)
+        {
+            if (_state != newState)
+            {
+                _state = newState;
                 _lastStateChange = DateTime.UtcNow;
             }
         }
-    }
-
-    private void CleanupOldFailures()
-    {
-        var cutoff = DateTime.UtcNow.AddMilliseconds(-_resetTimeoutMs);
-        while (_recentFailures.Count > 0 && _recentFailures.Peek() < cutoff)
-        {
-            _recentFailures.Dequeue();
-            if (_failedRequests > 0) _failedRequests--;
-            if (_totalRequests > 0) _totalRequests--;
-        }
-    }
-
-    private enum CircuitState
-    {
-        Closed,
-        Open,
-        HalfOpen
     }
 }

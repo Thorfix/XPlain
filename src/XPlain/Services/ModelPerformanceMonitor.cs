@@ -1,362 +1,207 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
-using XPlain.Services.Models;
+using Microsoft.Extensions.Options;
+using XPlain.Configuration;
 
 namespace XPlain.Services
 {
-    public interface IModelPerformanceMonitor
-    {
-        Task EvaluateModelPerformance();
-        Task<PerformanceMetrics> GetCurrentMetrics();
-        Task<List<PerformanceMetrics>> GetHistoricalMetrics(DateTime startDate, DateTime endDate);
-        Task<bool> IsPerformanceDegraded();
-        Task TriggerModelRollback();
-        Task<FeatureDistributionMetrics> AnalyzeFeatureDistribution();
-        Task<ResourceUtilizationMetrics> GetResourceUtilization();
-        Task<PerformanceStats> GetRollingWindowStats(TimeSpan window);
-        Task TriggerAutomaticCorrection(PerformanceIssueType issueType);
-    }
-
     public class ModelPerformanceMonitor : IModelPerformanceMonitor
     {
         private readonly ILogger<ModelPerformanceMonitor> _logger;
-        private readonly MLModelValidationService _validationService;
-        private readonly CacheMonitoringHub _monitoringHub;
-        private readonly IAutomaticMitigationService _mitigationService;
-        private readonly IResourceMonitor _resourceMonitor;
-        private readonly MLPredictionService _predictionService;
+        private readonly Dictionary<string, ModelMetrics> _modelMetrics = new();
+        private readonly List<ModelAlert> _activeAlerts = new();
         private readonly TimeSeriesMetricsStore _metricsStore;
-        private readonly IAlertManagementService _alertService;
-        private readonly AlertSettings _alertSettings;
-        private readonly Dictionary<string, double> _performanceThresholds;
-        private readonly List<PerformanceMetrics> _metricsHistory;
-        private readonly Queue<PerformanceMetrics> _rollingWindow;
-        private readonly int _rollingWindowSize = 100;
-        private DateTime _lastFeatureAnalysis = DateTime.MinValue;
-        private readonly TimeSpan _featureAnalysisInterval = TimeSpan.FromHours(1);
+        private readonly MetricsSettings _settings;
 
         public ModelPerformanceMonitor(
-            ILogger<ModelPerformanceMonitor> logger,
-            MLModelValidationService validationService,
-            CacheMonitoringHub monitoringHub,
-            IAutomaticMitigationService mitigationService,
-            IResourceMonitor resourceMonitor,
-            MLPredictionService predictionService,
-            TimeSeriesMetricsStore metricsStore,
-            IAlertManagementService alertService,
-            AlertSettings alertSettings)
+            ILogger<ModelPerformanceMonitor> logger = null,
+            IOptions<MetricsSettings> settings = null,
+            TimeSeriesMetricsStore metricsStore = null)
         {
-            _logger = logger;
-            _validationService = validationService;
-            _monitoringHub = monitoringHub;
-            _mitigationService = mitigationService;
-            _resourceMonitor = resourceMonitor;
-            _predictionService = predictionService;
-            _metricsStore = metricsStore;
-            _alertService = alertService;
-            _alertSettings = alertSettings;
-            _metricsHistory = new List<PerformanceMetrics>();
-            _rollingWindow = new Queue<PerformanceMetrics>(_rollingWindowSize);
-            
-            // Default performance thresholds
-            _performanceThresholds = new Dictionary<string, double>
-            {
-                { "accuracy", 0.95 },
-                { "f1_score", 0.90 },
-                { "precision", 0.92 },
-                { "recall", 0.92 }
-            };
+            _logger = logger ?? new Logger<ModelPerformanceMonitor>(new LoggerFactory());
+            _settings = settings?.Value ?? new MetricsSettings();
+            _metricsStore = metricsStore ?? new TimeSeriesMetricsStore();
         }
 
-        public async Task EvaluateModelPerformance()
+        public async Task TrackResponseAsync(string provider, string model, double responseTime, bool success, int tokenCount)
         {
-            try
+            var key = $"{provider}:{model}";
+            
+            if (!_modelMetrics.TryGetValue(key, out var metrics))
             {
-                var metrics = await GetCurrentMetrics();
-                _metricsHistory.Add(metrics);
+                metrics = new ModelMetrics();
+                _modelMetrics[key] = metrics;
+            }
+            
+            // Update metrics
+            metrics.Update(responseTime, success, tokenCount);
+            
+            // Store time series data
+            await _metricsStore.RecordMetricAsync($"{key}:response_time", responseTime);
+            await _metricsStore.RecordMetricAsync($"{key}:success_rate", success ? 1.0 : 0.0);
+            await _metricsStore.RecordMetricAsync($"{key}:token_count", tokenCount);
+            
+            // Check for alerts
+            await CheckForAlertsAsync(provider, model, metrics);
+        }
+
+        private async Task CheckForAlertsAsync(string provider, string model, ModelMetrics metrics)
+        {
+            // Check response time alert
+            if (metrics.AvgResponseTime > _settings.ResponseTimeAlertThresholdMs)
+            {
+                await CreateAlertAsync(
+                    provider,
+                    model,
+                    "ResponseTime",
+                    $"High response time detected for {provider}/{model}: {metrics.AvgResponseTime:F1}ms",
+                    "Warning",
+                    new Dictionary<string, object>
+                    {
+                        ["avg_response_time"] = metrics.AvgResponseTime,
+                        ["threshold"] = _settings.ResponseTimeAlertThresholdMs
+                    });
+            }
+            
+            // Check error rate alert
+            var errorRate = 1.0 - metrics.SuccessRate;
+            if (errorRate > _settings.ErrorRateAlertThreshold)
+            {
+                await CreateAlertAsync(
+                    provider,
+                    model,
+                    "ErrorRate",
+                    $"High error rate detected for {provider}/{model}: {errorRate:P2}",
+                    errorRate > _settings.ErrorRateAlertThreshold * 1.5 ? "Error" : "Warning",
+                    new Dictionary<string, object>
+                    {
+                        ["error_rate"] = errorRate,
+                        ["threshold"] = _settings.ErrorRateAlertThreshold
+                    });
+            }
+        }
+
+        private async Task CreateAlertAsync(
+            string provider,
+            string model,
+            string type,
+            string message,
+            string severity,
+            Dictionary<string, object> metadata = null)
+        {
+            // Check if we already have a similar active alert
+            var existingAlert = _activeAlerts.FirstOrDefault(a => 
+                a.Provider == provider && 
+                a.Model == model && 
+                a.Type == type);
                 
-                // Maintain rolling window
-                if (_rollingWindow.Count >= _rollingWindowSize)
+            if (existingAlert != null)
+            {
+                // Update existing alert if it's older than 10 minutes
+                if (DateTime.UtcNow - existingAlert.CreatedAt > TimeSpan.FromMinutes(10))
                 {
-                    _rollingWindow.Dequeue();
+                    existingAlert.Message = message;
+                    existingAlert.Severity = severity;
+                    existingAlert.CreatedAt = DateTime.UtcNow;
+                    existingAlert.Metadata = metadata ?? new Dictionary<string, object>();
                 }
-                _rollingWindow.Enqueue(metrics);
-
-                // Store metrics for long-term analysis
-                await _metricsStore.StoreMetrics("model_performance", metrics);
-
-                // Check for feature distribution drift
-                if (DateTime.UtcNow - _lastFeatureAnalysis >= _featureAnalysisInterval)
-                {
-                    var distributionMetrics = await AnalyzeFeatureDistribution();
-                    if (distributionMetrics.HasSignificantDrift)
-                    {
-                        await SendAlert(AlertSeverity.Warning, "Feature Distribution Drift Detected",
-                            $"Significant drift detected in features: {string.Join(", ", distributionMetrics.DriftedFeatures)}");
-                        await TriggerAutomaticCorrection(PerformanceIssueType.FeatureDrift);
-                    }
-                    _lastFeatureAnalysis = DateTime.UtcNow;
-                }
-
-                // Monitor resource utilization
-                var resourceMetrics = await GetResourceUtilization();
-                if (resourceMetrics.IsOverloaded)
-                {
-                    await SendAlert(AlertSeverity.Warning, "High Resource Utilization",
-                        $"CPU: {resourceMetrics.CpuUsage}%, Memory: {resourceMetrics.MemoryUsage}%");
-                    await TriggerAutomaticCorrection(PerformanceIssueType.ResourceOverload);
-                }
-
-                if (await IsPerformanceDegraded())
-                {
-                    _logger.LogWarning("Model performance degradation detected");
-                    await SendAlert(AlertSeverity.Warning, "Model Performance Degradation Detected", 
-                        $"Current accuracy: {metrics.Accuracy}, Below threshold: {_performanceThresholds["accuracy"]}");
-                    
-                    if (metrics.Accuracy < _performanceThresholds["accuracy"] * 0.9) // Severe degradation
-                    {
-                        await TriggerModelRollback();
-                    }
-                }
-
-                await _monitoringHub.SendAsync("UpdateModelMetrics", metrics);
+                return;
             }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Error during model performance evaluation");
-                await SendAlert(AlertSeverity.Error, "Model Monitoring Error", ex.Message);
-            }
-        }
-
-        public async Task<PerformanceMetrics> GetCurrentMetrics()
-        {
-            var validationResult = await _validationService.ValidateCurrentModel();
-            return new PerformanceMetrics
-            {
-                Timestamp = DateTime.UtcNow,
-                ModelVersion = validationResult.ModelVersion,
-                Accuracy = validationResult.Accuracy,
-                F1Score = validationResult.F1Score,
-                Precision = validationResult.Precision,
-                Recall = validationResult.Recall,
-                LatencyMs = validationResult.LatencyMs
-            };
-        }
-
-        public async Task<List<PerformanceMetrics>> GetHistoricalMetrics(DateTime startDate, DateTime endDate)
-        {
-            return _metricsHistory.FindAll(m => m.Timestamp >= startDate && m.Timestamp <= endDate);
-        }
-
-        public async Task<bool> IsPerformanceDegraded()
-        {
-            var currentMetrics = await GetCurrentMetrics();
-            var stats = await GetRollingWindowStats(TimeSpan.FromHours(24));
-
-            return currentMetrics.Accuracy < _performanceThresholds["accuracy"] ||
-                   currentMetrics.F1Score < _performanceThresholds["f1_score"] ||
-                   currentMetrics.Precision < _performanceThresholds["precision"] ||
-                   currentMetrics.Recall < _performanceThresholds["recall"] ||
-                   stats.IsStatisticallySignificantDrop();
-        }
-
-        public async Task<FeatureDistributionMetrics> AnalyzeFeatureDistribution()
-        {
-            var currentDistribution = await _predictionService.GetFeatureDistribution();
-            var baselineDistribution = await _validationService.GetBaselineDistribution();
             
-            var driftedFeatures = new List<string>();
-            foreach (var feature in currentDistribution.Keys)
+            // Create new alert
+            _activeAlerts.Add(new ModelAlert
             {
-                if (IsDistributionDriftSignificant(currentDistribution[feature], baselineDistribution[feature]))
-                {
-                    driftedFeatures.Add(feature);
-                }
-            }
-
-            return new FeatureDistributionMetrics
-            {
-                Timestamp = DateTime.UtcNow,
-                HasSignificantDrift = driftedFeatures.Count > 0,
-                DriftedFeatures = driftedFeatures,
-                CurrentDistribution = currentDistribution,
-                BaselineDistribution = baselineDistribution
-            };
-        }
-
-        public async Task<ResourceUtilizationMetrics> GetResourceUtilization()
-        {
-            var metrics = await _resourceMonitor.GetCurrentMetrics();
-            return new ResourceUtilizationMetrics
-            {
-                Timestamp = DateTime.UtcNow,
-                CpuUsage = metrics.CpuUsage,
-                MemoryUsage = metrics.MemoryUsage,
-                GpuUsage = metrics.GpuUsage,
-                NetworkLatency = metrics.NetworkLatency,
-                IsOverloaded = metrics.CpuUsage > 80 || metrics.MemoryUsage > 85
-            };
-        }
-
-        public async Task<PerformanceStats> GetRollingWindowStats(TimeSpan window)
-        {
-            var relevantMetrics = _rollingWindow.Where(m => DateTime.UtcNow - m.Timestamp <= window).ToList();
-            
-            return new PerformanceStats
-            {
-                MeanAccuracy = relevantMetrics.Average(m => m.Accuracy),
-                StdDevAccuracy = CalculateStdDev(relevantMetrics.Select(m => m.Accuracy)),
-                TrendSlope = CalculateTrendSlope(relevantMetrics),
-                SampleSize = relevantMetrics.Count
-            };
-        }
-
-        public async Task TriggerAutomaticCorrection(PerformanceIssueType issueType)
-        {
-            switch (issueType)
-            {
-                case PerformanceIssueType.FeatureDrift:
-                    await _mitigationService.TriggerModelRetraining();
-                    break;
-                case PerformanceIssueType.ResourceOverload:
-                    await _mitigationService.ActivateSimplifiedModel();
-                    break;
-                case PerformanceIssueType.PerformanceDegradation:
-                    await TriggerModelRollback();
-                    break;
-            }
-        }
-
-        private double CalculateStdDev(IEnumerable<double> values)
-        {
-            var avg = values.Average();
-            var sumOfSquaresOfDifferences = values.Select(val => (val - avg) * (val - avg)).Sum();
-            return Math.Sqrt(sumOfSquaresOfDifferences / (values.Count() - 1));
-        }
-
-        private double CalculateTrendSlope(List<PerformanceMetrics> metrics)
-        {
-            if (metrics.Count < 2) return 0;
-            
-            var xMean = metrics.Select((m, i) => (double)i).Average();
-            var yMean = metrics.Select(m => m.Accuracy).Average();
-            
-            var numerator = metrics.Select((m, i) => ((double)i - xMean) * (m.Accuracy - yMean)).Sum();
-            var denominator = metrics.Select((m, i) => Math.Pow((double)i - xMean, 2)).Sum();
-            
-            return denominator == 0 ? 0 : numerator / denominator;
-        }
-
-        private bool IsDistributionDriftSignificant(Dictionary<string, double> current, Dictionary<string, double> baseline)
-        {
-            // Implement Kolmogorov-Smirnov test or similar statistical test
-            const double THRESHOLD = 0.05;
-            var ksStatistic = CalculateKSStatistic(current, baseline);
-            return ksStatistic > THRESHOLD;
-        }
-
-        private double CalculateKSStatistic(Dictionary<string, double> dist1, Dictionary<string, double> dist2)
-        {
-            // Simplified K-S statistic calculation
-            var keys = dist1.Keys.Union(dist2.Keys);
-            return keys.Max(k => Math.Abs(
-                dist1.GetValueOrDefault(k, 0) - dist2.GetValueOrDefault(k, 0)));
-        }
-
-        public async Task TriggerModelRollback()
-        {
-            _logger.LogWarning("Initiating model rollback due to severe performance degradation");
-            await SendAlert(AlertSeverity.Critical, "Model Rollback Initiated", 
-                "Severe performance degradation detected. Rolling back to previous model version.");
-            
-            await _mitigationService.InitiateModelRollback();
-        }
-
-        private async Task SendAlert(AlertSeverity severity, string title, string message)
-        {
-            var alert = new Alert
-            {
-                Title = title,
-                Description = message,
+                Provider = provider,
+                Model = model,
+                Type = type,
+                Message = message,
                 Severity = severity,
-                Source = "ModelPerformanceMonitor",
-                Metadata = new Dictionary<string, object>
-                {
-                    { "modelVersion", (await GetCurrentMetrics()).ModelVersion }
-                }
-            };
-
-            await _alertService.CreateAlertAsync(alert);
-            await _monitoringHub.SendAsync("ModelAlert", alert);
+                Metadata = metadata ?? new Dictionary<string, object>()
+            });
+            
+            // Limit number of active alerts
+            if (_activeAlerts.Count > 100)
+            {
+                _activeAlerts.RemoveAt(0);
+            }
         }
-    }
 
-    public enum AlertSeverity
-    {
-        Info,
-        Warning,
-        Error,
-        Critical
-    }
-
-    public class PerformanceMetrics
-    {
-        public DateTime Timestamp { get; set; }
-        public string ModelVersion { get; set; }
-        public double Accuracy { get; set; }
-        public double F1Score { get; set; }
-        public double Precision { get; set; }
-        public double Recall { get; set; }
-        public double LatencyMs { get; set; }
-    }
-
-    public class ModelAlert
-    {
-        public AlertSeverity Severity { get; set; }
-        public string Title { get; set; }
-        public string Message { get; set; }
-        public DateTime Timestamp { get; set; }
-    }
-
-    public class FeatureDistributionMetrics
-    {
-        public DateTime Timestamp { get; set; }
-        public bool HasSignificantDrift { get; set; }
-        public List<string> DriftedFeatures { get; set; }
-        public Dictionary<string, Dictionary<string, double>> CurrentDistribution { get; set; }
-        public Dictionary<string, Dictionary<string, double>> BaselineDistribution { get; set; }
-    }
-
-    public class ResourceUtilizationMetrics
-    {
-        public DateTime Timestamp { get; set; }
-        public double CpuUsage { get; set; }
-        public double MemoryUsage { get; set; }
-        public double GpuUsage { get; set; }
-        public double NetworkLatency { get; set; }
-        public bool IsOverloaded { get; set; }
-    }
-
-    public class PerformanceStats
-    {
-        public double MeanAccuracy { get; set; }
-        public double StdDevAccuracy { get; set; }
-        public double TrendSlope { get; set; }
-        public int SampleSize { get; set; }
-
-        public bool IsStatisticallySignificantDrop()
+        public async Task<Dictionary<string, double>> GetModelMetricsAsync(string provider, string model)
         {
-            const double ZSCORE_THRESHOLD = -1.96; // 95% confidence level
-            return TrendSlope < 0 && (TrendSlope / (StdDevAccuracy / Math.Sqrt(SampleSize))) < ZSCORE_THRESHOLD;
+            var key = $"{provider}:{model}";
+            
+            if (!_modelMetrics.TryGetValue(key, out var metrics))
+            {
+                return new Dictionary<string, double>();
+            }
+            
+            return new Dictionary<string, double>
+            {
+                ["avg_response_time"] = metrics.AvgResponseTime,
+                ["success_rate"] = metrics.SuccessRate,
+                ["avg_token_count"] = metrics.AvgTokenCount,
+                ["request_count"] = metrics.RequestCount,
+                ["error_count"] = metrics.ErrorCount
+            };
         }
-    }
 
-    public enum PerformanceIssueType
-    {
-        FeatureDrift,
-        ResourceOverload,
-        PerformanceDegradation
+        public async Task<Dictionary<string, List<TimeSeriesDataPoint>>> GetHistoricalMetricsAsync(
+            string provider, 
+            string model, 
+            TimeSpan period)
+        {
+            var key = $"{provider}:{model}";
+            var result = new Dictionary<string, List<TimeSeriesDataPoint>>();
+            
+            var metrics = new[] { "response_time", "success_rate", "token_count" };
+            
+            foreach (var metric in metrics)
+            {
+                var data = await _metricsStore.GetMetricHistoryAsync($"{key}:{metric}", period);
+                result[metric] = data.Select(p => new TimeSeriesDataPoint
+                {
+                    Timestamp = p.Timestamp,
+                    Value = p.Value
+                }).ToList();
+            }
+            
+            return result;
+        }
+
+        public async Task<List<ModelAlert>> GetActiveAlertsAsync()
+        {
+            return _activeAlerts;
+        }
+
+        private class ModelMetrics
+        {
+            public double AvgResponseTime { get; private set; }
+            public double SuccessRate { get; private set; } = 1.0;
+            public double AvgTokenCount { get; private set; }
+            public int RequestCount { get; private set; }
+            public int ErrorCount { get; private set; }
+            
+            private double _totalResponseTime;
+            private double _totalTokenCount;
+            
+            public void Update(double responseTime, bool success, int tokenCount)
+            {
+                RequestCount++;
+                _totalResponseTime += responseTime;
+                _totalTokenCount += tokenCount;
+                
+                if (!success)
+                {
+                    ErrorCount++;
+                }
+                
+                AvgResponseTime = _totalResponseTime / RequestCount;
+                SuccessRate = (RequestCount - ErrorCount) / (double)RequestCount;
+                AvgTokenCount = _totalTokenCount / RequestCount;
+            }
+        }
     }
 }

@@ -28,6 +28,31 @@ public class AnthropicSettings : LLMSettings
         get => Model;
         set => Model = value;
     }
+    
+    public override void Validate()
+    {
+        // Call base validation with empty check bypass to avoid double validation
+        if (string.IsNullOrWhiteSpace(Provider))
+            throw new ValidationException("Provider is required");
+            
+        if (string.IsNullOrWhiteSpace(Model))
+            throw new ValidationException("Model is required");
+            
+        if (string.IsNullOrWhiteSpace(ApiKey))
+            throw new ValidationException("API key is required");
+            
+        if (TimeoutSeconds < 5 || TimeoutSeconds > 300)
+            throw new ValidationException("Timeout must be between 5 and 300 seconds");
+            
+        if (string.IsNullOrEmpty(ApiToken))
+            throw new ValidationException("Anthropic API token is required");
+            
+        if (string.IsNullOrEmpty(ApiEndpoint))
+            throw new ValidationException("API endpoint is required");
+            
+        if (MaxTokenLimit <= 0)
+            throw new ValidationException("Maximum token limit must be greater than zero");
+    }
 
     [Range(1, 10, ErrorMessage = "Maximum retry attempts must be between 1 and 10")]
     public int MaxRetryAttempts { get; set; } = 3;
@@ -46,4 +71,10 @@ public class AnthropicSettings : LLMSettings
 
     [Range(5000, 300000, ErrorMessage = "Circuit breaker reset timeout must be between 5000 and 300000 milliseconds")]
     public int CircuitBreakerResetTimeoutMs { get; set; } = 30000;
+    
+    [Range(1000, 300000, ErrorMessage = "Maximum retry delay must be between 1000 and 300000 milliseconds")]
+    public int MaxRetryDelayMs { get; set; } = 30000;
+    
+    [Range(5, 300, ErrorMessage = "Timeout must be between 5 and 300 seconds")]
+    public override int TimeoutSeconds { get; set; } = 30;
 }

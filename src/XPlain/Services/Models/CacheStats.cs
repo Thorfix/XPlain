@@ -3,68 +3,33 @@ using System.Collections.Generic;
 
 namespace XPlain.Services
 {
-    public class CacheInvalidationEvent
+    public class CacheStats
     {
-        public DateTime Time { get; set; }
-        public string Reason { get; set; }
-        public int ItemsEvicted { get; set; }
+        public long Hits { get; set; }
+        public long Misses { get; set; }
+        public long CachedItemCount { get; set; }
+        public long StorageUsageBytes { get; set; }
+        public Dictionary<string, long> QueryTypeStats { get; set; } = new Dictionary<string, long>();
+        public Dictionary<string, double> AverageResponseTimes { get; set; } = new Dictionary<string, double>();
+        public Dictionary<string, CachePerformanceMetrics> PerformanceByQueryType { get; set; } = new Dictionary<string, CachePerformanceMetrics>();
+        public List<CacheInvalidationEvent> InvalidationHistory { get; set; } = new List<CacheInvalidationEvent>();
+        public long InvalidationCount { get; set; }
+        public Dictionary<string, int> TopQueries { get; set; } = new Dictionary<string, int>();
+        public DateTime LastStatsUpdate { get; set; } = DateTime.UtcNow;
+        
+        public double HitRatio => (Hits + Misses) > 0 ? (double)Hits / (Hits + Misses) : 0;
     }
 
     public class CachePerformanceMetrics
     {
-        public double AverageResponseTime { get; set; }
         public double PerformanceGain { get; set; }
-        public int HitCount { get; set; }
-        public int MissCount { get; set; }
+        public double CachedResponseTime { get; set; }
+        public double NonCachedResponseTime { get; set; }
     }
 
-    public class CacheStats
+    public class CacheInvalidationEvent
     {
-        public long StorageUsageBytes { get; set; }
-        public int CachedItemCount { get; set; }
-        public Dictionary<string, double> AverageResponseTimes { get; set; }
-        public Dictionary<string, CachePerformanceMetrics> PerformanceByQueryType { get; set; }
-        public List<CacheInvalidationEvent> InvalidationHistory { get; set; }
-
-        public CacheStats()
-        {
-            AverageResponseTimes = new Dictionary<string, double>();
-            PerformanceByQueryType = new Dictionary<string, CachePerformanceMetrics>();
-            InvalidationHistory = new List<CacheInvalidationEvent>();
-        }
-    }
-
-    public class PreWarmMetrics
-    {
-        public long UsageFrequency { get; set; }
-        public DateTime LastAccessed { get; set; }
-        public double AverageResponseTime { get; set; }
-        public double PerformanceImpact { get; set; }
-        public long ResourceCost { get; set; }
-        public double PredictedValue { get; set; }
-        public PreWarmPriority RecommendedPriority { get; set; }
-    }
-
-    public enum PreWarmPriority
-    {
-        Low,
-        Medium,
-        High,
-        Critical
-    }
-
-    public class PreWarmingStrategy
-    {
-        public Dictionary<string, PreWarmPriority> KeyPriorities { get; set; }
-        public int BatchSize { get; set; }
-        public TimeSpan PreWarmInterval { get; set; }
-        public double ResourceThreshold { get; set; }
-        public Dictionary<string, DateTime> OptimalTimings { get; set; }
-
-        public PreWarmingStrategy()
-        {
-            KeyPriorities = new Dictionary<string, PreWarmPriority>();
-            OptimalTimings = new Dictionary<string, DateTime>();
-        }
+        public string Reason { get; set; }
+        public DateTime Time { get; set; } = DateTime.UtcNow;
     }
 }

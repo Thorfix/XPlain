@@ -1,18 +1,13 @@
-namespace XPlain.Services;
+using System.Threading.Tasks;
 
-public interface IAnthropicClient : ILLMProvider
+namespace XPlain.Services
 {
-    /// <summary>
-    /// Asks a question about the code using the Anthropic API
-    /// </summary>
-    /// <param name="question">The question to ask</param>
-    /// <param name="codeContext">The relevant code context for the question</param>
-    /// <returns>The response from the LLM</returns>
-    Task<string> AskQuestion(string question, string codeContext);
-
-    /// <summary>
-    /// Validates the connection to the Anthropic API
-    /// </summary>
-    /// <returns>True if the connection is valid, false otherwise</returns>
-    Task<bool> ValidateApiConnection();
+    public interface IAnthropicClient : ILLMProvider
+    {
+        /// <summary>
+        /// Validates the API connection to Anthropic
+        /// </summary>
+        /// <returns>True if the connection is valid, false otherwise</returns>
+        Task<bool> ValidateApiConnection();
+    }
 }
