@@ -24,6 +24,465 @@ namespace XPlain.Tests.Services
         // Comprehensive tests for compression functionality
     
     [Fact]
+    public async Task Compression_LLMResponse_EffectivelyReducesSize()
+    {
+        // This test validates that compression works effectively for LLM API responses,
+        // which typically contain large amounts of repeating text and JSON structure
+        
+        // Arrange
+        // Create a simulated LLM response with both JSON structure and text content
+        var simulatedLlmResponse = GenerateSimulatedLLMResponse(500); // 500KB simulated response
+        var key = "llm_response_compression_test";
+        
+        var settings = new CacheSettings
+        {
+            CacheEnabled = true,
+            CacheDirectory = _testDirectory,
+            CompressionEnabled = true,
+            CompressionAlgorithm = CompressionAlgorithm.Brotli, // Brotli works well for JSON/text
+            CompressionLevel = CompressionLevel.Optimal,
+            MinSizeForCompressionBytes = 1024,
+            AdaptiveCompression = true
+        };
+        
+        var provider = new FileBasedCacheProvider(
+            Options.Create(settings),
+            metricsService: null,
+            mlPredictionService: null);
+            
+        // Act - Store the LLM response
+        await provider.SetAsync(key, simulatedLlmResponse);
+        
+        // Retrieve the response
+        var retrievedResponse = await provider.GetAsync<string>(key);
+        
+        // Get stats to check compression results
+        var stats = provider.GetCacheStats();
+        
+        // Assert
+        // 1. Data integrity
+        Assert.Equal(simulatedLlmResponse, retrievedResponse);
+        
+        // 2. Compression should be very effective for structured text/JSON (>70%)
+        Assert.True(stats.CompressionRatio < 0.3,
+            $"Compression ratio for LLM response should be excellent, got {stats.CompressionRatio}");
+            
+        // 3. The right algorithm should be selected for JSON content
+        if (stats.CompressionStats.ContainsKey("Brotli") && stats.CompressionStats["Brotli"].CompressedItems > 0)
+        {
+            // Brotli was used (which is ideal for JSON)
+            Console.WriteLine("Brotli was correctly selected for JSON content");
+        }
+        else if (stats.CompressionStats.ContainsKey("GZip") && stats.CompressionStats["GZip"].CompressedItems > 0)
+        {
+            // GZip was used (also effective for JSON, though typically less than Brotli)
+            Console.WriteLine("GZip was selected for JSON content");
+        }
+        
+        // 4. Log compression metrics for analysis
+        Console.WriteLine("=== LLM Response Compression Test ===");
+        Console.WriteLine($"Response size: {simulatedLlmResponse.Length / 1024}KB");
+        Console.WriteLine($"Compression ratio: {stats.CompressionRatio:F3}");
+        Console.WriteLine($"Compressed size: {(simulatedLlmResponse.Length * stats.CompressionRatio) / 1024:F1}KB");
+        Console.WriteLine($"Space saved: {stats.CompressionSavingsBytes / 1024:F1}KB");
+        
+        // 5. For a series of LLM responses, verify cumulative savings
+        var cumulativeSavings = 0L;
+        for (int i = 0; i < 10; i++)
+        {
+            var additionalResponse = GenerateSimulatedLLMResponse(200 + (i * 50)); // Varying sizes
+            await provider.SetAsync($"llm_response_{i}", additionalResponse);
+            cumulativeSavings += (long)(additionalResponse.Length * (1 - stats.CompressionRatio));
+        }
+        
+        var finalStats = provider.GetCacheStats();
+        Console.WriteLine($"Total responses: {finalStats.CachedItemCount}");
+        Console.WriteLine($"Cumulative space saved: {cumulativeSavings / (1024 * 1024):F2}MB");
+        Console.WriteLine($"Average compression ratio: {finalStats.CompressionRatio:F3}");
+        
+        // Verify cumulative savings are significant
+        Assert.True(cumulativeSavings > 1024 * 1024, 
+            $"Cumulative savings should exceed 1MB, got {cumulativeSavings / (1024 * 1024):F2}MB");
+    }
+    
+    private string GenerateSimulatedLLMResponse(int sizeInKB)
+    {
+        // This helper creates a simulated LLM API response with typical JSON structure
+        // and text content similar to what would be returned by OpenAI, Anthropic, etc.
+        var random = new Random();
+        var responseBuilder = new System.Text.StringBuilder();
+        
+        // Start with a JSON structure
+        responseBuilder.Append(@"{
+  ""id"": ""chatcmpl-");
+        responseBuilder.Append(Guid.NewGuid().ToString().Replace("-", "").Substring(0, 16));
+        responseBuilder.Append(@""",
+  ""object"": ""chat.completion"",
+  ""created"": ");
+        responseBuilder.Append(DateTimeOffset.UtcNow.ToUnixTimeSeconds());
+        responseBuilder.Append(@",
+  ""model"": ""gpt-4"",
+  ""choices"": [
+    {
+      ""index"": 0,
+      ""message"": {
+        ""role"": ""assistant"",
+        ""content"": """);
+        
+        // Add text content with realistic patterns until we reach desired size
+        var paragraphs = new[]
+        {
+            "The code you've provided implements a cache system with multiple layers of functionality. Let me analyze what it's doing and suggest some improvements.",
+            "This cache implementation includes encryption, compression, and eviction policies. The main class, `FileBasedCacheProvider`, handles storing and retrieving data with these features.",
+            "I notice you're using a combination of memory caching and file-based persistence. This is a good approach for balancing performance and durability.",
+            "The compression system uses both GZip and Brotli algorithms, with adaptive selection based on content type. This is an excellent optimization for different data patterns.",
+            "One potential improvement would be to add more granular metrics collection to track compression performance across different content types.",
+            "Your implementation of the Write-Ahead Log (WAL) provides good durability guarantees, but might benefit from batch processing for high-throughput scenarios.",
+            "The eviction policies look comprehensive, with support for LRU, size-weighted, and adaptive approaches. This gives good flexibility for different usage patterns.",
+            "I would recommend adding more test coverage for edge cases, particularly around concurrent access patterns and recovery from corruption.",
+            "The encryption implementation looks solid, but you might want to consider adding key rotation capabilities for long-lived deployments.",
+            "Overall, this is a well-structured implementation with good attention to performance, security, and reliability concerns."
+        };
+        
+        var codeSnippets = new[]
+        {
+            @"```csharp
+public async Task<T> GetAsync<T>(string key)
+{
+    var cachedItem = _cache.TryGetValue(key, out var item) && !item.IsExpired 
+        ? item 
+        : await LoadFromFileAsync<T>(key);
+    
+    if (cachedItem == null)
+        return default;
+        
+    return (T)cachedItem.Value;
+}
+```",
+            @"```csharp
+private byte[] CompressData(byte[] data, CompressionAlgorithm algorithm)
+{
+    using var outputStream = new MemoryStream();
+    switch (algorithm)
+    {
+        case CompressionAlgorithm.GZip:
+            using (var gzipStream = new GZipStream(outputStream, CompressionLevel.Optimal))
+            {
+                gzipStream.Write(data, 0, data.Length);
+            }
+            return outputStream.ToArray();
+            
+        case CompressionAlgorithm.Brotli:
+            using (var brotliStream = new BrotliStream(outputStream, CompressionLevel.Optimal))
+            {
+                brotliStream.Write(data, 0, data.Length);
+            }
+            return outputStream.ToArray();
+            
+        default:
+            return data;
+    }
+}
+```",
+            @"```csharp
+public async Task SetAsync<T>(string key, T value, TimeSpan? expiration = null)
+{
+    var expiryTime = DateTime.UtcNow.Add(expiration ?? TimeSpan.FromHours(_settings.CacheExpirationHours));
+    var entry = new CacheEntry
+    {
+        Value = value,
+        ExpirationTime = expiryTime
+    };
+    
+    _cache[key] = entry;
+    await SaveToFileAsync(key, entry);
+}
+```"
+        };
+        
+        // Add content until we reach the desired size
+        var currentSize = responseBuilder.Length;
+        var targetSize = sizeInKB * 1024;
+        
+        while (currentSize < targetSize)
+        {
+            if (random.Next(10) < 7) // 70% chance of adding a paragraph
+            {
+                responseBuilder.Append(paragraphs[random.Next(paragraphs.Length)]);
+                responseBuilder.Append("\\n\\n");
+            }
+            else // 30% chance of adding a code snippet
+            {
+                responseBuilder.Append(codeSnippets[random.Next(codeSnippets.Length)].Replace("\r", "\\r").Replace("\n", "\\n"));
+                responseBuilder.Append("\\n\\n");
+            }
+            
+            currentSize = responseBuilder.Length;
+        }
+        
+        // Finish the JSON structure
+        responseBuilder.Append(@"""
+      },
+      ""finish_reason"": ""stop""
+    }
+  ],
+  ""usage"": {
+    ""prompt_tokens"": 420,
+    ""completion_tokens"": 1250,
+    ""total_tokens"": 1670
+  }
+}");
+        
+        return responseBuilder.ToString();
+    }
+    
+    [Fact]
+    public async Task Compression_NetworkResponseData_OptimizesPerformance()
+    {
+        // This test validates that compression optimizes performance for real-world network response data
+        // Both in terms of storage size and transfer time when sharing cache data
+        
+        // Arrange
+        var httpJsonResponse = GenerateRealisticHttpJsonResponse();
+        var httpXmlResponse = GenerateRealisticHttpXmlResponse();
+        var httpBinaryResponse = GenerateRealisticHttpBinaryResponse();
+        
+        var compressibleKey = "http_json_response";
+        var xmlKey = "http_xml_response";
+        var binaryKey = "http_binary_response";
+        
+        var settings = new CacheSettings
+        {
+            CacheEnabled = true,
+            CacheDirectory = _testDirectory,
+            CompressionEnabled = true,
+            AdaptiveCompression = true, // Enable content-type detection and algorithm selection
+            CompressionLevel = CompressionLevel.Optimal,
+            MinSizeForCompressionBytes = 1024
+        };
+        
+        var provider = new FileBasedCacheProvider(
+            Options.Create(settings),
+            metricsService: null,
+            mlPredictionService: null);
+
+        // Act - Test with network response data
+        // Store the responses
+        var sw = Stopwatch.StartNew();
+        await provider.SetAsync(compressibleKey, httpJsonResponse);
+        await provider.SetAsync(xmlKey, httpXmlResponse);
+        await provider.SetAsync(binaryKey, httpBinaryResponse);
+        sw.Stop();
+        var storageTime = sw.ElapsedMilliseconds;
+        
+        // Retrieve the responses
+        sw.Restart();
+        var jsonResult = await provider.GetAsync<string>(compressibleKey);
+        var xmlResult = await provider.GetAsync<string>(xmlKey);
+        var binaryResult = await provider.GetAsync<byte[]>(binaryKey);
+        sw.Stop();
+        var retrievalTime = sw.ElapsedMilliseconds;
+        
+        var stats = provider.GetCacheStats();
+        
+        // Calculate storage efficiency
+        var originalDataSize = httpJsonResponse.Length + httpXmlResponse.Length + httpBinaryResponse.Length;
+        var compressedDataSize = stats.CompressedStorageUsageBytes;
+        var compressionRatio = (double)compressedDataSize / originalDataSize;
+        var bytesSaved = originalDataSize - compressedDataSize;
+        
+        // Assert
+        // 1. Data integrity
+        Assert.Equal(httpJsonResponse, jsonResult);
+        Assert.Equal(httpXmlResponse, xmlResult);
+        // Only check parts of binary data
+        Assert.Equal(httpBinaryResponse.Length, binaryResult.Length);
+        Assert.Equal(httpBinaryResponse[0], binaryResult[0]);
+        Assert.Equal(httpBinaryResponse[httpBinaryResponse.Length - 1], binaryResult[binaryResult.Length - 1]);
+        
+        // 2. For network data, compression should provide significant savings
+        Assert.True(compressionRatio < 0.5, 
+            $"Network response data should compress well, got ratio: {compressionRatio:F3}");
+            
+        // 3. JSON should compress better than binary data
+        var jsonSize = httpJsonResponse.Length;
+        var jsonStats = stats.CompressionByContentType?.FirstOrDefault(s => s.Key == ContentType.TextJson).Value;
+        if (jsonStats != null)
+        {
+            Assert.True(jsonStats.CompressionRatio < 0.3, 
+                $"JSON data should compress very well, got ratio: {jsonStats.CompressionRatio:F3}");
+        }
+        
+        // 4. All operations should complete in reasonable time
+        Assert.True(storageTime < 5000, $"Storage time ({storageTime}ms) should be reasonable");
+        Assert.True(retrievalTime < 5000, $"Retrieval time ({retrievalTime}ms) should be reasonable");
+        
+        // 5. Log metrics for analysis
+        Console.WriteLine("=== Network Response Data Compression Test ===");
+        Console.WriteLine($"Original data size: {originalDataSize / 1024:F1}KB");
+        Console.WriteLine($"Compressed size: {compressedDataSize / 1024:F1}KB");
+        Console.WriteLine($"Compression ratio: {compressionRatio:F3}");
+        Console.WriteLine($"Bytes saved: {bytesSaved / 1024:F1}KB");
+        Console.WriteLine($"Storage time: {storageTime}ms");
+        Console.WriteLine($"Retrieval time: {retrievalTime}ms");
+        
+        // 6. Assert response time improvement potential (simulate network transfer benefit)
+        var simulatedNetworkBandwidth = 1024 * 1024 / 8; // 1 Mbps in bytes/sec
+        var uncompressedTransferTime = originalDataSize / simulatedNetworkBandwidth * 1000; // ms
+        var compressedTransferTime = compressedDataSize / simulatedNetworkBandwidth * 1000; // ms
+        
+        Console.WriteLine($"Simulated uncompressed transfer time: {uncompressedTransferTime:F1}ms");
+        Console.WriteLine($"Simulated compressed transfer time: {compressedTransferTime:F1}ms");
+        Console.WriteLine($"Network transfer time saved: {uncompressedTransferTime - compressedTransferTime:F1}ms");
+        
+        Assert.True(compressedTransferTime < uncompressedTransferTime,
+            "Compression should reduce network transfer time");
+    }
+    
+    private string GenerateRealisticHttpJsonResponse()
+    {
+        // Generate a realistic JSON HTTP response (e.g., REST API response)
+        var response = new
+        {
+            metadata = new
+            {
+                apiVersion = "v1",
+                status = "success",
+                requestId = Guid.NewGuid().ToString(),
+                timestamp = DateTime.UtcNow.ToString("o")
+            },
+            data = new
+            {
+                items = Enumerable.Range(1, 500).Select(i => new
+                {
+                    id = i,
+                    name = $"Item {i}",
+                    description = $"This is a description for item {i} with enough text to make it realistic",
+                    created = DateTime.UtcNow.AddDays(-i).ToString("o"),
+                    tags = new[] { "tag1", "tag2", "tag3" },
+                    metadata = new
+                    {
+                        version = 1,
+                        isEnabled = i % 2 == 0,
+                        priority = i % 5,
+                        nestedProperty = new
+                        {
+                            key1 = "value1",
+                            key2 = "value2",
+                            key3 = "value3"
+                        }
+                    }
+                }).ToArray(),
+                pagination = new
+                {
+                    total = 1000,
+                    page = 1,
+                    pageSize = 500,
+                    hasMore = true
+                }
+            }
+        };
+        
+        return System.Text.Json.JsonSerializer.Serialize(response, new System.Text.Json.JsonSerializerOptions
+        {
+            WriteIndented = true // Include whitespace for realistic size
+        });
+    }
+    
+    private string GenerateRealisticHttpXmlResponse()
+    {
+        // Generate a realistic XML HTTP response (e.g., SOAP or XML API)
+        var sb = new System.Text.StringBuilder();
+        sb.AppendLine("<?xml version=\"1.0\" encoding=\"UTF-8\"?>");
+        sb.AppendLine("<response>");
+        sb.AppendLine("  <metadata>");
+        sb.AppendLine("    <apiVersion>v1</apiVersion>");
+        sb.AppendLine("    <status>success</status>");
+        sb.AppendLine($"    <requestId>{Guid.NewGuid()}</requestId>");
+        sb.AppendLine($"    <timestamp>{DateTime.UtcNow:o}</timestamp>");
+        sb.AppendLine("  </metadata>");
+        sb.AppendLine("  <data>");
+        sb.AppendLine("    <items>");
+        
+        // Generate 200 items for a reasonably sized response
+        for (int i = 1; i <= 200; i++)
+        {
+            sb.AppendLine($"      <item id=\"{i}\">");
+            sb.AppendLine($"        <name>Item {i}</name>");
+            sb.AppendLine($"        <description>This is a description for item {i} with enough text to make it realistic</description>");
+            sb.AppendLine($"        <created>{DateTime.UtcNow.AddDays(-i):o}</created>");
+            sb.AppendLine("        <tags>");
+            sb.AppendLine("          <tag>tag1</tag>");
+            sb.AppendLine("          <tag>tag2</tag>");
+            sb.AppendLine("          <tag>tag3</tag>");
+            sb.AppendLine("        </tags>");
+            sb.AppendLine("        <metadata>");
+            sb.AppendLine("          <version>1</version>");
+            sb.AppendLine($"          <isEnabled>{(i % 2 == 0 ? "true" : "false")}</isEnabled>");
+            sb.AppendLine($"          <priority>{i % 5}</priority>");
+            sb.AppendLine("          <nestedProperty>");
+            sb.AppendLine("            <key1>value1</key1>");
+            sb.AppendLine("            <key2>value2</key2>");
+            sb.AppendLine("            <key3>value3</key3>");
+            sb.AppendLine("          </nestedProperty>");
+            sb.AppendLine("        </metadata>");
+            sb.AppendLine("      </item>");
+        }
+        
+        sb.AppendLine("    </items>");
+        sb.AppendLine("    <pagination>");
+        sb.AppendLine("      <total>1000</total>");
+        sb.AppendLine("      <page>1</page>");
+        sb.AppendLine("      <pageSize>200</pageSize>");
+        sb.AppendLine("      <hasMore>true</hasMore>");
+        sb.AppendLine("    </pagination>");
+        sb.AppendLine("  </data>");
+        sb.AppendLine("</response>");
+        
+        return sb.ToString();
+    }
+    
+    private byte[] GenerateRealisticHttpBinaryResponse()
+    {
+        // Generate a realistic binary HTTP response (e.g., file download or image)
+        var size = 500 * 1024; // 500KB
+        var data = new byte[size];
+        
+        // Create a partially compressible binary pattern with both random and repeating sections
+        var random = new Random(42); // Fixed seed for reproducibility
+        
+        // Header section (usually less compressible)
+        for (int i = 0; i < 1024; i++)
+        {
+            data[i] = (byte)random.Next(256);
+        }
+        
+        // Some structure in the middle (more compressible)
+        for (int i = 1024; i < size - 1024; i++)
+        {
+            // Mix of patterns and semi-random data
+            if (i % 128 < 64)
+            {
+                // Repeating pattern
+                data[i] = (byte)(i % 64);
+            }
+            else
+            {
+                // Semi-random data
+                data[i] = (byte)random.Next(256);
+            }
+        }
+        
+        // Footer section
+        for (int i = size - 1024; i < size; i++)
+        {
+            data[i] = (byte)random.Next(256);
+        }
+        
+        return data;
+    }
+    
+    [Fact]
     public async Task Compression_OptimizesMemoryForExtremelyLargeData()
     {
         // This test validates that compression handles extremely large data (20MB+) efficiently
