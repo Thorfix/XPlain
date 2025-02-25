@@ -177,7 +177,7 @@ namespace XPlain.Services
             };
         }
 
-        protected async Task<T> ExecuteWithRetryAsync<T>(Func<Task<T>> action, int maxRetries = 3)
+        protected async Task<T> ExecuteWithRetryAsync<T>(Func<CancellationToken, Task<T>> action, int maxRetries = 3)
         {
             if (!_circuitBreaker.IsAllowed())
             {
@@ -203,7 +203,7 @@ namespace XPlain.Services
                     using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cts.Token);
                     
                     var timeoutTask = Task.Delay(_timeout, linkedCts.Token);
-                    var actionTask = action();
+                    var actionTask = action(linkedCts.Token);
                     
                     var completedTask = await Task.WhenAny(actionTask, timeoutTask);
                     

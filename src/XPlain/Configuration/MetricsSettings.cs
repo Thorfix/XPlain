@@ -8,6 +8,9 @@ namespace XPlain.Configuration
         [Range(1, 3600)]
         public int CollectionIntervalSeconds { get; set; } = 60;
         
+        [Range(1, 10000)]
+        public int MetricDataPointsRetention { get; set; } = 1000;
+        
         [Range(1, 1000)]
         public int MaxDataPointsPerMetric { get; set; } = 1000;
         

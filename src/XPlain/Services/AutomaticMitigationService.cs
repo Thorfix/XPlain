@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
@@ -7,176 +8,178 @@ using XPlain.Configuration;
 
 namespace XPlain.Services
 {
-    public interface IAutomaticMitigationService
-    {
-        Task<bool> ApplyMitigationsAsync(Dictionary<string, double> metrics);
-        Task<List<MitigationAction>> GetRecentActionsAsync();
-        Task<Dictionary<string, object>> GetMitigationStatusAsync();
-        Task<bool> SetAutomaticModeAsync(bool enabled);
-    }
-
-    public class MitigationAction
-    {
-        public string ActionType { get; set; }
-        public string Reason { get; set; }
-        public DateTime Timestamp { get; set; } = DateTime.UtcNow;
-        public bool Success { get; set; }
-        public Dictionary<string, object> Parameters { get; set; } = new();
-        public Dictionary<string, object> Results { get; set; } = new();
-    }
-
     public class AutomaticMitigationService : IAutomaticMitigationService
     {
         private readonly ILogger<AutomaticMitigationService> _logger;
-        private readonly List<MitigationAction> _recentActions = new();
-        private readonly Dictionary<string, Func<Dictionary<string, double>, Task<bool>>> _mitigationStrategies;
-        private bool _automaticMode = true;
-        
-        private const int MaxActionsToKeep = 100;
+        private readonly ICacheProvider _cacheProvider;
+        private readonly IModelPerformanceMonitor _performanceMonitor;
+        private readonly IAlertManagementService _alertService;
+        private readonly List<MitigationAction> _activeMitigations = new();
+        private readonly List<MitigationAction> _mitigationHistory = new();
+        private bool _automaticMitigationEnabled = true;
 
-        public AutomaticMitigationService(ILogger<AutomaticMitigationService> logger = null)
+        public AutomaticMitigationService(
+            ILogger<AutomaticMitigationService> logger = null,
+            ICacheProvider cacheProvider = null,
+            IModelPerformanceMonitor performanceMonitor = null,
+            IAlertManagementService alertService = null)
         {
             _logger = logger ?? new Logger<AutomaticMitigationService>(new LoggerFactory());
-            
-            // Initialize mitigation strategies
-            _mitigationStrategies = new Dictionary<string, Func<Dictionary<string, double>, Task<bool>>>
-            {
-                ["ResponseTimeRateLimit"] = ApplyResponseTimeMitigationAsync,
-                ["MemoryPressure"] = ApplyMemoryPressureMitigationAsync,
-                ["ErrorRateBackoff"] = ApplyErrorRateBackoffAsync
-            };
+            _cacheProvider = cacheProvider;
+            _performanceMonitor = performanceMonitor;
+            _alertService = alertService;
         }
 
-        public async Task<bool> ApplyMitigationsAsync(Dictionary<string, double> metrics)
+        public async Task<bool> ApplyMitigationsAsync()
         {
-            if (!_automaticMode)
+            if (!_automaticMitigationEnabled)
             {
-                _logger.LogInformation("Automatic mitigation mode is disabled");
+                _logger.LogInformation("Automatic mitigation is disabled");
                 return false;
             }
-            
-            bool anyApplied = false;
-            
-            // Check if we need to apply any mitigations
-            if (ShouldApplyResponseTimeMitigation(metrics))
+
+            try
             {
-                var success = await ApplyResponseTimeMitigationAsync(metrics);
-                RecordAction("ResponseTime", "High response time detected", success, metrics);
-                anyApplied = anyApplied || success;
+                var mitigationsApplied = false;
+
+                // Apply cache optimizations if needed
+                if (_cacheProvider != null)
+                {
+                    var cacheStats = _cacheProvider.GetCacheStats();
+                    if (cacheStats.HitRatio < 0.5)
+                    {
+                        await ApplyCacheMitigationAsync();
+                        mitigationsApplied = true;
+                    }
+                }
+
+                // Apply model performance mitigations if needed
+                if (_performanceMonitor != null)
+                {
+                    var alerts = await _performanceMonitor.GetActiveAlertsAsync();
+                    if (alerts.Any(a => a.Severity == "Error"))
+                    {
+                        await ApplyModelMitigationAsync(alerts);
+                        mitigationsApplied = true;
+                    }
+                }
+
+                // Clean up expired mitigations
+                await CleanupExpiredMitigationsAsync();
+
+                return mitigationsApplied;
             }
-            
-            if (ShouldApplyMemoryPressureMitigation(metrics))
+            catch (Exception ex)
             {
-                var success = await ApplyMemoryPressureMitigationAsync(metrics);
-                RecordAction("MemoryPressure", "High memory usage detected", success, metrics);
-                anyApplied = anyApplied || success;
+                _logger.LogError(ex, "Error applying automatic mitigations");
+                return false;
             }
-            
-            if (ShouldApplyErrorRateBackoff(metrics))
-            {
-                var success = await ApplyErrorRateBackoffAsync(metrics);
-                RecordAction("ErrorRate", "High error rate detected", success, metrics);
-                anyApplied = anyApplied || success;
-            }
-            
-            return anyApplied;
         }
 
-        public async Task<List<MitigationAction>> GetRecentActionsAsync()
+        private async Task ApplyCacheMitigationAsync()
         {
-            return _recentActions;
-        }
-
-        public async Task<Dictionary<string, object>> GetMitigationStatusAsync()
-        {
-            return new Dictionary<string, object>
+            var mitigation = new MitigationAction
             {
-                ["automatic_mode"] = _automaticMode,
-                ["recent_action_count"] = _recentActions.Count,
-                ["available_strategies"] = _mitigationStrategies.Keys
+                Type = "CacheOptimization",
+                Description = "Optimize cache due to low hit ratio",
+                AppliedAt = DateTime.UtcNow,
+                ExpiresAt = DateTime.UtcNow.AddHours(1),
+                Parameters = new Dictionary<string, object>
+                {
+                    ["target_hit_ratio"] = 0.7
+                }
             };
+
+            _activeMitigations.Add(mitigation);
+            _mitigationHistory.Add(mitigation);
+
+            try
+            {
+                // Implement cache optimization logic here
+                mitigation.ResultStatus = "Applied";
+                _logger.LogInformation("Applied cache optimization mitigation");
+            }
+            catch (Exception ex)
+            {
+                mitigation.ResultStatus = "Failed";
+                _logger.LogError(ex, "Failed to apply cache optimization mitigation");
+            }
         }
 
-        public async Task<bool> SetAutomaticModeAsync(bool enabled)
+        private async Task ApplyModelMitigationAsync(List<ModelAlert> alerts)
         {
-            _automaticMode = enabled;
-            RecordAction(
-                "Configuration", 
-                $"Automatic mitigation mode {(enabled ? "enabled" : "disabled")}", 
-                true, 
-                new Dictionary<string, double>());
-            return true;
-        }
-        
-        private bool ShouldApplyResponseTimeMitigation(Dictionary<string, double> metrics)
-        {
-            return metrics.TryGetValue("AverageResponseTime", out var value) && value > 200;
-        }
-        
-        private async Task<bool> ApplyResponseTimeMitigationAsync(Dictionary<string, double> metrics)
-        {
-            // Mock implementation
-            _logger.LogInformation("Applying response time mitigation");
-            await Task.Delay(100); // Simulate some work
-            return true;
-        }
-        
-        private bool ShouldApplyMemoryPressureMitigation(Dictionary<string, double> metrics)
-        {
-            return metrics.TryGetValue("MemoryUsage", out var value) && value > 85;
-        }
-        
-        private async Task<bool> ApplyMemoryPressureMitigationAsync(Dictionary<string, double> metrics)
-        {
-            // Mock implementation
-            _logger.LogInformation("Applying memory pressure mitigation");
-            await Task.Delay(100); // Simulate some work
-            return true;
-        }
-        
-        private bool ShouldApplyErrorRateBackoff(Dictionary<string, double> metrics)
-        {
-            return metrics.TryGetValue("CacheHitRate", out var value) && value < 0.5;
-        }
-        
-        private async Task<bool> ApplyErrorRateBackoffAsync(Dictionary<string, double> metrics)
-        {
-            // Mock implementation
-            _logger.LogInformation("Applying error rate backoff");
-            await Task.Delay(100); // Simulate some work
-            return true;
-        }
-        
-        private void RecordAction(
-            string actionType, 
-            string reason, 
-            bool success, 
-            Dictionary<string, double> metrics)
-        {
-            var action = new MitigationAction
+            foreach (var alert in alerts.Where(a => a.Severity == "Error"))
             {
-                ActionType = actionType,
-                Reason = reason,
-                Success = success,
-                Parameters = new Dictionary<string, object>()
-            };
-            
-            // Copy relevant metrics to parameters
-            foreach (var (key, value) in metrics)
-            {
-                action.Parameters[key] = value;
+                var mitigation = new MitigationAction
+                {
+                    Type = "ModelFailover",
+                    Description = $"Failover for {alert.Provider}/{alert.Model} due to {alert.Type}",
+                    AppliedAt = DateTime.UtcNow,
+                    ExpiresAt = DateTime.UtcNow.AddHours(2),
+                    Parameters = new Dictionary<string, object>
+                    {
+                        ["provider"] = alert.Provider,
+                        ["model"] = alert.Model,
+                        ["alert_type"] = alert.Type
+                    }
+                };
+
+                _activeMitigations.Add(mitigation);
+                _mitigationHistory.Add(mitigation);
+
+                try
+                {
+                    // Implement model failover logic here
+                    mitigation.ResultStatus = "Applied";
+                    _logger.LogInformation($"Applied failover mitigation for {alert.Provider}/{alert.Model}");
+                }
+                catch (Exception ex)
+                {
+                    mitigation.ResultStatus = "Failed";
+                    _logger.LogError(ex, $"Failed to apply failover mitigation for {alert.Provider}/{alert.Model}");
+                }
             }
-            
-            _recentActions.Add(action);
-            
-            // Limit the number of actions we store
-            if (_recentActions.Count > MaxActionsToKeep)
+        }
+
+        private async Task CleanupExpiredMitigationsAsync()
+        {
+            var now = DateTime.UtcNow;
+            var expiredMitigations = _activeMitigations
+                .Where(m => m.ExpiresAt.HasValue && m.ExpiresAt.Value <= now)
+                .ToList();
+
+            foreach (var mitigation in expiredMitigations)
             {
-                _recentActions.RemoveAt(0);
+                mitigation.IsActive = false;
+                _activeMitigations.Remove(mitigation);
+                _logger.LogInformation($"Expired mitigation: {mitigation.Type} - {mitigation.Description}");
             }
-            
-            _logger.LogInformation(
-                $"Mitigation action: {actionType}, Reason: {reason}, Success: {success}");
+        }
+
+        public async Task<List<MitigationAction>> GetActiveMitigationsAsync()
+        {
+            return _activeMitigations;
+        }
+
+        public async Task<List<MitigationAction>> GetMitigationHistoryAsync(TimeSpan period)
+        {
+            var cutoff = DateTime.UtcNow - period;
+            return _mitigationHistory
+                .Where(m => m.AppliedAt >= cutoff)
+                .OrderByDescending(m => m.AppliedAt)
+                .ToList();
+        }
+
+        public async Task<bool> EnableAutomaticMitigationsAsync(bool enable)
+        {
+            _automaticMitigationEnabled = enable;
+            _logger.LogInformation($"Automatic mitigation {(enable ? "enabled" : "disabled")}");
+            return true;
+        }
+
+        public async Task<bool> IsAutomaticMitigationEnabledAsync()
+        {
+            return _automaticMitigationEnabled;
         }
     }
 }

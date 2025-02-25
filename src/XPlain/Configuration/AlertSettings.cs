@@ -31,6 +31,9 @@ namespace XPlain.Configuration
         
         public bool GroupSimilarAlerts { get; set; } = true;
         
+        [Range(100, 10000)]
+        public int MaxAlertHistorySize { get; set; } = 1000;
+        
         public void Validate()
         {
             if (EnableEmailNotifications && string.IsNullOrWhiteSpace(EmailRecipients))

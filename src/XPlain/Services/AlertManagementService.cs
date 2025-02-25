@@ -8,19 +8,10 @@ using XPlain.Configuration;
 
 namespace XPlain.Services
 {
-    public interface IAlertManagementService
-    {
-        Task<List<CacheAlert>> GetActiveAlertsAsync();
-        Task<List<CacheAlert>> GetAlertHistoryAsync(DateTime startDate, DateTime endDate);
-        Task<bool> AcknowledgeAlertAsync(string alertId);
-        Task<bool> ResolveAlertAsync(string alertId);
-    }
-
     public class AlertManagementService : IAlertManagementService
     {
         private readonly ILogger<AlertManagementService> _logger;
-        private readonly List<CacheAlert> _activeAlerts = new();
-        private readonly List<CacheAlert> _alertHistory = new();
+        private readonly List<Alert> _alerts = new();
         private readonly INotificationService _notificationService;
         private readonly AlertSettings _settings;
 
@@ -30,18 +21,21 @@ namespace XPlain.Services
             IOptions<AlertSettings> settings = null)
         {
             _logger = logger ?? new Logger<AlertManagementService>(new LoggerFactory());
-            _notificationService = notificationService ?? new NotificationService();
+            _notificationService = notificationService;
             _settings = settings?.Value ?? new AlertSettings();
         }
 
-        public async Task<List<CacheAlert>> GetActiveAlertsAsync()
+        public async Task<List<Alert>> GetActiveAlertsAsync()
         {
-            return _activeAlerts;
+            return _alerts
+                .Where(a => a.ResolvedAt == null)
+                .OrderByDescending(a => a.CreatedAt)
+                .ToList();
         }
 
-        public async Task<List<CacheAlert>> GetAlertHistoryAsync(DateTime startDate, DateTime endDate)
+        public async Task<List<Alert>> GetAlertHistoryAsync(DateTime startDate, DateTime endDate)
         {
-            return _alertHistory
+            return _alerts
                 .Where(a => a.CreatedAt >= startDate && a.CreatedAt <= endDate)
                 .OrderByDescending(a => a.CreatedAt)
                 .ToList();
@@ -49,93 +43,74 @@ namespace XPlain.Services
 
         public async Task<bool> AcknowledgeAlertAsync(string alertId)
         {
-            var alert = _activeAlerts.FirstOrDefault(a => a.Id == alertId);
+            var alert = _alerts.FirstOrDefault(a => a.Id == alertId);
             if (alert == null)
+            {
                 return false;
-                
-            // Add acknowledged flag to metadata
-            if (alert.Metadata == null)
-                alert.Metadata = new Dictionary<string, object>();
-                
-            alert.Metadata["acknowledged"] = true;
-            alert.Metadata["acknowledged_at"] = DateTime.UtcNow;
-            
-            _logger.LogInformation($"Alert {alertId} ({alert.Type}) acknowledged");
-            
-            return true;
+            }
+
+            if (alert.AcknowledgedAt == null)
+            {
+                alert.AcknowledgedAt = DateTime.UtcNow;
+                _logger.LogInformation($"Alert acknowledged: {alert.Type} - {alert.Message}");
+                return true;
+            }
+
+            return false;
         }
 
         public async Task<bool> ResolveAlertAsync(string alertId)
         {
-            var alert = _activeAlerts.FirstOrDefault(a => a.Id == alertId);
+            var alert = _alerts.FirstOrDefault(a => a.Id == alertId);
             if (alert == null)
+            {
                 return false;
-                
-            // Remove from active alerts
-            _activeAlerts.Remove(alert);
-            
-            // Add to history
-            if (!_alertHistory.Any(a => a.Id == alertId))
-            {
-                _alertHistory.Add(alert);
             }
-            
-            // Add resolved flag to metadata
-            if (alert.Metadata == null)
-                alert.Metadata = new Dictionary<string, object>();
-                
-            alert.Metadata["resolved"] = true;
-            alert.Metadata["resolved_at"] = DateTime.UtcNow;
-            
-            _logger.LogInformation($"Alert {alertId} ({alert.Type}) resolved");
-            
-            // Limit history size
-            while (_alertHistory.Count > 1000)
+
+            if (alert.ResolvedAt == null)
             {
-                _alertHistory.RemoveAt(0);
+                alert.ResolvedAt = DateTime.UtcNow;
+                _logger.LogInformation($"Alert resolved: {alert.Type} - {alert.Message}");
+                return true;
             }
-            
-            return true;
+
+            return false;
         }
 
-        public async Task<bool> CreateAlertAsync(
-            string type,
-            string message,
-            string severity,
-            Dictionary<string, object> metadata = null)
+        public async Task<string> CreateAlertAsync(string type, string message, string severity, Dictionary<string, object> metadata = null)
         {
-            var alert = new CacheAlert
+            var alert = new Alert
             {
                 Type = type,
                 Message = message,
                 Severity = severity,
                 Metadata = metadata ?? new Dictionary<string, object>()
             };
-            
-            // Check for duplicates within the throttling interval
-            var recentDuplicate = _activeAlerts.FirstOrDefault(a => 
-                a.Type == type && 
-                a.Severity == severity &&
-                DateTime.UtcNow - a.CreatedAt < TimeSpan.FromSeconds(_settings.ThrottlingIntervalSeconds));
-                
-            if (recentDuplicate != null)
+
+            _alerts.Add(alert);
+            _logger.LogInformation($"Alert created: {severity} - {type} - {message}");
+
+            // Send notification for critical and error alerts
+            if (_notificationService != null && (severity == "Critical" || severity == "Error"))
             {
-                // Update the existing alert instead of creating a new one
-                if (_settings.GroupSimilarAlerts)
+                await _notificationService.SendAlertNotificationAsync(alert);
+            }
+
+            // Limit alert history size
+            if (_alerts.Count > _settings.MaxAlertHistorySize)
+            {
+                var oldestResolved = _alerts
+                    .Where(a => a.ResolvedAt != null)
+                    .OrderBy(a => a.ResolvedAt)
+                    .FirstOrDefault();
+
+                if (oldestResolved != null)
                 {
-                    recentDuplicate.Metadata["count"] = (recentDuplicate.Metadata.GetValueOrDefault("count", 1) as int? ?? 1) + 1;
-                    recentDuplicate.Metadata["last_occurrence"] = DateTime.UtcNow;
-                    return true;
+                    _alerts.Remove(oldestResolved);
                 }
             }
-            
-            _activeAlerts.Add(alert);
-            _logger.LogInformation($"Created alert: [{severity}] {type} - {message}");
-            
-            // Send notification if configured
-            await _notificationService.SendAlertNotificationAsync(alert);
-            
-            return true;
+
+            return alert.Id;
         }
     }
 }

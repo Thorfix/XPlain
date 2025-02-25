@@ -10,37 +10,21 @@ namespace XPlain.Services
         Task<List<Alert>> GetAlertHistoryAsync(DateTime startDate, DateTime endDate);
         Task<bool> AcknowledgeAlertAsync(string alertId);
         Task<bool> ResolveAlertAsync(string alertId);
-        Task<string> CreateAlertAsync(Alert alert);
+        Task<string> CreateAlertAsync(string type, string message, string severity, Dictionary<string, object> metadata = null);
     }
 
     public class Alert
     {
         public string Id { get; set; } = Guid.NewGuid().ToString();
-        public string Title { get; set; }
-        public string Description { get; set; }
-        public AlertSeverity Severity { get; set; }
-        public DateTime Timestamp { get; set; } = DateTime.UtcNow;
-        public AlertStatus Status { get; set; } = AlertStatus.New;
-        public string Source { get; set; }
-        public Dictionary<string, string> Metadata { get; set; } = new();
-        public string AssignedTo { get; set; }
+        public string Type { get; set; }
+        public string Message { get; set; }
+        public string Severity { get; set; }
+        public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
         public DateTime? AcknowledgedAt { get; set; }
         public DateTime? ResolvedAt { get; set; }
-    }
-
-    public enum AlertSeverity
-    {
-        Low,
-        Medium,
-        High,
-        Critical
-    }
-
-    public enum AlertStatus
-    {
-        New,
-        Acknowledged,
-        Resolved,
-        Closed
+        public string Status => ResolvedAt.HasValue ? "Resolved" : 
+                                AcknowledgedAt.HasValue ? "Acknowledged" : 
+                                "Active";
+        public Dictionary<string, object> Metadata { get; set; } = new();
     }
 }

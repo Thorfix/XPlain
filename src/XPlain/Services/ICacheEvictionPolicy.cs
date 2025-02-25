@@ -23,10 +23,4 @@ namespace XPlain.Services
         Dictionary<string, int> GetEvictionStats();
         IEnumerable<CacheEvictionEvent> GetRecentEvictions(int count);
     }
-
-    public class CacheEvictionEvent
-    {
-        public string Reason { get; set; }
-        public DateTime Timestamp { get; set; } = DateTime.UtcNow;
-    }
 }

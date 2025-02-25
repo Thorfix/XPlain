@@ -190,7 +190,7 @@ namespace XPlain.Services
             return new RateLimitMetrics();
         }
         
-        public async Task<bool> WaitForAvailabilityAsync(string provider)
+        public async Task<bool> WaitForAvailabilityAsync(string provider, CancellationToken cancellationToken = default)
         {
             try
             {
@@ -210,7 +210,11 @@ namespace XPlain.Services
                     {
                         try
                         {
-                            await Task.Delay(timeToNextWindow, new CancellationTokenSource(TimeSpan.FromSeconds(5)).Token);
+                            var timeoutToken = CancellationTokenSource.CreateLinkedTokenSource(
+                                cancellationToken, 
+                                new CancellationTokenSource(TimeSpan.FromSeconds(5)).Token).Token;
+                                
+                            await Task.Delay(timeToNextWindow, timeoutToken);
                         }
                         catch (TaskCanceledException)
                         {
@@ -220,7 +224,10 @@ namespace XPlain.Services
                 }
                 
                 // Now try to acquire a permit briefly to confirm availability
-                using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(1));
+                var cts = CancellationTokenSource.CreateLinkedTokenSource(
+                    cancellationToken,
+                    new CancellationTokenSource(TimeSpan.FromSeconds(1)).Token);
+                    
                 await limiter.AcquireAsync(0, cts.Token);
                 limiter.Release();
                 return true;

@@ -1210,6 +1210,11 @@ file class Program
             llmSettings.Validate();
             services.AddSingleton(Options.Create(llmSettings));
 
+            // Add model performance monitoring and related services
+            services.AddSingleton<IModelPerformanceMonitor, ModelPerformanceMonitor>();
+            services.AddSingleton<IAutomaticMitigationService, AutomaticMitigationService>();
+            services.AddSingleton<INotificationService, NotificationService>();
+
             // Configure provider-specific settings based on selected provider
             switch (llmSettings.Provider.ToLowerInvariant())
             {

@@ -2,6 +2,9 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
+using XPlain.Configuration;
 
 namespace XPlain.Services
 {
@@ -13,180 +16,153 @@ namespace XPlain.Services
 
     public class TimeSeriesMetricsStore
     {
+        private readonly ILogger<TimeSeriesMetricsStore> _logger;
         private readonly Dictionary<string, List<MetricDataPoint>> _metrics = new();
-        private readonly Dictionary<string, TimeSpan> _retentionPeriods = new();
         private readonly object _lock = new();
-        
-        // Default retention period is 7 days
-        private readonly TimeSpan _defaultRetentionPeriod = TimeSpan.FromDays(7);
-        
+        private readonly MetricsSettings _settings;
+
+        public TimeSeriesMetricsStore(
+            ILogger<TimeSeriesMetricsStore> logger = null,
+            IOptions<MetricsSettings> settings = null)
+        {
+            _logger = logger ?? new Logger<TimeSeriesMetricsStore>(new LoggerFactory());
+            _settings = settings?.Value ?? new MetricsSettings();
+        }
+
         public async Task RecordMetricAsync(string metricName, double value)
         {
-            lock (_lock)
+            try
             {
-                if (!_metrics.TryGetValue(metricName, out var dataPoints))
-                {
-                    dataPoints = new List<MetricDataPoint>();
-                    _metrics[metricName] = dataPoints;
-                }
+                var now = DateTime.UtcNow;
                 
-                dataPoints.Add(new MetricDataPoint
+                lock (_lock)
                 {
-                    Timestamp = DateTime.UtcNow,
-                    Value = value
-                });
-                
-                // Enforce retention policy
-                EnforceRetention(metricName);
-            }
-        }
-        
-        public async Task RecordMetricBatchAsync(string metricName, IEnumerable<(DateTime timestamp, double value)> dataPoints)
-        {
-            lock (_lock)
-            {
-                if (!_metrics.TryGetValue(metricName, out var existingPoints))
-                {
-                    existingPoints = new List<MetricDataPoint>();
-                    _metrics[metricName] = existingPoints;
-                }
-                
-                foreach (var (timestamp, value) in dataPoints)
-                {
-                    existingPoints.Add(new MetricDataPoint
+                    if (!_metrics.TryGetValue(metricName, out var points))
                     {
-                        Timestamp = timestamp,
+                        points = new List<MetricDataPoint>();
+                        _metrics[metricName] = points;
+                    }
+                    
+                    points.Add(new MetricDataPoint
+                    {
+                        Timestamp = now,
                         Value = value
                     });
-                }
-                
-                // Sort by timestamp
-                _metrics[metricName] = existingPoints.OrderBy(p => p.Timestamp).ToList();
-                
-                // Enforce retention policy
-                EnforceRetention(metricName);
-            }
-        }
-        
-        public async Task<List<MetricDataPoint>> GetMetricHistoryAsync(string metricName, TimeSpan period)
-        {
-            var cutoff = DateTime.UtcNow - period;
-            
-            lock (_lock)
-            {
-                if (!_metrics.TryGetValue(metricName, out var dataPoints))
-                {
-                    return new List<MetricDataPoint>();
-                }
-                
-                return dataPoints
-                    .Where(p => p.Timestamp >= cutoff)
-                    .OrderBy(p => p.Timestamp)
-                    .ToList();
-            }
-        }
-        
-        public async Task<Dictionary<string, double>> GetLatestValuesAsync(IEnumerable<string> metricNames)
-        {
-            var result = new Dictionary<string, double>();
-            
-            lock (_lock)
-            {
-                foreach (var metricName in metricNames)
-                {
-                    if (_metrics.TryGetValue(metricName, out var dataPoints) && dataPoints.Count > 0)
+                    
+                    // Keep only the most recent data points based on retention policy
+                    if (points.Count > _settings.MetricDataPointsRetention)
                     {
-                        result[metricName] = dataPoints.OrderByDescending(p => p.Timestamp).First().Value;
+                        var excess = points.Count - _settings.MetricDataPointsRetention;
+                        points.RemoveRange(0, excess);
                     }
                 }
             }
-            
-            return result;
-        }
-        
-        public async Task<double?> GetAggregateAsync(string metricName, TimeSpan period, string aggregation)
-        {
-            var dataPoints = await GetMetricHistoryAsync(metricName, period);
-            
-            if (dataPoints.Count == 0)
+            catch (Exception ex)
             {
-                return null;
+                _logger.LogError(ex, $"Error recording metric {metricName}: {ex.Message}");
             }
-            
-            var values = dataPoints.Select(p => p.Value);
-            
-            return aggregation.ToLowerInvariant() switch
-            {
-                "avg" or "average" => values.Average(),
-                "min" => values.Min(),
-                "max" => values.Max(),
-                "sum" => values.Sum(),
-                "count" => values.Count(),
-                "p50" or "median" => Percentile(values, 0.5),
-                "p90" => Percentile(values, 0.9),
-                "p95" => Percentile(values, 0.95),
-                "p99" => Percentile(values, 0.99),
-                _ => throw new ArgumentException($"Unsupported aggregation: {aggregation}")
-            };
         }
-        
-        public async Task<Dictionary<string, double>> GetAggregatesAsync(
-            IEnumerable<string> metricNames, 
-            TimeSpan period, 
-            string aggregation)
+
+        public async Task<List<MetricDataPoint>> GetMetricHistoryAsync(string metricName, TimeSpan period)
+        {
+            try
+            {
+                var cutoff = DateTime.UtcNow - period;
+                
+                lock (_lock)
+                {
+                    if (!_metrics.TryGetValue(metricName, out var points))
+                    {
+                        return new List<MetricDataPoint>();
+                    }
+                    
+                    return points
+                        .Where(p => p.Timestamp >= cutoff)
+                        .OrderBy(p => p.Timestamp)
+                        .ToList();
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, $"Error retrieving metric history for {metricName}: {ex.Message}");
+                return new List<MetricDataPoint>();
+            }
+        }
+
+        public async Task<double> GetAverageValueAsync(string metricName, TimeSpan period)
+        {
+            try
+            {
+                var history = await GetMetricHistoryAsync(metricName, period);
+                return history.Any() ? history.Average(p => p.Value) : 0;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, $"Error calculating average for {metricName}: {ex.Message}");
+                return 0;
+            }
+        }
+
+        public async Task<Dictionary<string, double>> GetLatestValuesAsync(IEnumerable<string> metricNames)
         {
             var result = new Dictionary<string, double>();
             
             foreach (var metricName in metricNames)
             {
-                var value = await GetAggregateAsync(metricName, period, aggregation);
-                if (value.HasValue)
+                try
                 {
-                    result[metricName] = value.Value;
+                    lock (_lock)
+                    {
+                        if (_metrics.TryGetValue(metricName, out var points) && points.Any())
+                        {
+                            result[metricName] = points.Last().Value;
+                        }
+                        else
+                        {
+                            result[metricName] = 0;
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, $"Error retrieving latest value for {metricName}: {ex.Message}");
+                    result[metricName] = 0;
                 }
             }
             
             return result;
         }
-        
-        public async Task SetRetentionPolicyAsync(string metricName, TimeSpan retentionPeriod)
+
+        public async Task<bool> ClearMetricHistoryAsync(string metricName)
         {
-            lock (_lock)
+            try
             {
-                _retentionPeriods[metricName] = retentionPeriod;
-                EnforceRetention(metricName);
+                lock (_lock)
+                {
+                    return _metrics.Remove(metricName);
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, $"Error clearing metric history for {metricName}: {ex.Message}");
+                return false;
             }
         }
-        
-        public async Task<List<string>> GetMetricNamesAsync()
+
+        public async Task<List<string>> GetAvailableMetricsAsync()
         {
-            lock (_lock)
+            try
             {
-                return _metrics.Keys.ToList();
+                lock (_lock)
+                {
+                    return _metrics.Keys.ToList();
+                }
             }
-        }
-        
-        private void EnforceRetention(string metricName)
-        {
-            if (!_metrics.TryGetValue(metricName, out var dataPoints))
+            catch (Exception ex)
             {
-                return;
+                _logger.LogError(ex, $"Error retrieving available metrics: {ex.Message}");
+                return new List<string>();
             }
-            
-            var retentionPeriod = _retentionPeriods.TryGetValue(metricName, out var period)
-                ? period
-                : _defaultRetentionPeriod;
-                
-            var cutoff = DateTime.UtcNow - retentionPeriod;
-            
-            _metrics[metricName] = dataPoints.Where(p => p.Timestamp >= cutoff).ToList();
-        }
-        
-        private static double Percentile(IEnumerable<double> values, double percentile)
-        {
-            var sorted = values.OrderBy(v => v).ToList();
-            var index = (int)Math.Ceiling(percentile * sorted.Count) - 1;
-            return sorted[Math.Max(0, index)];
         }
     }
 }
