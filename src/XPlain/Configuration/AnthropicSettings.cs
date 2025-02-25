@@ -31,8 +31,19 @@ public class AnthropicSettings : LLMSettings
     
     public override void Validate()
     {
-        base.Validate();
-        
+        // Call base validation with empty check bypass to avoid double validation
+        if (string.IsNullOrWhiteSpace(Provider))
+            throw new ValidationException("Provider is required");
+            
+        if (string.IsNullOrWhiteSpace(Model))
+            throw new ValidationException("Model is required");
+            
+        if (string.IsNullOrWhiteSpace(ApiKey))
+            throw new ValidationException("API key is required");
+            
+        if (TimeoutSeconds < 5 || TimeoutSeconds > 300)
+            throw new ValidationException("Timeout must be between 5 and 300 seconds");
+            
         if (string.IsNullOrEmpty(ApiToken))
             throw new ValidationException("Anthropic API token is required");
             

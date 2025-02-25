@@ -232,6 +232,11 @@ namespace XPlain.Services
             }
         }
 
+        public bool CanMakeRequest(string provider)
+        {
+            return WaitForAvailabilityAsync(provider).GetAwaiter().GetResult();
+        }
+
         private class PriorityQueue<TValue, TPriority>
         {
             private readonly List<(TValue Value, TPriority Priority)> _items = new();

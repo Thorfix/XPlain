@@ -217,7 +217,9 @@ namespace XPlain.Services
                     
                     if (actionTask.IsFaulted)
                     {
-                        throw await actionTask;
+                        if (actionTask.Exception?.InnerException != null)
+                            throw actionTask.Exception.InnerException;
+                        throw new Exception("Unknown error in action task");
                     }
 
                     var finalResult = await actionTask;

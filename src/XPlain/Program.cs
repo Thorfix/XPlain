@@ -1135,6 +1135,7 @@ file class Program
             configuration.GetSection("Cache").Bind(cacheSettings);
             services.AddSingleton(Options.Create(cacheSettings));
             services.AddSingleton<IEncryptionProvider, EncryptionProvider>();
+            services.AddSingleton<IEncryptionProvider, EncryptionProvider>();
             services.AddSingleton<ICacheProvider, FileBasedCacheProvider>();
             services.AddSingleton<MLPredictionService>();
             services.AddSingleton<ICacheMonitoringService, CacheMonitoringService>();
@@ -1215,6 +1216,7 @@ file class Program
             // Add model performance monitoring and related services
             services.AddSingleton<IModelPerformanceMonitor, ModelPerformanceMonitor>();
             services.AddSingleton<IAutomaticMitigationService, AutomaticMitigationService>();
+            services.AddSingleton<IAlertManagementService, AlertManagementService>();
             services.AddSingleton<INotificationService, NotificationService>();
 
             // Configure provider-specific settings based on selected provider

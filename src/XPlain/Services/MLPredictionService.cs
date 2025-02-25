@@ -5,6 +5,22 @@ using System.Threading.Tasks;
 
 namespace XPlain.Services
 {
+    public class PredictionResult
+    {
+        public double Value { get; set; }
+        public double Confidence { get; set; }
+        public TimeSpan TimeToImpact { get; set; }
+    }
+
+    public class TrendAnalysis
+    {
+        public string Trend { get; set; }
+        public double CurrentValue { get; set; }
+        public double ProjectedValue { get; set; }
+        public DateTime ProjectionTime { get; set; }
+        public double ChangePercent { get; set; }
+    }
+
     public class MLPredictionService
     {
         private readonly Random _random = new Random();
