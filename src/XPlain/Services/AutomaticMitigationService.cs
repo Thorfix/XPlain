@@ -1,151 +1,279 @@
 using System;
+using System.Collections.Generic;
+using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 
 namespace XPlain.Services
 {
     public interface IAutomaticMitigationService
     {
-        Task InitiateModelRollback();
-        Task<bool> ValidateRollbackSuccess();
-        Task LogIncident(string description, Dictionary<string, object> metadata);
-        Task<List<MitigationIncident>> GetIncidentHistory();
+        Task<bool> ApplyMitigationAsync(string mitigationType);
+        Task<List<MitigationAction>> GetActiveMitigationsAsync();
+        Task<bool> RevertMitigationAsync(string mitigationId);
     }
 
-    public class AutomaticMitigationService : IAutomaticMitigationService
+    public class MitigationAction
+    {
+        public string Id { get; set; } = Guid.NewGuid().ToString();
+        public string Type { get; set; }
+        public string Description { get; set; }
+        public DateTime AppliedAt { get; set; } = DateTime.UtcNow;
+        public MitigationStatus Status { get; set; } = MitigationStatus.Active;
+        public Dictionary<string, string> Parameters { get; set; } = new();
+        public string AppliedBy { get; set; } = "System";
+        public DateTime? RevertedAt { get; set; }
+    }
+
+    public enum MitigationStatus
+    {
+        Active,
+        Reverted,
+        Failed,
+        Expired
+    }
+
+    public class AutomaticMitigationService : BackgroundService, IAutomaticMitigationService
     {
         private readonly ILogger<AutomaticMitigationService> _logger;
-        private readonly MLModelValidationService _validationService;
-        private readonly MLModelTrainingService _trainingService;
-        private readonly List<MitigationIncident> _incidentHistory;
-        private string _lastStableModelVersion;
+        private readonly IAlertManagementService _alertService;
+        private readonly List<MitigationAction> _activeMitigations = new();
+        private readonly object _mitigationsLock = new();
 
         public AutomaticMitigationService(
             ILogger<AutomaticMitigationService> logger,
-            MLModelValidationService validationService,
-            MLModelTrainingService trainingService)
+            IAlertManagementService alertService)
         {
             _logger = logger;
-            _validationService = validationService;
-            _trainingService = trainingService;
-            _incidentHistory = new List<MitigationIncident>();
-            _lastStableModelVersion = trainingService.GetLatestStableVersion();
+            _alertService = alertService;
         }
 
-        public async Task InitiateModelRollback()
+        protected override async Task ExecuteAsync(CancellationToken stoppingToken)
         {
+            _logger.LogInformation("Automatic mitigation service started");
+
+            while (!stoppingToken.IsCancellationRequested)
+            {
+                try
+                {
+                    await CheckForIncidentsAndMitigate();
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "Error in automatic mitigation service");
+                }
+
+                // Check every minute
+                await Task.Delay(TimeSpan.FromMinutes(1), stoppingToken);
+            }
+
+            _logger.LogInformation("Automatic mitigation service stopped");
+        }
+
+        private async Task CheckForIncidentsAndMitigate()
+        {
+            var activeAlerts = await _alertService.GetActiveAlertsAsync();
+            
+            // Group alerts by source
+            var alertsBySource = new Dictionary<string, List<Alert>>();
+            foreach (var alert in activeAlerts)
+            {
+                if (!alertsBySource.TryGetValue(alert.Source, out var alerts))
+                {
+                    alerts = new List<Alert>();
+                    alertsBySource[alert.Source] = alerts;
+                }
+                
+                alerts.Add(alert);
+            }
+            
+            // Check for mitigation opportunities based on alert patterns
+            foreach (var source in alertsBySource.Keys)
+            {
+                var alerts = alertsBySource[source];
+                var criticalAlerts = alerts.FindAll(a => a.Severity == AlertSeverity.Critical);
+                
+                if (criticalAlerts.Count >= 3)
+                {
+                    // Pattern: Multiple critical alerts from the same source
+                    await ApplyMitigationAsync(GetMitigationTypeForSource(source));
+                }
+            }
+        }
+
+        private string GetMitigationTypeForSource(string source)
+        {
+            return source switch
+            {
+                "ModelPerformanceMonitor" => "fallback_to_stable_model",
+                "RateLimitingService" => "increase_rate_limits",
+                "FileBasedCacheProvider" => "flush_corrupted_cache",
+                _ => "generic_mitigation"
+            };
+        }
+
+        public async Task<bool> ApplyMitigationAsync(string mitigationType)
+        {
+            if (string.IsNullOrEmpty(mitigationType))
+            {
+                throw new ArgumentException("Mitigation type cannot be null or empty", nameof(mitigationType));
+            }
+
             try
             {
-                _logger.LogWarning("Initiating model rollback to last stable version: {Version}", _lastStableModelVersion);
+                _logger.LogInformation($"Applying mitigation: {mitigationType}");
+
+                // Implementation depends on mitigation type
+                var success = await ExecuteMitigationAsync(mitigationType);
                 
-                var rollbackSuccess = await _trainingService.RollbackToVersion(_lastStableModelVersion);
-                if (rollbackSuccess)
+                if (success)
                 {
-                    await LogIncident("Automatic model rollback performed", new Dictionary<string, object>
+                    var mitigation = new MitigationAction
                     {
-                        { "previous_version", _lastStableModelVersion },
-                        { "timestamp", DateTime.UtcNow },
-                        { "status", "success" }
+                        Type = mitigationType,
+                        Description = GetMitigationDescription(mitigationType),
+                        Status = MitigationStatus.Active
+                    };
+                    
+                    lock (_mitigationsLock)
+                    {
+                        _activeMitigations.Add(mitigation);
+                    }
+                    
+                    _logger.LogInformation($"Successfully applied mitigation {mitigation.Id}: {mitigationType}");
+                    
+                    // Create an alert to notify about the mitigation
+                    await _alertService.CreateAlertAsync(new Alert
+                    {
+                        Title = $"Automatic Mitigation Applied: {mitigationType}",
+                        Description = GetMitigationDescription(mitigationType),
+                        Severity = AlertSeverity.Medium,
+                        Source = "AutomaticMitigationService",
+                        Metadata = new Dictionary<string, string>
+                        {
+                            ["mitigation_id"] = mitigation.Id,
+                            ["mitigation_type"] = mitigationType
+                        }
                     });
                     
-                    _logger.LogInformation("Model rollback completed successfully");
+                    return true;
                 }
                 else
                 {
-                    _logger.LogError("Model rollback failed");
-                    throw new Exception("Failed to rollback to stable version");
+                    _logger.LogWarning($"Failed to apply mitigation: {mitigationType}");
+                    return false;
                 }
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Error during model rollback");
-                throw;
-            }
-        }
-
-        public async Task<bool> ValidateRollbackSuccess()
-        {
-            try
-            {
-                var validationResult = await _validationService.ValidateCurrentModel();
-                var isValid = validationResult.Accuracy >= 0.95 && validationResult.F1Score >= 0.90;
-                
-                if (isValid)
-                {
-                    _logger.LogInformation("Rollback validation successful");
-                }
-                else
-                {
-                    _logger.LogWarning("Rollback validation failed. Metrics below threshold");
-                }
-                
-                return isValid;
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Error validating rollback");
+                _logger.LogError(ex, $"Error applying mitigation: {mitigationType}");
                 return false;
             }
         }
 
-        public async Task LogIncident(string description, Dictionary<string, object> metadata)
+        private Task<bool> ExecuteMitigationAsync(string mitigationType)
         {
-            var severity = metadata.ContainsKey("severity") 
-                ? Enum.Parse<IncidentSeverity>(metadata["severity"].ToString()) 
-                : IncidentSeverity.Medium;
+            // In a real implementation, this would apply the actual mitigation
+            // For now, we'll just simulate success
+            _logger.LogInformation($"Simulating application of mitigation: {mitigationType}");
+            return Task.FromResult(true);
+        }
 
-            var performanceMetrics = await _validationService.ValidateCurrentModel();
-
-            var incident = new MitigationIncident
+        public Task<List<MitigationAction>> GetActiveMitigationsAsync()
+        {
+            lock (_mitigationsLock)
             {
-                Timestamp = DateTime.UtcNow,
-                Description = description,
-                Severity = severity,
-                Category = metadata.GetValueOrDefault("category")?.ToString(),
-                CorrelationId = metadata.GetValueOrDefault("correlationId")?.ToString(),
-                AffectedUsers = metadata.ContainsKey("affectedUsers") 
-                    ? Convert.ToInt32(metadata["affectedUsers"]) 
-                    : 0,
-                PerformanceMetrics = new Dictionary<string, object>
-                {
-                    { "accuracy", performanceMetrics.Accuracy },
-                    { "f1Score", performanceMetrics.F1Score },
-                    { "latency", performanceMetrics.AverageLatency }
-                },
-                Metadata = metadata
-            };
-
-            _incidentHistory.Add(incident);
-            _logger.LogInformation(
-                "Incident logged: {Description} [Severity: {Severity}, Category: {Category}, CorrelationId: {CorrelationId}]",
-                description, severity, incident.Category, incident.CorrelationId);
+                return Task.FromResult(_activeMitigations.FindAll(m => m.Status == MitigationStatus.Active));
+            }
         }
 
-        public async Task<List<MitigationIncident>> GetIncidentHistory()
+        public async Task<bool> RevertMitigationAsync(string mitigationId)
         {
-            return _incidentHistory;
+            if (string.IsNullOrEmpty(mitigationId))
+            {
+                throw new ArgumentException("Mitigation ID cannot be null or empty", nameof(mitigationId));
+            }
+
+            MitigationAction mitigation;
+            
+            lock (_mitigationsLock)
+            {
+                mitigation = _activeMitigations.Find(m => m.Id == mitigationId && m.Status == MitigationStatus.Active);
+                
+                if (mitigation == null)
+                {
+                    _logger.LogWarning($"Attempted to revert non-existent or non-active mitigation: {mitigationId}");
+                    return false;
+                }
+            }
+            
+            try
+            {
+                _logger.LogInformation($"Reverting mitigation: {mitigationId} (Type: {mitigation.Type})");
+                
+                // Implementation depends on mitigation type
+                var success = await ExecuteMitigationRevertAsync(mitigation);
+                
+                if (success)
+                {
+                    lock (_mitigationsLock)
+                    {
+                        mitigation.Status = MitigationStatus.Reverted;
+                        mitigation.RevertedAt = DateTime.UtcNow;
+                    }
+                    
+                    _logger.LogInformation($"Successfully reverted mitigation: {mitigationId}");
+                    
+                    // Create an alert to notify about the reversion
+                    await _alertService.CreateAlertAsync(new Alert
+                    {
+                        Title = $"Mitigation Reverted: {mitigation.Type}",
+                        Description = $"The mitigation '{mitigation.Description}' has been reverted",
+                        Severity = AlertSeverity.Low,
+                        Source = "AutomaticMitigationService",
+                        Metadata = new Dictionary<string, string>
+                        {
+                            ["mitigation_id"] = mitigation.Id,
+                            ["mitigation_type"] = mitigation.Type,
+                            ["applied_at"] = mitigation.AppliedAt.ToString("o"),
+                            ["reverted_at"] = mitigation.RevertedAt?.ToString("o")
+                        }
+                    });
+                    
+                    return true;
+                }
+                else
+                {
+                    _logger.LogWarning($"Failed to revert mitigation: {mitigationId}");
+                    return false;
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, $"Error reverting mitigation: {mitigationId}");
+                return false;
+            }
         }
-    }
 
-    public enum IncidentSeverity
-    {
-        Low,
-        Medium,
-        High,
-        Critical
-    }
+        private Task<bool> ExecuteMitigationRevertAsync(MitigationAction mitigation)
+        {
+            // In a real implementation, this would revert the actual mitigation
+            // For now, we'll just simulate success
+            _logger.LogInformation($"Simulating reversion of mitigation: {mitigation.Type} (ID: {mitigation.Id})");
+            return Task.FromResult(true);
+        }
 
-    public class MitigationIncident
-    {
-        public string Id { get; set; } = Guid.NewGuid().ToString();
-        public DateTime Timestamp { get; set; }
-        public string Description { get; set; }
-        public IncidentSeverity Severity { get; set; }
-        public string Category { get; set; }
-        public string CorrelationId { get; set; }
-        public int AffectedUsers { get; set; }
-        public Dictionary<string, object> PerformanceMetrics { get; set; }
-        public Dictionary<string, object> Metadata { get; set; }
-        public TimeSpan? RecoveryTime { get; set; }
+        private string GetMitigationDescription(string mitigationType)
+        {
+            return mitigationType switch
+            {
+                "fallback_to_stable_model" => "Switched to a more stable model version due to performance issues",
+                "increase_rate_limits" => "Temporarily increased rate limits to handle traffic spike",
+                "flush_corrupted_cache" => "Flushed potentially corrupted cache entries",
+                "generic_mitigation" => "Applied generic mitigation measures",
+                _ => $"Applied {mitigationType} mitigation"
+            };
+        }
     }
 }

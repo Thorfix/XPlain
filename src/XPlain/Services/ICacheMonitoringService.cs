@@ -6,42 +6,58 @@ namespace XPlain.Services
 {
     public interface ICacheMonitoringService
     {
-        Task<CircuitBreakerStatus> GetCircuitBreakerStatusAsync();
         Task<CacheHealthStatus> GetHealthStatusAsync();
+        Task<Dictionary<string, object>> GetPerformanceMetricsAsync();
         Task<List<CacheAlert>> GetActiveAlertsAsync();
-        Task<bool> IsHealthyAsync();
-        Task<Dictionary<string, double>> GetPerformanceMetricsAsync();
-        Task<double> GetCurrentHitRatioAsync();
-        Task<Dictionary<string, CachePerformanceMetrics>> GetQueryPerformanceAsync();
-        Task<double> GetMemoryUsageAsync();
-        Task<long> GetStorageUsageAsync();
-        Task<int> GetCachedItemCountAsync();
-        Task<List<CacheAnalytics>> GetAnalyticsHistoryAsync(TimeSpan period);
+        Task<List<CacheAnalytics>> GetAnalyticsHistoryAsync(TimeSpan timeSpan);
         Task<List<string>> GetOptimizationRecommendationsAsync();
-        Task<string> GeneratePerformanceReportAsync(string format);
-        Task<CacheAlert> CreateAlertAsync(string type, string message, string severity, Dictionary<string, object>? metadata = null);
-        Task<bool> ResolveAlertAsync(string alertId);
-        Task<List<CacheAlert>> GetAlertHistoryAsync(DateTime since);
-        Task UpdateMonitoringThresholdsAsync(MonitoringThresholds thresholds);
         Task<MonitoringThresholds> GetCurrentThresholdsAsync();
-        Task<bool> TriggerMaintenanceAsync();
-        Task<bool> OptimizeCacheAsync();
-        Task<CircuitBreakerState> GetCircuitBreakerStateAsync();
-        Task<List<CircuitBreakerEvent>> GetCircuitBreakerHistoryAsync(DateTime since);
-        Task<bool> IsCircuitBreakerTrippedAsync();
-        Task<EncryptionStatus> GetEncryptionStatusAsync();
-        Task<DateTime> GetNextKeyRotationTimeAsync();
-        Task<Dictionary<string, DateTime>> GetKeyRotationScheduleAsync();
-        Task<List<string>> GetActiveEncryptionKeysAsync();
-        Task<List<MaintenanceLogEntry>> GetMaintenanceLogsAsync(DateTime since);
-        Task<Dictionary<string, int>> GetEvictionStatisticsAsync();
-        Task<List<CacheEvictionEvent>> GetRecentEvictionsAsync(int count);
-        Task RecordPolicySwitchAsync(PolicySwitchEvent switchEvent);
-        Task LogMaintenanceEventAsync(string operation, string status, TimeSpan duration, Dictionary<string, object>? metadata = null);
-        
-        // New ML-related methods
-        Task<Dictionary<string, PredictionResult>> GetPerformancePredictionsAsync();
-        Task<List<PredictedAlert>> GetPredictedAlertsAsync();
-        Task<Dictionary<string, TrendAnalysis>> GetMetricTrendsAsync();
+        Task<bool> UpdateMonitoringThresholdsAsync(MonitoringThresholds thresholds);
+        Task<string> GeneratePerformanceReportAsync(string format);
+    }
+
+    public class CacheHealthStatus
+    {
+        public string Status { get; set; } = "Healthy";
+        public double HealthScore { get; set; } = 100.0;
+        public bool IsOperational { get; set; } = true;
+        public Dictionary<string, bool> Checks { get; set; } = new();
+        public string LastCheckTimestamp { get; set; } = DateTime.UtcNow.ToString("o");
+        public List<string> Issues { get; set; } = new();
+    }
+
+    public class CacheAlert
+    {
+        public string Id { get; set; } = Guid.NewGuid().ToString();
+        public string Title { get; set; }
+        public string Description { get; set; }
+        public CacheAlertSeverity Severity { get; set; }
+        public DateTime Timestamp { get; set; } = DateTime.UtcNow;
+        public Dictionary<string, string> Metadata { get; set; } = new();
+    }
+
+    public enum CacheAlertSeverity
+    {
+        Info,
+        Warning,
+        Error,
+        Critical
+    }
+
+    public class CacheAnalytics
+    {
+        public DateTime Timestamp { get; set; } = DateTime.UtcNow;
+        public CacheStats Stats { get; set; }
+        public double MemoryUsageMB { get; set; }
+        public double CpuUsagePercent { get; set; }
+        public Dictionary<string, object> CustomMetrics { get; set; } = new();
+    }
+
+    public class MonitoringThresholds
+    {
+        public double MemoryUsageThresholdPercent { get; set; } = 90.0;
+        public double HitRateThresholdPercent { get; set; } = 50.0;
+        public double LatencyThresholdMs { get; set; } = 1000.0;
+        public long MaxItemCount { get; set; } = 10000;
     }
 }

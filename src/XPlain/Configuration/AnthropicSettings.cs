@@ -46,4 +46,7 @@ public class AnthropicSettings : LLMSettings
 
     [Range(5000, 300000, ErrorMessage = "Circuit breaker reset timeout must be between 5000 and 300000 milliseconds")]
     public int CircuitBreakerResetTimeoutMs { get; set; } = 30000;
+    
+    [Range(1000, 300000, ErrorMessage = "Maximum retry delay must be between 1000 and 300000 milliseconds")]
+    public int MaxRetryDelayMs { get; set; } = 30000;
 }

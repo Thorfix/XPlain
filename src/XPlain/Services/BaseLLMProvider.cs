@@ -84,14 +84,9 @@ namespace XPlain.Services
             yield return response;
         }
         
-        public virtual IAsyncEnumerable<string> GetCompletionStreamAsync(string prompt)
+        public virtual async IAsyncEnumerable<string> GetCompletionStreamAsync(string prompt)
         {
             // Validate and sanitize the input before passing to the provider
-            return GetCompletionStreamAsyncInternal(prompt);
-        }
-        
-        private async IAsyncEnumerable<string> GetCompletionStreamAsyncInternal(string prompt)
-        {
             try
             {
                 var validatedPrompt = await ValidateAndSanitizePromptAsync(prompt);
@@ -109,6 +104,7 @@ namespace XPlain.Services
                 yield return $"Error: {llmEx.Message}";
             }
         }
+
 
         protected async Task<string> ValidateAndSanitizePromptAsync(string prompt)
         {

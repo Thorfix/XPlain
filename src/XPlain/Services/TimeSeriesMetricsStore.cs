@@ -1,11 +1,11 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+using System.Text.Json;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
-using InfluxDB.Client;
-using InfluxDB.Client.Api.Domain;
-using InfluxDB.Client.Writes;
 using XPlain.Configuration;
 
 namespace XPlain.Services
@@ -14,8 +14,9 @@ namespace XPlain.Services
     {
         private readonly ILogger<TimeSeriesMetricsStore> _logger;
         private readonly MetricsSettings _settings;
-        private readonly InfluxDBClient _client;
-        private readonly string _bucket;
+        private readonly string _metricsDirectory;
+        private readonly Dictionary<string, List<TimeSeriesEntry>> _cachedMetrics = new();
+        private readonly object _cacheLock = new();
 
         public TimeSeriesMetricsStore(
             ILogger<TimeSeriesMetricsStore> logger,
@@ -23,192 +24,196 @@ namespace XPlain.Services
         {
             _logger = logger;
             _settings = settings.Value;
-            _bucket = _settings.DatabaseName;
-            _client = InfluxDBClientFactory.Create(
-                _settings.TimeSeriesConnectionString,
-                _bucket,
-                _settings.DefaultRetentionDays);
-        }
-
-        public async Task StoreQueryMetric(string key, double responseTime, bool isHit, DateTime timestamp)
-        {
-            try
-            {
-                var point = PointData
-                    .Measurement("query_metrics")
-                    .Tag("key", key)
-                    .Tag("hit", isHit.ToString())
-                    .Field("response_time", responseTime)
-                    .Timestamp(timestamp, WritePrecision.Ms);
-
-                using var writeApi = _client.GetWriteApiAsync();
-                await writeApi.WritePointAsync(point);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Failed to store query metric for key {Key}", key);
-                throw;
-            }
-        }
-
-        public async Task StoreEvictionEvent(string key, DateTime timestamp)
-        {
-            try
-            {
-                var point = PointData
-                    .Measurement("cache_events")
-                    .Tag("key", key)
-                    .Tag("type", "eviction")
-                    .Field("count", 1)
-                    .Timestamp(timestamp, WritePrecision.Ms);
-
-                using var writeApi = _client.GetWriteApiAsync();
-                await writeApi.WritePointAsync(point);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Failed to store eviction event for key {Key}", key);
-                throw;
-            }
-        }
-
-        public async Task StorePreWarmEvent(string key, bool success, DateTime timestamp)
-        {
-            try
-            {
-                var point = PointData
-                    .Measurement("cache_events")
-                    .Tag("key", key)
-                    .Tag("type", "prewarm")
-                    .Tag("success", success.ToString())
-                    .Field("count", 1)
-                    .Timestamp(timestamp, WritePrecision.Ms);
-
-                using var writeApi = _client.GetWriteApiAsync();
-                await writeApi.WritePointAsync(point);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Failed to store pre-warm event for key {Key}", key);
-                throw;
-            }
-        }
-
-        public async Task<double> GetQueryFrequency(string key, TimeSpan window)
-        {
-            try
-            {
-                var query = $@"
-                    from(bucket: ""{_bucket}"")
-                    |> range(start: -{window.TotalSeconds}s)
-                    |> filter(fn: (r) => r[""_measurement""] == ""query_metrics"" 
-                                    and r[""key""] == ""{key}"")
-                    |> count()";
-
-                using var queryApi = _client.GetQueryApi();
-                var result = await queryApi.QueryAsync<double>(query);
-                var count = result?.FirstOrDefault() ?? 0;
-                return count / window.TotalHours;
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Failed to get query frequency for key {Key}", key);
-                return 0;
-            }
-        }
-
-        public async Task<double> GetAverageResponseTime(string key, TimeSpan window)
-        {
-            try
-            {
-                var query = $@"
-                    from(bucket: ""{_bucket}"")
-                    |> range(start: -{window.TotalSeconds}s)
-                    |> filter(fn: (r) => r[""_measurement""] == ""query_metrics"" 
-                                    and r[""key""] == ""{key}"")
-                    |> mean(column: ""response_time"")";
-
-                using var queryApi = _client.GetQueryApi();
-                var result = await queryApi.QueryAsync<double>(query);
-                return result?.FirstOrDefault() ?? 0;
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Failed to get average response time for key {Key}", key);
-                return 0;
-            }
-        }
-
-        public async Task<double> GetCacheHitRate(string key, TimeSpan window)
-        {
-            try
-            {
-                var query = $@"
-                    from(bucket: ""{_bucket}"")
-                    |> range(start: -{window.TotalSeconds}s)
-                    |> filter(fn: (r) => r[""_measurement""] == ""query_metrics"" 
-                                    and r[""key""] == ""{key}"")
-                    |> group(columns: [""hit""])
-                    |> count()";
-
-                using var queryApi = _client.GetQueryApi();
-                var results = await queryApi.QueryAsync<double>(query);
+            
+            // Create metrics directory if it doesn't exist
+            _metricsDirectory = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "XPlain", "Metrics");
                 
-                double hits = 0, total = 0;
-                foreach (var result in results)
+            Directory.CreateDirectory(_metricsDirectory);
+        }
+
+        public async Task StoreMetricsAsync(string metricType, Dictionary<string, object> metrics)
+        {
+            try
+            {
+                var entry = new TimeSeriesEntry
                 {
-                    if (result.GetValueByKey("hit").ToString() == "True")
-                        hits = result;
-                    total += result;
+                    Timestamp = DateTime.UtcNow,
+                    Values = metrics
+                };
+
+                // Store in memory cache
+                lock (_cacheLock)
+                {
+                    if (!_cachedMetrics.TryGetValue(metricType, out var entries))
+                    {
+                        entries = new List<TimeSeriesEntry>();
+                        _cachedMetrics[metricType] = entries;
+                    }
+
+                    entries.Add(entry);
+
+                    // Keep in-memory cache bounded
+                    if (entries.Count > 1000)
+                    {
+                        entries.RemoveRange(0, entries.Count - 1000);
+                    }
                 }
 
-                return total > 0 ? hits / total : 0;
+                // Write to disk as well
+                await PersistMetricsAsync(metricType, entry);
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Failed to get cache hit rate for key {Key}", key);
-                return 0;
+                _logger.LogError(ex, "Error storing metrics");
             }
         }
 
-        public async Task<double> GetUserActivityLevel(TimeSpan window)
+        public async Task<List<TimeSeriesEntry>> GetMetricsAsync(
+            string metricType, 
+            DateTime startTime, 
+            DateTime endTime)
+        {
+            // First check the in-memory cache
+            List<TimeSeriesEntry> cachedEntries;
+            lock (_cacheLock)
+            {
+                if (_cachedMetrics.TryGetValue(metricType, out var entries))
+                {
+                    cachedEntries = entries
+                        .Where(e => e.Timestamp >= startTime && e.Timestamp <= endTime)
+                        .ToList();
+                    
+                    if (cachedEntries.Count > 0)
+                    {
+                        return cachedEntries;
+                    }
+                }
+            }
+
+            // If not in cache or empty range, load from disk
+            return await LoadMetricsFromDiskAsync(metricType, startTime, endTime);
+        }
+
+        public async Task CleanupOldMetricsAsync(TimeSpan retentionPeriod)
         {
             try
             {
-                var query = $@"
-                    from(bucket: ""{_bucket}"")
-                    |> range(start: -{window.TotalSeconds}s)
-                    |> filter(fn: (r) => r[""_measurement""] == ""query_metrics"")
-                    |> window(every: 1m)
-                    |> count()
-                    |> mean()";
-
-                using var queryApi = _client.GetQueryApi();
-                var result = await queryApi.QueryAsync<double>(query);
-                var avgRequestsPerMinute = result?.FirstOrDefault() ?? 0;
+                var cutoffDate = DateTime.UtcNow - retentionPeriod;
+                var metricsRoot = new DirectoryInfo(_metricsDirectory);
                 
-                // Normalize to 0-1 range (assuming 1000 requests/minute is high activity)
-                return Math.Min(1.0, avgRequestsPerMinute / 1000.0);
+                foreach (var typeDir in metricsRoot.GetDirectories())
+                {
+                    foreach (var dayDir in typeDir.GetDirectories())
+                    {
+                        if (DateTime.TryParse(dayDir.Name, out var dirDate) && dirDate < cutoffDate)
+                        {
+                            dayDir.Delete(true);
+                            _logger.LogInformation($"Deleted old metrics: {typeDir.Name}/{dayDir.Name}");
+                        }
+                    }
+                }
+
+                // Also clean up in-memory cache
+                lock (_cacheLock)
+                {
+                    foreach (var metricType in _cachedMetrics.Keys.ToList())
+                    {
+                        _cachedMetrics[metricType] = _cachedMetrics[metricType]
+                            .Where(e => e.Timestamp >= cutoffDate)
+                            .ToList();
+                    }
+                }
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Failed to get user activity level", ex);
-                return 0;
+                _logger.LogError(ex, "Error cleaning up old metrics");
             }
         }
 
-        public async Task CleanupOldMetrics()
+        private async Task PersistMetricsAsync(string metricType, TimeSeriesEntry entry)
         {
-            try
-            {
-                // InfluxDB handles data retention through its retention policy
-                // which is set during bucket creation
-                _logger.LogInformation("Cleanup handled by InfluxDB retention policy");
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Error during metrics cleanup");
-            }
+            var day = entry.Timestamp.ToString("yyyy-MM-dd");
+            var hour = entry.Timestamp.Hour;
+            
+            var dirPath = Path.Combine(_metricsDirectory, metricType, day);
+            Directory.CreateDirectory(dirPath);
+            
+            var filePath = Path.Combine(dirPath, $"{hour}.jsonl");
+            var line = JsonSerializer.Serialize(entry);
+            
+            await File.AppendAllTextAsync(filePath, line + Environment.NewLine);
         }
+
+        private async Task<List<TimeSeriesEntry>> LoadMetricsFromDiskAsync(
+            string metricType, 
+            DateTime startTime, 
+            DateTime endTime)
+        {
+            var result = new List<TimeSeriesEntry>();
+            var metricDir = Path.Combine(_metricsDirectory, metricType);
+            
+            if (!Directory.Exists(metricDir))
+                return result;
+
+            // Get date range to scan
+            var startDay = startTime.Date;
+            var endDay = endTime.Date;
+            var currentDay = startDay;
+            
+            while (currentDay <= endDay)
+            {
+                var dayStr = currentDay.ToString("yyyy-MM-dd");
+                var dayPath = Path.Combine(metricDir, dayStr);
+                
+                if (Directory.Exists(dayPath))
+                {
+                    // Find all hourly files for this day
+                    foreach (var file in Directory.GetFiles(dayPath, "*.jsonl"))
+                    {
+                        var fileName = Path.GetFileNameWithoutExtension(file);
+                        if (int.TryParse(fileName, out var hour))
+                        {
+                            // Check if hour is in our time range
+                            var fileTime = currentDay.AddHours(hour);
+                            if (fileTime >= startTime && fileTime <= endTime)
+                            {
+                                try
+                                {
+                                    // Read and parse file
+                                    var lines = await File.ReadAllLinesAsync(file);
+                                    foreach (var line in lines)
+                                    {
+                                        if (string.IsNullOrWhiteSpace(line))
+                                            continue;
+                                            
+                                        var entry = JsonSerializer.Deserialize<TimeSeriesEntry>(line);
+                                        if (entry != null && entry.Timestamp >= startTime && entry.Timestamp <= endTime)
+                                        {
+                                            result.Add(entry);
+                                        }
+                                    }
+                                }
+                                catch (Exception ex)
+                                {
+                                    _logger.LogError(ex, $"Error reading metrics file: {file}");
+                                }
+                            }
+                        }
+                    }
+                }
+                
+                currentDay = currentDay.AddDays(1);
+            }
+            
+            return result.OrderBy(e => e.Timestamp).ToList();
+        }
+    }
+
+    public class TimeSeriesEntry
+    {
+        public DateTime Timestamp { get; set; }
+        public Dictionary<string, object> Values { get; set; } = new();
     }
 }

@@ -339,6 +339,50 @@ namespace XPlain.Services
                 }
             }
         }
+        
+        private async Task NotifyEvictionListeners(string key)
+        {
+            var listeners = new List<ICacheEventListener>();
+            
+            lock (_eventListeners)
+            {
+                listeners.AddRange(_eventListeners);
+            }
+            
+            foreach (var listener in listeners)
+            {
+                try
+                {
+                    await listener.OnCacheEviction(key);
+                }
+                catch (Exception)
+                {
+                    // Suppress exceptions from listeners
+                }
+            }
+        }
+
+        private async Task NotifyPreWarmListeners(string key, bool success)
+        {
+            var listeners = new List<ICacheEventListener>();
+            
+            lock (_eventListeners)
+            {
+                listeners.AddRange(_eventListeners);
+            }
+            
+            foreach (var listener in listeners)
+            {
+                try
+                {
+                    await listener.OnCachePreWarm(key, success);
+                }
+                catch (Exception)
+                {
+                    // Suppress exceptions from listeners
+                }
+            }
+        }
 
         public async Task PreWarmKey(string key)
         {

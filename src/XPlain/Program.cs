@@ -1014,25 +1014,39 @@ file class Program
             using var sha256 = System.Security.Cryptography.SHA256.Create();
             var context = new System.Text.StringBuilder();
 
-            var files = Directory.GetFiles(codeDirectory, "*.*", SearchOption.AllDirectories)
-                .Where(f => Path.GetExtension(f) is ".cs" or ".fs" or ".vb" or ".js" or ".ts" or ".py" or ".java"
-                    or ".cpp" or ".h")
-                .OrderBy(f => f);
-
-            foreach (var file in files)
+            try 
             {
-                try
+                if (!Directory.Exists(codeDirectory))
                 {
-                    context.AppendLine(await File.ReadAllTextAsync(file));
+                    Console.WriteLine($"Warning: Directory not found: {codeDirectory}");
+                    return "invalid-directory-hash";
                 }
-                catch (Exception ex)
-                {
-                    Console.WriteLine($"Warning: Could not read file {file}: {ex.Message}");
-                }
-            }
 
-            var hashBytes = sha256.ComputeHash(System.Text.Encoding.UTF8.GetBytes(context.ToString()));
-            return Convert.ToBase64String(hashBytes).Replace("/", "_").Replace("+", "-");
+                var files = Directory.GetFiles(codeDirectory, "*.*", SearchOption.AllDirectories)
+                    .Where(f => Path.GetExtension(f) is ".cs" or ".fs" or ".vb" or ".js" or ".ts" or ".py" or ".java"
+                        or ".cpp" or ".h")
+                    .OrderBy(f => f);
+
+                foreach (var file in files)
+                {
+                    try
+                    {
+                        context.AppendLine(await File.ReadAllTextAsync(file));
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.WriteLine($"Warning: Could not read file {file}: {ex.Message}");
+                    }
+                }
+
+                var hashBytes = sha256.ComputeHash(System.Text.Encoding.UTF8.GetBytes(context.ToString()));
+                return Convert.ToBase64String(hashBytes).Replace("/", "_").Replace("+", "-");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error calculating code hash: {ex.Message}");
+                return "error-calculating-hash";
+            }
         }
 
         internal static string BuildCodeContext(string codeDirectory)
@@ -1096,6 +1110,9 @@ file class Program
             configuration.GetSection("Streaming").Bind(streamingSettings);
             services.AddSingleton(Options.Create(streamingSettings));
             services.AddSingleton(streamingSettings);
+            
+            // Register LLMProviderMetrics to track performance
+            services.AddSingleton<LLMProviderMetrics>();
             
             // Configure ML model monitoring and alerting
             services.AddSingleton<IModelPerformanceMonitor, ModelPerformanceMonitor>();
