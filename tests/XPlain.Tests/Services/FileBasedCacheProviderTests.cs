@@ -2901,6 +2901,303 @@ namespace XPlain.Tests.Services
         }
         
         [Fact]
+        public async Task Compression_TestVeryLargeDataWithLimitedMemory()
+        {
+            // Arrange
+            var dataSize = 20 * 1024 * 1024; // 20MB
+            var largeValue = new string('x', dataSize); // Highly compressible repeating data
+            var key = "very_large_data_key";
+            
+            var settings = new CacheSettings
+            {
+                CacheEnabled = true,
+                CacheDirectory = _testDirectory,
+                CompressionEnabled = true,
+                CompressionAlgorithm = CompressionAlgorithm.GZip,
+                CompressionLevel = CompressionLevel.Fastest, // Use fastest for very large data
+                MinSizeForCompressionBytes = 1024,
+                MaxSizeForHighCompressionBytes = 10 * 1024 * 1024 // 10MB threshold
+            };
+            
+            var provider = new FileBasedCacheProvider(
+                Options.Create(settings),
+                metricsService: null,
+                mlPredictionService: null);
+
+            // Get initial memory usage
+            GC.Collect();
+            GC.WaitForPendingFinalizers();
+            var memoryBefore = GC.GetTotalMemory(true);
+            
+            // Act - store the large value
+            var sw = Stopwatch.StartNew();
+            await provider.SetAsync(key, largeValue);
+            sw.Stop();
+            var writeTime = sw.ElapsedMilliseconds;
+            
+            // Measure memory after storage
+            var memoryAfterStorage = GC.GetTotalMemory(false);
+            
+            // Read it back
+            sw.Restart();
+            var retrievedValue = await provider.GetAsync<string>(key);
+            sw.Stop();
+            var readTime = sw.ElapsedMilliseconds;
+            
+            // Measure final memory
+            var memoryAfterRetrieval = GC.GetTotalMemory(false);
+            
+            var stats = provider.GetCacheStats();
+            
+            // Assert
+            Assert.Equal(largeValue, retrievedValue); // Data integrity maintained
+            Assert.True(stats.CompressionRatio < 0.1); // For repeating data, should get >90% compression
+            
+            // Memory usage should be reasonable - we expect decompression to use memory
+            // but it shouldn't be excessive compared to the original data size
+            Console.WriteLine($"Initial memory: {memoryBefore / (1024 * 1024)}MB");
+            Console.WriteLine($"Memory after storage: {memoryAfterStorage / (1024 * 1024)}MB");
+            Console.WriteLine($"Memory after retrieval: {memoryAfterRetrieval / (1024 * 1024)}MB");
+            Console.WriteLine($"Write time: {writeTime}ms");
+            Console.WriteLine($"Read time: {readTime}ms");
+            Console.WriteLine($"Compression ratio: {stats.CompressionRatio:F3}");
+            Console.WriteLine($"Original size: {dataSize / (1024 * 1024)}MB");
+            Console.WriteLine($"Compressed size: {(dataSize * stats.CompressionRatio) / (1024 * 1024):F2}MB");
+            
+            // Memory usage during decompression should be reasonable
+            var memoryForDecompression = memoryAfterRetrieval - memoryAfterStorage;
+            Assert.True(memoryForDecompression < dataSize * 1.5, 
+                "Memory usage during decompression should be controlled");
+            
+            // Performance should be reasonable for large data
+            Assert.True(readTime < 5000, "Decompression should be reasonably fast even for large data");
+        }
+        
+        [Fact]
+        public async Task Compression_TestNonCompressibleData()
+        {
+            // Arrange
+            var random = new Random(42); // Fixed seed for reproducibility
+            var dataSize = 5 * 1024 * 1024; // 5MB
+            var bytes = new byte[dataSize];
+            random.NextBytes(bytes); // Generate random bytes that should not compress well
+            var nonCompressibleData = Convert.ToBase64String(bytes);
+            var key = "non_compressible_data_key";
+            
+            var settings = new CacheSettings
+            {
+                CacheEnabled = true,
+                CacheDirectory = _testDirectory,
+                CompressionEnabled = true,
+                CompressionAlgorithm = CompressionAlgorithm.GZip,
+                CompressionLevel = CompressionLevel.Optimal,
+                MinSizeForCompressionBytes = 1024,
+                MinCompressionRatio = 0.9 // Only compress if it reduces size by at least 10%
+            };
+            
+            var provider = new FileBasedCacheProvider(
+                Options.Create(settings),
+                metricsService: null,
+                mlPredictionService: null);
+
+            // Act
+            await provider.SetAsync(key, nonCompressibleData);
+            var stats = provider.GetCacheStats();
+            var retrievedValue = await provider.GetAsync<string>(key);
+            
+            // Assert
+            Assert.Equal(nonCompressibleData, retrievedValue); // Data integrity maintained
+            
+            // For random data, we expect either:
+            // 1. Compression was skipped (ratio = 1.0) if it wasn't beneficial
+            // 2. Compression achieved minimal benefit (ratio close to MinCompressionRatio)
+            Console.WriteLine($"Non-compressible data test:");
+            Console.WriteLine($"Compression ratio: {stats.CompressionRatio:F3}");
+            Console.WriteLine($"Compressed: {stats.CompressedItemCount > 0}");
+            
+            // If compression was applied, the ratio should be reasonable
+            if (stats.CompressedItemCount > 0)
+            {
+                // Even random data might compress slightly due to patterns
+                Assert.True(stats.CompressionRatio <= 0.99, 
+                    "If compression was used, it should provide at least some benefit");
+            }
+            else
+            {
+                // If compression was skipped, ratio should be 1.0
+                Assert.Equal(1.0, stats.CompressionRatio);
+            }
+        }
+        
+        [Fact]
+        public async Task Compression_TestContentTypeDetection()
+        {
+            // Arrange
+            var jsonData = System.Text.Json.JsonSerializer.Serialize(Enumerable.Range(0, 1000)
+                .Select(i => new { Id = i, Name = $"Item {i}", Value = i * 3.14 })
+                .ToArray());
+                
+            var xmlData = $@"<root>
+                <items>
+                    {string.Join("", Enumerable.Range(0, 1000).Select(i => $"<item id=\"{i}\"><n>Item {i}</n><value>{i * 3.14}</value></item>"))}
+                </items>
+                <metadata>
+                    <created>{DateTime.Now}</created>
+                    <description>Test data with repeating structure</description>
+                </metadata>
+            </root>";
+                
+            var htmlData = $@"<!DOCTYPE html>
+            <html>
+                <head><title>Test HTML</title></head>
+                <body>
+                    <div class='container'>
+                        {string.Join("", Enumerable.Range(0, 1000).Select(i => $"<div id='item-{i}'>Item {i}</div>"))}
+                    </div>
+                </body>
+            </html>";
+                
+            var binaryData = new byte[100 * 1024]; // 100KB
+            new Random(42).NextBytes(binaryData); // Random binary data
+            
+            var settings = new CacheSettings
+            {
+                CacheEnabled = true,
+                CacheDirectory = _testDirectory,
+                CompressionEnabled = true,
+                AdaptiveCompression = true,
+                ContentTypeAlgorithmMap = new Dictionary<ContentType, CompressionAlgorithm> {
+                    { ContentType.TextJson, CompressionAlgorithm.Brotli },
+                    { ContentType.TextXml, CompressionAlgorithm.Brotli },
+                    { ContentType.TextHtml, CompressionAlgorithm.Brotli },
+                    { ContentType.BinaryData, CompressionAlgorithm.GZip }
+                }
+            };
+            
+            var provider = new FileBasedCacheProvider(
+                Options.Create(settings),
+                metricsService: null,
+                mlPredictionService: null);
+
+            // Act
+            await provider.SetAsync("json_key", jsonData);
+            await provider.SetAsync("xml_key", xmlData);
+            await provider.SetAsync("html_key", htmlData);
+            await provider.SetAsync("binary_key", binaryData);
+            
+            var stats = provider.GetCacheStats();
+            
+            // Assert
+            // Verify data integrity
+            Assert.Equal(jsonData, await provider.GetAsync<string>("json_key"));
+            Assert.Equal(xmlData, await provider.GetAsync<string>("xml_key"));
+            Assert.Equal(htmlData, await provider.GetAsync<string>("html_key"));
+            Assert.Equal(binaryData, await provider.GetAsync<byte[]>("binary_key"));
+            
+            // With content type detection, we expect to see Brotli used for text formats
+            Assert.True(stats.CompressionStats["Brotli"].CompressedItems > 0, 
+                "Brotli should be used for at least some content types");
+                
+            // Log compression outcomes
+            Console.WriteLine("Content Type Detection Test Results:");
+            Console.WriteLine($"Brotli items: {stats.CompressionStats["Brotli"].CompressedItems}");
+            Console.WriteLine($"GZip items: {stats.CompressionStats["GZip"].CompressedItems}");
+            Console.WriteLine($"Overall compression ratio: {stats.CompressionRatio:F3}");
+            
+            // For structured text data, compression ratio should be very good
+            Assert.True(stats.CompressionRatio < 0.3, 
+                "With appropriate content type detection, compression should be very effective");
+        }
+        
+        [Fact]
+        public async Task Compression_TestAlgorithmPerformanceComparison()
+        {
+            // This test compares performance metrics between GZip and Brotli
+            
+            // Arrange
+            var dataSize = 5 * 1024 * 1024; // 5MB
+            var textData = new string('a', dataSize); // Highly compressible
+            
+            var gzipSettings = new CacheSettings
+            {
+                CacheEnabled = true,
+                CacheDirectory = Path.Combine(_testDirectory, "gzip_test"),
+                CompressionEnabled = true,
+                CompressionAlgorithm = CompressionAlgorithm.GZip,
+                CompressionLevel = CompressionLevel.Optimal
+            };
+            
+            var brotliSettings = new CacheSettings
+            {
+                CacheEnabled = true,
+                CacheDirectory = Path.Combine(_testDirectory, "brotli_test"),
+                CompressionEnabled = true,
+                CompressionAlgorithm = CompressionAlgorithm.Brotli,
+                CompressionLevel = CompressionLevel.Optimal
+            };
+            
+            Directory.CreateDirectory(gzipSettings.CacheDirectory);
+            Directory.CreateDirectory(brotliSettings.CacheDirectory);
+            
+            var gzipProvider = new FileBasedCacheProvider(
+                Options.Create(gzipSettings),
+                metricsService: null,
+                mlPredictionService: null);
+                
+            var brotliProvider = new FileBasedCacheProvider(
+                Options.Create(brotliSettings),
+                metricsService: null,
+                mlPredictionService: null);
+                
+            // Act - Measure GZip performance
+            var sw = Stopwatch.StartNew();
+            await gzipProvider.SetAsync("perf_key", textData);
+            sw.Stop();
+            var gzipWriteTime = sw.ElapsedMilliseconds;
+            
+            sw.Restart();
+            var gzipResult = await gzipProvider.GetAsync<string>("perf_key");
+            sw.Stop();
+            var gzipReadTime = sw.ElapsedMilliseconds;
+            
+            var gzipStats = gzipProvider.GetCacheStats();
+            
+            // Measure Brotli performance
+            sw.Restart();
+            await brotliProvider.SetAsync("perf_key", textData);
+            sw.Stop();
+            var brotliWriteTime = sw.ElapsedMilliseconds;
+            
+            sw.Restart();
+            var brotliResult = await brotliProvider.GetAsync<string>("perf_key");
+            sw.Stop();
+            var brotliReadTime = sw.ElapsedMilliseconds;
+            
+            var brotliStats = brotliProvider.GetCacheStats();
+            
+            // Assert
+            Assert.Equal(textData, gzipResult); // Data integrity for GZip
+            Assert.Equal(textData, brotliResult); // Data integrity for Brotli
+            
+            // Both should achieve good compression
+            Assert.True(gzipStats.CompressionRatio < 0.1);
+            Assert.True(brotliStats.CompressionRatio < 0.1);
+            
+            // Log performance metrics for comparison
+            Console.WriteLine("Algorithm Performance Comparison:");
+            Console.WriteLine($"GZip write time: {gzipWriteTime}ms");
+            Console.WriteLine($"GZip read time: {gzipReadTime}ms");
+            Console.WriteLine($"GZip ratio: {gzipStats.CompressionRatio:F3}");
+            Console.WriteLine($"Brotli write time: {brotliWriteTime}ms");
+            Console.WriteLine($"Brotli read time: {brotliReadTime}ms");
+            Console.WriteLine($"Brotli ratio: {brotliStats.CompressionRatio:F3}");
+            
+            // Brotli usually achieves better compression ratios for text
+            Assert.True(brotliStats.CompressionRatio <= gzipStats.CompressionRatio * 1.2,
+                "Brotli should provide at least comparable compression to GZip for text");
+        }
+        
+        [Fact]
         public async Task Compression_AdaptiveContentType_Selection()
         {
             // Arrange
