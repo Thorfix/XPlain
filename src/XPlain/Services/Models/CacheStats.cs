@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using XPlain.Configuration;
 
 namespace XPlain.Services
 {
@@ -29,6 +30,31 @@ namespace XPlain.Services
         public EncryptionStatus EncryptionStatus { get; set; } = new EncryptionStatus();
         
         /// <summary>
+        /// Compression history over time for trend analysis
+        /// </summary>
+        public List<CompressionHistoryEntry> CompressionHistory { get; set; } = new List<CompressionHistoryEntry>();
+        
+        /// <summary>
+        /// Map of content types to their compression metrics
+        /// </summary>
+        public Dictionary<ContentType, CompressionMetrics> CompressionByContentType { get; set; } = new Dictionary<ContentType, CompressionMetrics>();
+        
+        /// <summary>
+        /// How many items are actually compressed out of total cached items
+        /// </summary>
+        public long CompressedItemCount { get; set; }
+        
+        /// <summary>
+        /// Average time in milliseconds spent on compression operations (CPU overhead)
+        /// </summary>
+        public double AverageCompressionTimeMs { get; set; }
+        
+        /// <summary>
+        /// Average time in milliseconds spent on decompression operations (CPU overhead)
+        /// </summary>
+        public double AverageDecompressionTimeMs { get; set; }
+        
+        /// <summary>
         /// The overall ratio of hits to total cache accesses
         /// </summary>
         public double HitRatio => (Hits + Misses) > 0 ? (double)Hits / (Hits + Misses) : 0;
@@ -56,6 +82,56 @@ namespace XPlain.Services
             StorageUsageBytes > 0 
                 ? 100.0 * (StorageUsageBytes - CompressedStorageUsageBytes) / StorageUsageBytes 
                 : 0;
+                
+        /// <summary>
+        /// Percentage of cached items that benefit from compression
+        /// </summary>
+        public double CompressedItemPercentage =>
+            CachedItemCount > 0 
+                ? 100.0 * CompressedItemCount / CachedItemCount 
+                : 0;
+                
+        /// <summary>
+        /// Overall compression efficiency considering both size savings and CPU cost
+        /// </summary>
+        public double CompressionEfficiencyScore
+        {
+            get
+            {
+                if (StorageUsageBytes == 0 || AverageCompressionTimeMs == 0)
+                    return 0;
+                
+                // Calculate efficiency: balance between compression ratio and CPU cost
+                double compressionBenefit = 1.0 - CompressionRatio; // Higher is better
+                double cpuCost = Math.Min(1.0, AverageCompressionTimeMs / 100.0); // Normalize, lower is better
+                
+                // Weighted score that prioritizes compression ratio but considers CPU cost
+                return (compressionBenefit * 0.8) - (cpuCost * 0.2);
+            }
+        }
+        
+        /// <summary>
+        /// Best performing compression algorithm based on efficiency score
+        /// </summary>
+        public string MostEfficientAlgorithm 
+        { 
+            get
+            {
+                string bestAlgorithm = "None";
+                double bestScore = -1;
+                
+                foreach (var kvp in CompressionStats)
+                {
+                    if (kvp.Key != "None" && kvp.Value.EfficiencyScore > bestScore)
+                    {
+                        bestScore = kvp.Value.EfficiencyScore;
+                        bestAlgorithm = kvp.Key;
+                    }
+                }
+                
+                return bestAlgorithm;
+            }
+        }
     }
 
     public class CachePerformanceMetrics
@@ -69,5 +145,46 @@ namespace XPlain.Services
     {
         public string Reason { get; set; }
         public DateTime Time { get; set; } = DateTime.UtcNow;
+    }
+    
+    /// <summary>
+    /// Represents a point-in-time snapshot of compression statistics for historical tracking
+    /// </summary>
+    public class CompressionHistoryEntry
+    {
+        /// <summary>
+        /// When this snapshot was taken
+        /// </summary>
+        public DateTime Timestamp { get; set; } = DateTime.UtcNow;
+        
+        /// <summary>
+        /// Overall compression ratio at this point in time
+        /// </summary>
+        public double CompressionRatio { get; set; }
+        
+        /// <summary>
+        /// Total bytes saved by compression at this point
+        /// </summary>
+        public long BytesSaved { get; set; }
+        
+        /// <summary>
+        /// What percentage of cache items were compressed
+        /// </summary>
+        public double CompressedItemPercentage { get; set; }
+        
+        /// <summary>
+        /// Average CPU time spent on compression operations (ms)
+        /// </summary>
+        public double AverageCompressionTimeMs { get; set; }
+        
+        /// <summary>
+        /// Current most efficient algorithm at this point in time
+        /// </summary>
+        public string PrimaryAlgorithm { get; set; }
+        
+        /// <summary>
+        /// Efficiency score at this point in time
+        /// </summary>
+        public double EfficiencyScore { get; set; }
     }
 }

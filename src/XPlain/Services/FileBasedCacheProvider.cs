@@ -1581,28 +1581,33 @@ namespace XPlain.Services
                 stopwatch.Stop();
                 UpdateCompressionStats(algorithm.ToString(), data.Length, result.Length, stopwatch.ElapsedMilliseconds, 0);
                 
-                // Only return compressed data if it's actually smaller
-                if (result.Length < data.Length)
+                // Only return compressed data if it's actually smaller by the configured threshold
+                double compressionRatio = (double)result.Length / data.Length;
+                if (compressionRatio < _cacheSettings.MinCompressionRatio)
                 {
                     // Log successful compression
-                    MaintenanceLogs.Add(new MaintenanceLogEntry
+                    if (_cacheSettings.TrackCompressionMetrics)
                     {
-                        Operation = "Compression",
-                        Status = "Success",
-                        Metadata = new Dictionary<string, object>
+                        MaintenanceLogs.Add(new MaintenanceLogEntry
                         {
-                            ["algorithm"] = algorithm.ToString(),
-                            ["level"] = level.ToString(),
-                            ["original_size"] = data.Length,
-                            ["compressed_size"] = result.Length,
-                            ["ratio"] = (double)result.Length / data.Length,
-                            ["time_ms"] = stopwatch.ElapsedMilliseconds
-                        }
-                    });
+                            Operation = "Compression",
+                            Status = "Success",
+                            Metadata = new Dictionary<string, object>
+                            {
+                                ["algorithm"] = algorithm.ToString(),
+                                ["level"] = level.ToString(),
+                                ["original_size"] = data.Length,
+                                ["compressed_size"] = result.Length,
+                                ["ratio"] = compressionRatio,
+                                ["time_ms"] = stopwatch.ElapsedMilliseconds,
+                                ["bytes_saved"] = data.Length - result.Length
+                            }
+                        });
+                    }
                     return result;
                 }
                 
-                // If compression didn't reduce size, return original data
+                // If compression didn't reduce size enough, return original data
                 UpdateCompressionStats(algorithm.ToString(), data.Length, data.Length, stopwatch.ElapsedMilliseconds, 0, false);
                 return data;
             }
@@ -1668,7 +1673,7 @@ namespace XPlain.Services
                 UpdateCompressionStats(algorithm.ToString(), result.Length, data.Length, 0, stopwatch.ElapsedMilliseconds);
                 
                 // Log successful decompression
-                if (_metricsService != null && stopwatch.ElapsedMilliseconds > 5) // Only log non-trivial operations
+                if (_cacheSettings.TrackCompressionMetrics && _metricsService != null && stopwatch.ElapsedMilliseconds > 5) // Only log non-trivial operations
                 {
                     MaintenanceLogs.Add(new MaintenanceLogEntry
                     {
@@ -1698,7 +1703,8 @@ namespace XPlain.Services
                     {
                         ["error"] = ex.Message,
                         ["algorithm"] = algorithm.ToString(),
-                        ["data_size"] = data.Length
+                        ["data_size"] = data.Length,
+                        ["stack_trace"] = ex.StackTrace?.Substring(0, Math.Min(500, ex.StackTrace?.Length ?? 0))
                     }
                 });
                 return data;
@@ -1709,6 +1715,9 @@ namespace XPlain.Services
                                            double compressionTimeMs, double decompressionTimeMs, 
                                            bool wasCompressed = true)
         {
+            if (!_cacheSettings.TrackCompressionMetrics)
+                return;
+                
             lock (_compressionStats) // Thread safety for stats update
             {
                 if (!_compressionStats.ContainsKey(algorithm))
@@ -1717,6 +1726,7 @@ namespace XPlain.Services
                 }
                 
                 var stats = _compressionStats[algorithm];
+                ContentType contentType = ContentType.Unknown;
                 
                 if (compressionTimeMs > 0)
                 {
@@ -1745,6 +1755,41 @@ namespace XPlain.Services
                                 $"compression_time_{algorithm}", 
                                 compressionTimeMs
                             );
+                            
+                            // Record efficiency score
+                            double efficiencyScore = (1.0 - ((double)compressedSize / originalSize)) * 
+                                                    (100.0 / Math.Max(1.0, compressionTimeMs));
+                            _ = _metricsService.RecordCustomMetric(
+                                $"compression_efficiency_{algorithm}",
+                                efficiencyScore
+                            );
+                        }
+                        
+                        // Update content type stats if we have information about the content type
+                        if (_lastContentType != ContentType.Unknown)
+                        {
+                            contentType = _lastContentType;
+                            if (!_compressionByContentType.ContainsKey(contentType))
+                            {
+                                _compressionByContentType[contentType] = new CompressionMetrics();
+                            }
+                            
+                            var contentTypeStats = _compressionByContentType[contentType];
+                            contentTypeStats.TotalItems++;
+                            contentTypeStats.CompressedItems++;
+                            contentTypeStats.OriginalSizeBytes += originalSize;
+                            contentTypeStats.CompressedSizeBytes += compressedSize;
+                            
+                            // Update average compression time
+                            if (contentTypeStats.TotalItems > 1)
+                            {
+                                contentTypeStats.AverageCompressionTimeMs = 
+                                    (contentTypeStats.AverageCompressionTimeMs * 0.9) + (compressionTimeMs * 0.1);
+                            }
+                            else
+                            {
+                                contentTypeStats.AverageCompressionTimeMs = compressionTimeMs;
+                            }
                         }
                     }
                     else
@@ -1752,6 +1797,21 @@ namespace XPlain.Services
                         // Track original size for both compressed and uncompressed items
                         stats.OriginalSizeBytes += originalSize;
                         stats.CompressedSizeBytes += originalSize; // Use original size since compression was skipped or ineffective
+                        
+                        // Update content type stats even for uncompressed items
+                        if (_lastContentType != ContentType.Unknown)
+                        {
+                            contentType = _lastContentType;
+                            if (!_compressionByContentType.ContainsKey(contentType))
+                            {
+                                _compressionByContentType[contentType] = new CompressionMetrics();
+                            }
+                            
+                            var contentTypeStats = _compressionByContentType[contentType];
+                            contentTypeStats.TotalItems++;
+                            contentTypeStats.OriginalSizeBytes += originalSize;
+                            contentTypeStats.CompressedSizeBytes += originalSize;
+                        }
                     }
                     
                     // Update average compression time (weighted moving average with more weight to recent values)
@@ -1782,10 +1842,51 @@ namespace XPlain.Services
                                 decompressionTimeMs
                             );
                         }
+                        
+                        // Update content type decompression stats
+                        if (contentType != ContentType.Unknown && _compressionByContentType.ContainsKey(contentType))
+                        {
+                            var contentTypeStats = _compressionByContentType[contentType];
+                            if (contentTypeStats.TotalItems > 0)
+                            {
+                                contentTypeStats.AverageDecompressionTimeMs = 
+                                    (contentTypeStats.AverageDecompressionTimeMs * 0.9) + (decompressionTimeMs * 0.1);
+                            }
+                            else
+                            {
+                                contentTypeStats.AverageDecompressionTimeMs = decompressionTimeMs;
+                            }
+                        }
                     }
                     else
                     {
                         stats.AverageDecompressionTimeMs = decompressionTimeMs;
+                    }
+                }
+                
+                // Update compression history periodically
+                if (ShouldAddCompressionHistoryEntry())
+                {
+                    var entry = new CompressionHistoryEntry
+                    {
+                        Timestamp = DateTime.UtcNow,
+                        CompressionRatio = stats.CompressionRatio,
+                        BytesSaved = stats.BytesSaved,
+                        CompressedItemPercentage = stats.TotalItems > 0 
+                            ? 100.0 * stats.CompressedItems / stats.TotalItems 
+                            : 0,
+                        AverageCompressionTimeMs = stats.AverageCompressionTimeMs,
+                        PrimaryAlgorithm = algorithm,
+                        EfficiencyScore = stats.EfficiencyScore
+                    };
+                    
+                    lock (_compressionHistory)
+                    {
+                        _compressionHistory.Add(entry);
+                        
+                        // Cleanup old history entries
+                        var cutoffTime = DateTime.UtcNow.AddHours(-_cacheSettings.CompressionMetricsRetentionHours);
+                        _compressionHistory.RemoveAll(h => h.Timestamp < cutoffTime);
                     }
                 }
                 
@@ -1806,10 +1907,26 @@ namespace XPlain.Services
                             ["avg_compression_time_ms"] = Math.Round(stats.AverageCompressionTimeMs, 2),
                             ["avg_decompression_time_ms"] = Math.Round(stats.AverageDecompressionTimeMs, 2),
                             ["compression_ratio"] = Math.Round(stats.CompressionRatio, 4),
-                            ["savings_percent"] = Math.Round(stats.CompressionSavingPercent, 2)
+                            ["savings_percent"] = Math.Round(stats.CompressionSavingPercent, 2),
+                            ["efficiency_score"] = Math.Round(stats.EfficiencyScore, 4),
+                            ["content_type"] = contentType.ToString()
                         }
                     });
                 }
+            }
+        }
+        
+        // Helper method to determine if we should add a new history entry
+        private bool ShouldAddCompressionHistoryEntry()
+        {
+            lock (_compressionHistory)
+            {
+                // Add an entry if this is the first one or if enough time has passed since the last one
+                if (_compressionHistory.Count == 0)
+                    return true;
+                    
+                var lastEntry = _compressionHistory.Last();
+                return (DateTime.UtcNow - lastEntry.Timestamp).TotalMinutes >= 15; // Every 15 minutes
             }
         }
         

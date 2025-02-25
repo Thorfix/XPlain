@@ -60,5 +60,23 @@ namespace XPlain.Services
             OriginalSizeBytes > CompressedSizeBytes 
                 ? OriginalSizeBytes - CompressedSizeBytes 
                 : 0;
+                
+        /// <summary>
+        /// Average bytes saved per item
+        /// </summary>
+        public long AverageBytesPerItemSaved => 
+            CompressedItems > 0 
+                ? BytesSaved / CompressedItems 
+                : 0;
+                
+        /// <summary>
+        /// Efficiency score calculation (higher is better)
+        /// Balances compression ratio, time cost, and item success rate
+        /// </summary>
+        public double EfficiencyScore =>
+            TotalItems > 0 && AverageCompressionTimeMs > 0
+                ? (1.0 - CompressionRatio) * (CompressedItems / (double)TotalItems) * 
+                  (100.0 / Math.Max(1.0, AverageCompressionTimeMs))
+                : 0;
     }
 }
