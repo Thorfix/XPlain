@@ -37,6 +37,9 @@ namespace XPlain.Services
         public double HitRatio => (Hits + Misses) == 0 ? 0 : (double)Hits / (Hits + Misses);
         public long CachedItemCount { get; set; }
         public long StorageUsageBytes { get; set; }
+        public long CompressedStorageUsageBytes { get; set; }
+        public double CompressionRatio => StorageUsageBytes == 0 ? 1.0 : (double)CompressedStorageUsageBytes / StorageUsageBytes;
+        public long CompressionSavingsBytes => StorageUsageBytes - CompressedStorageUsageBytes;
         public Dictionary<string, long> QueryTypeStats { get; set; } = new();
         public Dictionary<string, double> AverageResponseTimes { get; set; } = new();
         public Dictionary<string, CachePerformanceMetrics> PerformanceByQueryType { get; set; } = new();
@@ -44,6 +47,27 @@ namespace XPlain.Services
         public long InvalidationCount { get; set; }
         public Dictionary<string, int> TopQueries { get; set; } = new();
         public DateTime LastStatsUpdate { get; set; } = DateTime.UtcNow;
+        public Dictionary<string, CompressionMetrics> CompressionStats { get; set; } = new();
+        public EncryptionStatus EncryptionStatus { get; set; } = new();
+    }
+    
+    public class CompressionMetrics
+    {
+        public long TotalItems { get; set; }
+        public long CompressedItems { get; set; }
+        public long OriginalSizeBytes { get; set; }
+        public long CompressedSizeBytes { get; set; }
+        public double AverageCompressionRatio => OriginalSizeBytes == 0 ? 1.0 : (double)CompressedSizeBytes / OriginalSizeBytes;
+        public double CompressionSavingPercent => OriginalSizeBytes == 0 ? 0 : ((OriginalSizeBytes - CompressedSizeBytes) * 100.0) / OriginalSizeBytes;
+        public double AverageCompressionTimeMs { get; set; }
+        public double AverageDecompressionTimeMs { get; set; }
+    }
+    
+    public class EncryptionStatus
+    {
+        public bool Enabled { get; set; }
+        public string Algorithm { get; set; }
+        public long EncryptedFileCount { get; set; }
     }
 
     public class CachePerformanceMetrics

@@ -1,4 +1,6 @@
 using System;
+using System.IO;
+using System.IO.Compression;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Collections.Generic;
@@ -28,6 +30,17 @@ namespace XPlain.Services
         private readonly object _resourceLock = new object();
         private readonly Dictionary<string, CacheEntry> _cache;
         private readonly Dictionary<string, CacheAccessStats> _accessStats;
+        
+        // Compression-related fields
+        private readonly bool _compressionEnabled;
+        private readonly CompressionAlgorithm _compressionAlgorithm;
+        private readonly CompressionLevel _compressionLevel;
+        private readonly int _minSizeForCompression;
+        private readonly bool _adaptiveCompression;
+        private readonly Dictionary<string, CompressionMetrics> _compressionStats;
+        
+        // Settings from configuration
+        private readonly CacheSettings _cacheSettings;
 
         // IEncryptionProvider is not necessary for basic functionality
         public List<MaintenanceLogEntry> MaintenanceLogs { get; }
@@ -38,6 +51,8 @@ namespace XPlain.Services
             MLPredictionService mlPredictionService = null,
             IEncryptionProvider encryptionProvider = null)
         {
+            _cacheSettings = cacheSettings?.Value ?? new CacheSettings();
+            
             _evictionPolicy = new DummyEvictionPolicy();
             _mlPredictionService = mlPredictionService;
             _metricsService = metricsService;
@@ -46,6 +61,7 @@ namespace XPlain.Services
             MaintenanceLogs = new List<MaintenanceLogEntry>();
             _cache = new Dictionary<string, CacheEntry>();
             _accessStats = new Dictionary<string, CacheAccessStats>();
+            _compressionStats = new Dictionary<string, CompressionMetrics>();
             _resourceLimits = new Dictionary<string, double>
             {
                 ["memory"] = 100,  // Default 100% of base allocation
@@ -53,11 +69,36 @@ namespace XPlain.Services
                 ["storage"] = 100  // Default 100% of base allocation
             };
             
+            // Initialize compression settings
+            _compressionEnabled = _cacheSettings.CompressionEnabled;
+            _compressionAlgorithm = _cacheSettings.CompressionAlgorithm;
+            _compressionLevel = _cacheSettings.CompressionLevel;
+            _minSizeForCompression = _cacheSettings.MinSizeForCompressionBytes;
+            _adaptiveCompression = _cacheSettings.AdaptiveCompression;
+            
+            // Initialize compression metrics
+            _compressionStats["GZip"] = new CompressionMetrics();
+            _compressionStats["Brotli"] = new CompressionMetrics();
+            _compressionStats["None"] = new CompressionMetrics();
+            
             // Register this instance with the metrics service if provided
             if (_metricsService != null)
             {
                 _ = AddEventListener(_metricsService);
             }
+            
+            MaintenanceLogs.Add(new MaintenanceLogEntry
+            {
+                Operation = "Initialization",
+                Status = "Success",
+                Metadata = new Dictionary<string, object>
+                {
+                    ["compression_enabled"] = _compressionEnabled,
+                    ["compression_algorithm"] = _compressionAlgorithm.ToString(),
+                    ["compression_level"] = _compressionLevel.ToString(),
+                    ["adaptive_compression"] = _adaptiveCompression
+                }
+            });
         }
 
         // Simple dummy eviction policy implementation for basic functionality
@@ -226,6 +267,32 @@ namespace XPlain.Services
         {
             if (_cache.TryGetValue(key, out var entry) && !entry.IsExpired)
             {
+                // If the entry is compressed, decompress it first
+                if (entry.IsCompressed)
+                {
+                    try
+                    {
+                        var compressedBytes = System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(entry.Value);
+                        var decompressedBytes = DecompressData(compressedBytes, entry.CompressionAlgorithm);
+                        var decompressedValue = System.Text.Json.JsonSerializer.Deserialize<T>(decompressedBytes);
+                        return decompressedValue;
+                    }
+                    catch (Exception ex)
+                    {
+                        MaintenanceLogs.Add(new MaintenanceLogEntry
+                        {
+                            Operation = "GetAsync_Decompression",
+                            Status = "Error",
+                            Metadata = new Dictionary<string, object>
+                            {
+                                ["error"] = ex.Message,
+                                ["key"] = key
+                            }
+                        });
+                        return default;
+                    }
+                }
+                
                 return (T)entry.Value;
             }
             return default;
@@ -233,13 +300,79 @@ namespace XPlain.Services
 
         public async Task SetAsync<T>(string key, T value, TimeSpan? expiration = null)
         {
-            var expiryTime = DateTime.UtcNow.Add(expiration ?? TimeSpan.FromHours(24));
-            _cache[key] = new CacheEntry
+            try
             {
-                Value = value,
-                ExpirationTime = expiryTime,
-                Size = System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(value).Length
-            };
+                var expiryTime = DateTime.UtcNow.Add(expiration ?? TimeSpan.FromHours(24));
+                var serializedValue = System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(value);
+                var originalSize = serializedValue.Length;
+                
+                // Determine if this entry should be compressed
+                var shouldCompress = _compressionEnabled && serializedValue.Length >= _minSizeForCompression;
+                
+                // Determine optimal compression algorithm and level for this data
+                var compressionAlgorithm = shouldCompress 
+                    ? DetermineOptimalCompressionAlgorithm(serializedValue.Length, typeof(T).Name) 
+                    : CompressionAlgorithm.None;
+                
+                var compressionLevel = DetermineOptimalCompressionLevel(serializedValue.Length, typeof(T).Name);
+                
+                // Apply compression if needed
+                byte[] compressedValue = null;
+                long compressedSize = 0;
+                
+                if (shouldCompress && compressionAlgorithm != CompressionAlgorithm.None)
+                {
+                    compressedValue = CompressData(serializedValue, compressionAlgorithm, compressionLevel);
+                    compressedSize = compressedValue.Length;
+                    
+                    // Only use compression if it actually reduces size
+                    shouldCompress = compressedSize < originalSize;
+                }
+                
+                // Create the cache entry
+                _cache[key] = new CacheEntry
+                {
+                    Value = shouldCompress ? System.Text.Json.JsonSerializer.Deserialize<object>(compressedValue) : value,
+                    ExpirationTime = expiryTime,
+                    Size = originalSize,
+                    CompressedSize = shouldCompress ? compressedSize : originalSize,
+                    IsCompressed = shouldCompress,
+                    CompressionAlgorithm = compressionAlgorithm
+                };
+                
+                // Log compression metrics
+                if (shouldCompress)
+                {
+                    MaintenanceLogs.Add(new MaintenanceLogEntry
+                    {
+                        Operation = "Compression",
+                        Status = "Success",
+                        Metadata = new Dictionary<string, object>
+                        {
+                            ["key"] = key,
+                            ["original_size"] = originalSize,
+                            ["compressed_size"] = compressedSize,
+                            ["compression_ratio"] = (double)compressedSize / originalSize,
+                            ["algorithm"] = compressionAlgorithm.ToString(),
+                            ["level"] = compressionLevel.ToString()
+                        }
+                    });
+                }
+            }
+            catch (Exception ex)
+            {
+                MaintenanceLogs.Add(new MaintenanceLogEntry
+                {
+                    Operation = "SetAsync",
+                    Status = "Error",
+                    Metadata = new Dictionary<string, object>
+                    {
+                        ["error"] = ex.Message,
+                        ["key"] = key
+                    }
+                });
+                throw;
+            }
         }
 
         public async Task RemoveAsync(string key)
@@ -322,13 +455,18 @@ namespace XPlain.Services
 
         public CacheStats GetCacheStats()
         {
-            // Return basic cache stats
+            // Calculate compressed storage usage
+            var compressedStorageBytes = _cache.Sum(c => c.Value.IsCompressed ? c.Value.CompressedSize : c.Value.Size);
+            var originalStorageBytes = _cache.Sum(c => c.Value.Size);
+            
+            // Return enhanced cache stats with compression information
             return new CacheStats
             {
                 Hits = 0,
                 Misses = 0,
                 CachedItemCount = _cache.Count,
-                StorageUsageBytes = _cache.Sum(c => c.Value.Size),
+                StorageUsageBytes = originalStorageBytes,
+                CompressedStorageUsageBytes = compressedStorageBytes,
                 QueryTypeStats = new Dictionary<string, long>(),
                 AverageResponseTimes = new Dictionary<string, double>(),
                 PerformanceByQueryType = new Dictionary<string, CachePerformanceMetrics>(),
@@ -337,7 +475,14 @@ namespace XPlain.Services
                 TopQueries = _accessStats.OrderByDescending(a => a.Value.AccessCount)
                     .Take(5)
                     .ToDictionary(a => a.Key, a => (int)a.Value.AccessCount),
-                LastStatsUpdate = DateTime.UtcNow
+                LastStatsUpdate = DateTime.UtcNow,
+                CompressionStats = _compressionStats,
+                EncryptionStatus = new EncryptionStatus
+                {
+                    Enabled = _cacheSettings.EncryptionEnabled,
+                    Algorithm = "AES",
+                    EncryptedFileCount = _cache.Count(c => _cacheSettings.EncryptionEnabled)
+                }
             };
         }
 
@@ -647,8 +792,59 @@ namespace XPlain.Services
 
         private long GetCurrentStorageUsage()
         {
-            // Calculate total size of cache entries
-            return _cache.Sum(entry => entry.Value.Size);
+            // Calculate total size of cache entries, using compressed size when available
+            return _cache.Sum(entry => entry.Value.IsCompressed ? entry.Value.CompressedSize : entry.Value.Size);
+        }
+        
+        // Methods to handle cache format version compatibility
+        private bool IsLegacyCacheEntry(CacheEntry entry)
+        {
+            return entry.CacheFormatVersion < 2;
+        }
+        
+        private async Task MigrateLegacyCacheEntries()
+        {
+            int migratedCount = 0;
+            
+            foreach (var key in _cache.Keys.ToList())
+            {
+                var entry = _cache[key];
+                if (IsLegacyCacheEntry(entry))
+                {
+                    try
+                    {
+                        // Re-serialize the entry to apply compression
+                        await SetAsync(key, entry.Value, entry.ExpirationTime - DateTime.UtcNow);
+                        migratedCount++;
+                    }
+                    catch (Exception ex)
+                    {
+                        MaintenanceLogs.Add(new MaintenanceLogEntry
+                        {
+                            Operation = "LegacyCacheMigration",
+                            Status = "Error",
+                            Metadata = new Dictionary<string, object>
+                            {
+                                ["error"] = ex.Message,
+                                ["key"] = key
+                            }
+                        });
+                    }
+                }
+            }
+            
+            if (migratedCount > 0)
+            {
+                MaintenanceLogs.Add(new MaintenanceLogEntry
+                {
+                    Operation = "LegacyCacheMigration",
+                    Status = "Success",
+                    Metadata = new Dictionary<string, object>
+                    {
+                        ["migrated_entries"] = migratedCount
+                    }
+                });
+            }
         }
 
         public Dictionary<string, int> GetEvictionStats()
@@ -843,13 +1039,237 @@ namespace XPlain.Services
             var used = GC.GetTotalMemory(false);
             return total - used;
         }
+        
+        // Compression-related methods
+        private byte[] CompressData(byte[] data, CompressionAlgorithm algorithm, CompressionLevel level)
+        {
+            if (data == null || data.Length == 0)
+                return data;
+                
+            var stopwatch = System.Diagnostics.Stopwatch.StartNew();
+            
+            try
+            {
+                using var outputStream = new MemoryStream();
+                
+                switch (algorithm)
+                {
+                    case CompressionAlgorithm.GZip:
+                        using (var gzipStream = new GZipStream(outputStream, level))
+                        {
+                            gzipStream.Write(data, 0, data.Length);
+                        }
+                        break;
+                        
+                    case CompressionAlgorithm.Brotli:
+                        using (var brotliStream = new BrotliStream(outputStream, level))
+                        {
+                            brotliStream.Write(data, 0, data.Length);
+                        }
+                        break;
+                        
+                    case CompressionAlgorithm.None:
+                    default:
+                        return data;
+                }
+                
+                var result = outputStream.ToArray();
+                
+                // Update compression stats
+                stopwatch.Stop();
+                UpdateCompressionStats(algorithm.ToString(), data.Length, result.Length, stopwatch.ElapsedMilliseconds, 0);
+                
+                return result;
+            }
+            catch (Exception ex)
+            {
+                // Log error and return original data if compression fails
+                MaintenanceLogs.Add(new MaintenanceLogEntry
+                {
+                    Operation = "Compression",
+                    Status = "Error",
+                    Metadata = new Dictionary<string, object>
+                    {
+                        ["error"] = ex.Message,
+                        ["algorithm"] = algorithm.ToString(),
+                        ["data_size"] = data.Length
+                    }
+                });
+                return data;
+            }
+        }
+        
+        private byte[] DecompressData(byte[] data, CompressionAlgorithm algorithm)
+        {
+            if (data == null || data.Length == 0)
+                return data;
+                
+            var stopwatch = System.Diagnostics.Stopwatch.StartNew();
+            
+            try
+            {
+                using var inputStream = new MemoryStream(data);
+                using var outputStream = new MemoryStream();
+                
+                switch (algorithm)
+                {
+                    case CompressionAlgorithm.GZip:
+                        using (var gzipStream = new GZipStream(inputStream, CompressionMode.Decompress))
+                        {
+                            gzipStream.CopyTo(outputStream);
+                        }
+                        break;
+                        
+                    case CompressionAlgorithm.Brotli:
+                        using (var brotliStream = new BrotliStream(inputStream, CompressionMode.Decompress))
+                        {
+                            brotliStream.CopyTo(outputStream);
+                        }
+                        break;
+                        
+                    case CompressionAlgorithm.None:
+                    default:
+                        return data;
+                }
+                
+                var result = outputStream.ToArray();
+                
+                // Update decompression stats
+                stopwatch.Stop();
+                UpdateCompressionStats(algorithm.ToString(), result.Length, data.Length, 0, stopwatch.ElapsedMilliseconds);
+                
+                return result;
+            }
+            catch (Exception ex)
+            {
+                // Log error and return original data if decompression fails
+                MaintenanceLogs.Add(new MaintenanceLogEntry
+                {
+                    Operation = "Decompression",
+                    Status = "Error",
+                    Metadata = new Dictionary<string, object>
+                    {
+                        ["error"] = ex.Message,
+                        ["algorithm"] = algorithm.ToString(),
+                        ["data_size"] = data.Length
+                    }
+                });
+                return data;
+            }
+        }
+        
+        private void UpdateCompressionStats(string algorithm, long originalSize, long compressedSize, 
+                                           double compressionTimeMs, double decompressionTimeMs)
+        {
+            if (!_compressionStats.ContainsKey(algorithm))
+            {
+                _compressionStats[algorithm] = new CompressionMetrics();
+            }
+            
+            var stats = _compressionStats[algorithm];
+            
+            if (compressionTimeMs > 0)
+            {
+                // Compression stats update
+                stats.TotalItems++;
+                if (compressedSize < originalSize)
+                {
+                    stats.CompressedItems++;
+                }
+                stats.OriginalSizeBytes += originalSize;
+                stats.CompressedSizeBytes += compressedSize;
+                
+                // Update average compression time (weighted moving average)
+                if (stats.TotalItems > 1)
+                {
+                    stats.AverageCompressionTimeMs = (stats.AverageCompressionTimeMs * (stats.TotalItems - 1) + compressionTimeMs) / stats.TotalItems;
+                }
+                else
+                {
+                    stats.AverageCompressionTimeMs = compressionTimeMs;
+                }
+            }
+            
+            if (decompressionTimeMs > 0)
+            {
+                // Update average decompression time (weighted moving average)
+                if (stats.TotalItems > 1)
+                {
+                    stats.AverageDecompressionTimeMs = (stats.AverageDecompressionTimeMs * (stats.TotalItems - 1) + decompressionTimeMs) / stats.TotalItems;
+                }
+                else
+                {
+                    stats.AverageDecompressionTimeMs = decompressionTimeMs;
+                }
+            }
+        }
+        
+        private CompressionAlgorithm DetermineOptimalCompressionAlgorithm(int dataSize, string dataType)
+        {
+            if (!_adaptiveCompression)
+            {
+                return _compressionAlgorithm;
+            }
+            
+            // For very small data, don't compress
+            if (dataSize < _minSizeForCompression)
+            {
+                return CompressionAlgorithm.None;
+            }
+            
+            // Use content-based heuristics for optimal algorithm selection
+            if (dataType?.Contains("json") == true || dataType?.Contains("text") == true)
+            {
+                // Text-based data compresses well with either algorithm
+                // Choose based on data size
+                return dataSize > 100 * 1024 ? CompressionAlgorithm.Brotli : CompressionAlgorithm.GZip;
+            }
+            
+            if (dataType?.Contains("image") == true || dataType?.Contains("video") == true)
+            {
+                // Binary formats like images often compress poorly, skip compression
+                return CompressionAlgorithm.None;
+            }
+            
+            // Default to GZip for balanced performance/compression ratio
+            return CompressionAlgorithm.GZip;
+        }
+        
+        private CompressionLevel DetermineOptimalCompressionLevel(int dataSize, string dataType)
+        {
+            if (!_adaptiveCompression)
+            {
+                return _compressionLevel;
+            }
+            
+            // For very large data, use faster compression
+            if (dataSize > 10 * 1024 * 1024) // 10MB
+            {
+                return CompressionLevel.Fastest;
+            }
+            
+            // For medium data, use balanced approach
+            if (dataSize > 1 * 1024 * 1024) // 1MB
+            {
+                return CompressionLevel.Optimal;
+            }
+            
+            // For smaller data, use maximum compression
+            return CompressionLevel.SmallestSize;
+        }
 
         private class CacheEntry
         {
             public object Value { get; set; }
             public DateTime ExpirationTime { get; set; }
             public long Size { get; set; }
+            public long CompressedSize { get; set; }
+            public bool IsCompressed { get; set; }
+            public CompressionAlgorithm CompressionAlgorithm { get; set; }
+            public int CacheFormatVersion { get; set; } = 2; // Version 2 adds compression support
             public bool IsExpired => DateTime.UtcNow > ExpirationTime;
+            
+            public double CompressionRatio => IsCompressed && Size > 0 ? (double)CompressedSize / Size : 1.0;
         }
     }
 }

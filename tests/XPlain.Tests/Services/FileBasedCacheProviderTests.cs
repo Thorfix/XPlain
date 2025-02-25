@@ -1486,6 +1486,313 @@ namespace XPlain.Tests.Services
         }
 
         [Fact]
+        public async Task CompressionEnabled_ReducesStorageSize()
+        {
+            // Arrange
+            var key = "compression_test_key";
+            var largeValue = new string('x', 100 * 1024); // 100KB of repeating data (highly compressible)
+            
+            var compressionSettings = new CacheSettings
+            {
+                CacheEnabled = true,
+                CacheDirectory = _testDirectory,
+                CompressionEnabled = true,
+                CompressionAlgorithm = CompressionAlgorithm.GZip,
+                CompressionLevel = CompressionLevel.Optimal,
+                MinSizeForCompressionBytes = 1024 // 1KB threshold
+            };
+            
+            var provider = new FileBasedCacheProvider(
+                Options.Create(compressionSettings),
+                metricsService: null,
+                mlPredictionService: null);
+
+            // Act
+            await provider.SetAsync(key, largeValue);
+            var stats = provider.GetCacheStats();
+            
+            // Get the compressed value
+            var retrievedValue = await provider.GetAsync<string>(key);
+
+            // Assert
+            Assert.Equal(largeValue, retrievedValue); // Data integrity maintained
+            Assert.Equal(largeValue.Length, stats.StorageUsageBytes); // Original size is tracked
+            Assert.True(stats.CompressedStorageUsageBytes < stats.StorageUsageBytes); // Compression reduced size
+            
+            // Compression should achieve significant size reduction for repeating data
+            var compressionRatio = (double)stats.CompressedStorageUsageBytes / stats.StorageUsageBytes;
+            Assert.True(compressionRatio < 0.1, $"Compression ratio ({compressionRatio}) should be less than 0.1 for highly compressible data");
+            
+            // Verify compression stats are collected
+            Assert.True(stats.CompressionStats.ContainsKey("GZip"));
+            Assert.True(stats.CompressionStats["GZip"].CompressedItems > 0);
+            Assert.True(stats.CompressionStats["GZip"].CompressionSavingPercent > 50); // Should save at least 50%
+        }
+        
+        [Fact]
+        public async Task CompressionDisabled_SkipsCompression()
+        {
+            // Arrange
+            var key = "no_compression_test_key";
+            var value = new string('x', 100 * 1024); // 100KB of data
+            
+            var noCompressionSettings = new CacheSettings
+            {
+                CacheEnabled = true,
+                CacheDirectory = _testDirectory,
+                CompressionEnabled = false
+            };
+            
+            var provider = new FileBasedCacheProvider(
+                Options.Create(noCompressionSettings),
+                metricsService: null,
+                mlPredictionService: null);
+
+            // Act
+            await provider.SetAsync(key, value);
+            var stats = provider.GetCacheStats();
+            
+            // Assert
+            Assert.Equal(stats.StorageUsageBytes, stats.CompressedStorageUsageBytes); // No compression
+            Assert.Equal(1.0, stats.CompressionRatio); // Ratio should be 1.0 when disabled
+        }
+        
+        [Theory]
+        [InlineData(CompressionAlgorithm.GZip, 100 * 1024)]
+        [InlineData(CompressionAlgorithm.Brotli, 100 * 1024)]
+        [InlineData(CompressionAlgorithm.GZip, 1024)]
+        [InlineData(CompressionAlgorithm.Brotli, 1024)]
+        public async Task DifferentCompressionAlgorithms_WorkCorrectly(CompressionAlgorithm algorithm, int dataSize)
+        {
+            // Arrange
+            var key = $"algorithm_test_{algorithm}_{dataSize}";
+            var value = new string('x', dataSize); // Repeating data
+            
+            var settings = new CacheSettings
+            {
+                CacheEnabled = true,
+                CacheDirectory = _testDirectory,
+                CompressionEnabled = true,
+                CompressionAlgorithm = algorithm,
+                MinSizeForCompressionBytes = 1024 // 1KB threshold
+            };
+            
+            var provider = new FileBasedCacheProvider(
+                Options.Create(settings),
+                metricsService: null,
+                mlPredictionService: null);
+
+            // Act
+            await provider.SetAsync(key, value);
+            var stats = provider.GetCacheStats();
+            var retrievedValue = await provider.GetAsync<string>(key);
+
+            // Assert
+            Assert.Equal(value, retrievedValue); // Data integrity maintained
+            
+            if (dataSize >= settings.MinSizeForCompressionBytes)
+            {
+                // Should be compressed
+                Assert.True(stats.CompressionRatio < 1.0, $"Compression ratio should be < 1.0, got {stats.CompressionRatio}");
+                Assert.True(stats.CompressionStats[algorithm.ToString()].CompressedItems > 0);
+            }
+            else
+            {
+                // Too small for compression
+                Assert.Equal(1.0, stats.CompressionRatio);
+            }
+        }
+        
+        [Fact]
+        public async Task AdaptiveCompression_SelectsOptimalSettings()
+        {
+            // Arrange
+            var compressibleData = new string('x', 100 * 1024); // Highly compressible
+            var jsonData = System.Text.Json.JsonSerializer.Serialize(Enumerable.Range(0, 1000)
+                .Select(i => new { Id = i, Name = $"Item {i}", Value = i * 3.14 })
+                .ToArray());
+            
+            var settings = new CacheSettings
+            {
+                CacheEnabled = true,
+                CacheDirectory = _testDirectory,
+                CompressionEnabled = true,
+                AdaptiveCompression = true,
+                MinSizeForCompressionBytes = 1024
+            };
+            
+            var provider = new FileBasedCacheProvider(
+                Options.Create(settings),
+                metricsService: null,
+                mlPredictionService: null);
+
+            // Act
+            await provider.SetAsync("compressible_key", compressibleData);
+            await provider.SetAsync("json_key", jsonData);
+            
+            var stats = provider.GetCacheStats();
+            
+            // Assert
+            // Both should be compressed
+            Assert.True(stats.CompressionRatio < 1.0);
+            
+            // Verify compression was effective for both types
+            Assert.True(stats.CompressionSavingsBytes > 0);
+            
+            // Retrieve and verify data integrity
+            var retrievedCompressible = await provider.GetAsync<string>("compressible_key");
+            var retrievedJson = await provider.GetAsync<string>("json_key");
+            
+            Assert.Equal(compressibleData, retrievedCompressible);
+            Assert.Equal(jsonData, retrievedJson);
+        }
+        
+        [Fact]
+        public async Task CacheVersions_MaintainBackwardCompatibility()
+        {
+            // This test verifies that non-compressed entries (old format) can still be read
+            
+            // Arrange - Create an entry with compression disabled
+            var key = "legacy_cache_key";
+            var value = "legacy_cache_value";
+            
+            var noCompressionSettings = new CacheSettings
+            {
+                CacheEnabled = true,
+                CacheDirectory = _testDirectory,
+                CompressionEnabled = false
+            };
+            
+            var legacyProvider = new FileBasedCacheProvider(
+                Options.Create(noCompressionSettings),
+                metricsService: null,
+                mlPredictionService: null);
+            
+            // Create cache entry without compression
+            await legacyProvider.SetAsync(key, value);
+            
+            // Act - Create a new provider with compression enabled
+            var compressionSettings = new CacheSettings
+            {
+                CacheEnabled = true,
+                CacheDirectory = _testDirectory,
+                CompressionEnabled = true,
+                CompressionAlgorithm = CompressionAlgorithm.GZip
+            };
+            
+            var modernProvider = new FileBasedCacheProvider(
+                Options.Create(compressionSettings),
+                metricsService: null,
+                mlPredictionService: null);
+            
+            // Try to read the entry created without compression
+            var retrievedValue = await modernProvider.GetAsync<string>(key);
+            
+            // Assert
+            Assert.Equal(value, retrievedValue); // Should be able to read the legacy entry
+            
+            // Now rewrite the same key
+            await modernProvider.SetAsync(key, value);
+            
+            // The rewritten entry should now be compressed
+            var stats = modernProvider.GetCacheStats();
+            Assert.True(stats.CompressionRatio < 1.0);
+        }
+        
+        [Fact]
+        public async Task Compression_PerformanceImpact()
+        {
+            // Arrange
+            var largeValue = new string('x', 1024 * 1024); // 1MB of repeating data
+            var keys = Enumerable.Range(0, 10).Select(i => $"perf_key_{i}").ToArray();
+            
+            var compressionSettings = new CacheSettings
+            {
+                CacheEnabled = true,
+                CacheDirectory = _testDirectory,
+                CompressionEnabled = true,
+                CompressionAlgorithm = CompressionAlgorithm.GZip,
+                CompressionLevel = CompressionLevel.Fastest // Use fastest for this test
+            };
+            
+            var noCompressionSettings = new CacheSettings
+            {
+                CacheEnabled = true,
+                CacheDirectory = Path.Combine(_testDirectory, "no_compression"),
+                CompressionEnabled = false
+            };
+            
+            Directory.CreateDirectory(Path.Combine(_testDirectory, "no_compression"));
+            
+            var compressedProvider = new FileBasedCacheProvider(
+                Options.Create(compressionSettings),
+                metricsService: null,
+                mlPredictionService: null);
+                
+            var uncompressedProvider = new FileBasedCacheProvider(
+                Options.Create(noCompressionSettings),
+                metricsService: null,
+                mlPredictionService: null);
+            
+            // Act - Measure write performance
+            var compressedWrite = Stopwatch.StartNew();
+            foreach (var key in keys)
+            {
+                await compressedProvider.SetAsync(key, largeValue);
+            }
+            compressedWrite.Stop();
+            
+            var uncompressedWrite = Stopwatch.StartNew();
+            foreach (var key in keys)
+            {
+                await uncompressedProvider.SetAsync(key, largeValue);
+            }
+            uncompressedWrite.Stop();
+            
+            // Measure read performance
+            var compressedRead = Stopwatch.StartNew();
+            foreach (var key in keys)
+            {
+                await compressedProvider.GetAsync<string>(key);
+            }
+            compressedRead.Stop();
+            
+            var uncompressedRead = Stopwatch.StartNew();
+            foreach (var key in keys)
+            {
+                await uncompressedProvider.GetAsync<string>(key);
+            }
+            uncompressedRead.Stop();
+            
+            // Get stats to compare storage savings
+            var compressedStats = compressedProvider.GetCacheStats();
+            var uncompressedStats = uncompressedProvider.GetCacheStats();
+            
+            // Assert
+            // Write operations with compression should take longer, but not excessively
+            Assert.True(compressedWrite.ElapsedMilliseconds >= uncompressedWrite.ElapsedMilliseconds);
+            // But the ratio shouldn't be extreme - compression shouldn't take more than 3x the time
+            Assert.True(compressedWrite.ElapsedMilliseconds < uncompressedWrite.ElapsedMilliseconds * 3);
+            
+            // Read operations might be slightly slower with compression due to decompression overhead
+            Assert.True(compressedRead.ElapsedMilliseconds >= uncompressedRead.ElapsedMilliseconds * 0.8);
+            
+            // Storage should be significantly reduced
+            Assert.True(compressedStats.CompressedStorageUsageBytes < uncompressedStats.CompressedStorageUsageBytes);
+            // For repeating data, we should get over 90% reduction
+            Assert.True(compressedStats.CompressedStorageUsageBytes < uncompressedStats.CompressedStorageUsageBytes * 0.1);
+            
+            // Log performance metrics
+            Console.WriteLine($"Compressed write: {compressedWrite.ElapsedMilliseconds}ms");
+            Console.WriteLine($"Uncompressed write: {uncompressedWrite.ElapsedMilliseconds}ms");
+            Console.WriteLine($"Compressed read: {compressedRead.ElapsedMilliseconds}ms");
+            Console.WriteLine($"Uncompressed read: {uncompressedRead.ElapsedMilliseconds}ms");
+            Console.WriteLine($"Storage with compression: {compressedStats.CompressedStorageUsageBytes} bytes");
+            Console.WriteLine($"Storage without compression: {uncompressedStats.CompressedStorageUsageBytes} bytes");
+            Console.WriteLine($"Compression ratio: {compressedStats.CompressionRatio}");
+        }
+
+        [Fact]
         public async Task ConcurrentDictionary_SpecificOperations()
         {
             // Arrange
