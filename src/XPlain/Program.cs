@@ -1109,7 +1109,6 @@ file class Program
             var streamingSettings = new StreamingSettings();
             configuration.GetSection("Streaming").Bind(streamingSettings);
             services.AddSingleton(Options.Create(streamingSettings));
-            services.AddSingleton(streamingSettings);
             
             // Register LLMProviderMetrics to track performance
             services.AddSingleton<LLMProviderMetrics>();

@@ -3,6 +3,8 @@ using System.Threading;
 using System.Threading.Tasks;
 using System.Collections.Generic;
 using System.Linq;
+using Microsoft.Extensions.Options;
+using XPlain.Configuration;
 
 namespace XPlain.Services
 {
@@ -21,6 +23,7 @@ namespace XPlain.Services
         public List<MaintenanceLogEntry> MaintenanceLogs { get; }
 
         public FileBasedCacheProvider(
+            IOptions<CacheSettings> cacheSettings = null,
             MetricsCollectionService metricsService = null,
             MLPredictionService mlPredictionService = null)
         {
