@@ -1550,6 +1550,19 @@ namespace XPlain.Tests.Services
             var memoryDelta = memoryAfterAccess - memoryBeforeAccess;
             Assert.True(memoryDelta < largeValue.Length, 
                 $"Memory delta ({memoryDelta}) should be less than uncompressed size ({largeValue.Length})");
+            
+            // Test additional compression validation
+            Console.WriteLine($"Compression Test Results:");
+            Console.WriteLine($"Original size: {largeValue.Length} bytes");
+            Console.WriteLine($"Compressed size: {stats.CompressedStorageUsageBytes} bytes");
+            Console.WriteLine($"Compression ratio: {compressionRatio:F3}");
+            Console.WriteLine($"Space saved: {stats.CompressionSavingsBytes} bytes ({stats.CompressionSavingsPercent:F1}%)");
+            Console.WriteLine($"Memory impact: {memoryDelta} bytes");
+            
+            // Validate compression effectiveness statistics
+            Assert.True(stats.CompressionSavingsBytes > 0, "Compression should save disk space");
+            Assert.True(stats.CompressionSavingsPercent > 50, "Compression should save at least 50% of space");
+            Assert.True(stats.CompressionStats["GZip"].EfficiencyScore > 0, "Compression efficiency score should be positive");
         }
         
         [Fact]
@@ -2903,7 +2916,7 @@ namespace XPlain.Tests.Services
         [Fact]
         public async Task Compression_TestVeryLargeDataWithLimitedMemory()
         {
-            // Arrange
+            // Arrange - Use a very large data size to test memory-efficient compression
             var dataSize = 20 * 1024 * 1024; // 20MB
             var largeValue = new string('x', dataSize); // Highly compressible repeating data
             var key = "very_large_data_key";
@@ -2971,12 +2984,31 @@ namespace XPlain.Tests.Services
             
             // Performance should be reasonable for large data
             Assert.True(readTime < 5000, "Decompression should be reasonably fast even for large data");
+            
+            // Verify efficient memory usage patterns for large data
+            var compressionStats = stats.CompressionStats["GZip"];
+            Assert.True(compressionStats.CompressedItems > 0, "Large data should be compressed");
+            
+            // Calculate and log memory efficiency metrics
+            var memoryEfficiency = dataSize / Math.Max(1, memoryForDecompression);
+            Console.WriteLine($"Memory efficiency ratio: {memoryEfficiency:F1}x");
+            Console.WriteLine($"Memory overhead per MB: {memoryForDecompression / (dataSize / (1024 * 1024)):F0} bytes");
+            
+            // Verify performance for very large data is reasonable
+            Assert.True(writeTime < 5000, "Compression of large data should complete in reasonable time");
+            Assert.True(readTime < writeTime * 2, "Decompression should not be significantly slower than compression");
+            
+            // Storage efficiency should be excellent for this test case
+            var storageSavings = stats.CompressionSavingsBytes;
+            var savingsPercent = storageSavings * 100.0 / dataSize;
+            Console.WriteLine($"Storage savings: {storageSavings / (1024 * 1024):F2}MB ({savingsPercent:F1}%)");
+            Assert.True(savingsPercent > 90, "Storage savings should exceed 90% for highly compressible data");
         }
         
         [Fact]
         public async Task Compression_TestNonCompressibleData()
         {
-            // Arrange
+            // Arrange - Create truly non-compressible data (random bytes)
             var random = new Random(42); // Fixed seed for reproducibility
             var dataSize = 5 * 1024 * 1024; // 5MB
             var bytes = new byte[dataSize];
@@ -2984,6 +3016,18 @@ namespace XPlain.Tests.Services
             var nonCompressibleData = Convert.ToBase64String(bytes);
             var key = "non_compressible_data_key";
             
+            // Create a second dataset with pre-compressed data (already compressed data shouldn't be compressed again)
+            var compressibleData = new string('x', 1024 * 1024); // 1MB repeating data that compresses well
+            using var compressedStream = new MemoryStream();
+            using (var gzipStream = new GZipStream(compressedStream, CompressionLevel.Optimal))
+            {
+                var compressibleBytes = System.Text.Encoding.UTF8.GetBytes(compressibleData);
+                gzipStream.Write(compressibleBytes, 0, compressibleBytes.Length);
+            }
+            var preCompressedData = Convert.ToBase64String(compressedStream.ToArray());
+            var preCompressedKey = "pre_compressed_data_key";
+            
+            // Configure cache to skip compression if ratio is not beneficial
             var settings = new CacheSettings
             {
                 CacheEnabled = true,
@@ -2992,7 +3036,8 @@ namespace XPlain.Tests.Services
                 CompressionAlgorithm = CompressionAlgorithm.GZip,
                 CompressionLevel = CompressionLevel.Optimal,
                 MinSizeForCompressionBytes = 1024,
-                MinCompressionRatio = 0.9 // Only compress if it reduces size by at least 10%
+                MinCompressionRatio = 0.9, // Only compress if it reduces size by at least 10%
+                AdaptiveCompression = true
             };
             
             var provider = new FileBasedCacheProvider(
@@ -3000,20 +3045,39 @@ namespace XPlain.Tests.Services
                 metricsService: null,
                 mlPredictionService: null);
 
-            // Act
+            // Act - Test with random data
+            var sw = Stopwatch.StartNew();
             await provider.SetAsync(key, nonCompressibleData);
+            sw.Stop();
+            var randomDataWriteTime = sw.ElapsedMilliseconds;
+            
             var stats = provider.GetCacheStats();
             var retrievedValue = await provider.GetAsync<string>(key);
             
-            // Assert
-            Assert.Equal(nonCompressibleData, retrievedValue); // Data integrity maintained
+            // Also test with pre-compressed data
+            await provider.SetAsync(preCompressedKey, preCompressedData);
+            var statsAfterBoth = provider.GetCacheStats();
+            var retrievedPreCompressed = await provider.GetAsync<string>(preCompressedKey);
             
-            // For random data, we expect either:
-            // 1. Compression was skipped (ratio = 1.0) if it wasn't beneficial
-            // 2. Compression achieved minimal benefit (ratio close to MinCompressionRatio)
-            Console.WriteLine($"Non-compressible data test:");
+            // Assert
+            Assert.Equal(nonCompressibleData, retrievedValue); // Data integrity maintained for random data
+            Assert.Equal(preCompressedData, retrievedPreCompressed); // Data integrity maintained for pre-compressed data
+            
+            // Expected behaviors:
+            // 1. Compression should be skipped (ratio = 1.0) if not beneficial
+            // 2. Compression might achieve minimal benefit (ratio close to MinCompressionRatio)
+            // 3. System should detect when data is already compressed
+            Console.WriteLine($"=== Non-compressible Data Tests ===");
+            Console.WriteLine($"Random data size: {nonCompressibleData.Length} bytes");
             Console.WriteLine($"Compression ratio: {stats.CompressionRatio:F3}");
-            Console.WriteLine($"Compressed: {stats.CompressedItemCount > 0}");
+            Console.WriteLine($"Compression attempted: {stats.CompressionStats["GZip"].TotalItems > 0}");
+            Console.WriteLine($"Compression succeeded: {stats.CompressedItemCount > 0}");
+            Console.WriteLine($"Write time: {randomDataWriteTime}ms");
+            
+            Console.WriteLine($"\nPre-compressed data size: {preCompressedData.Length} bytes");
+            Console.WriteLine($"Final compression ratio: {statsAfterBoth.CompressionRatio:F3}");
+            
+            // Verify the implementation properly handles non-compressible data:
             
             // If compression was applied, the ratio should be reasonable
             if (stats.CompressedItemCount > 0)
@@ -3021,18 +3085,45 @@ namespace XPlain.Tests.Services
                 // Even random data might compress slightly due to patterns
                 Assert.True(stats.CompressionRatio <= 0.99, 
                     "If compression was used, it should provide at least some benefit");
+                Console.WriteLine("Note: Random data was compressed with minimal benefit");
             }
             else
             {
-                // If compression was skipped, ratio should be 1.0
+                // If compression was correctly skipped, ratio should be 1.0
                 Assert.Equal(1.0, stats.CompressionRatio);
+                Console.WriteLine("Compression correctly skipped for non-compressible data");
             }
+            
+            // Check if pre-compressed data was correctly detected
+            if (statsAfterBoth.CompressionStats["GZip"].TotalItems > stats.CompressionStats["GZip"].TotalItems)
+            {
+                Console.WriteLine("Pre-compressed data was processed");
+                
+                // If system properly detected pre-compressed data, it shouldn't attempt to compress it again
+                if (statsAfterBoth.CompressedItemCount == stats.CompressedItemCount)
+                {
+                    Console.WriteLine("Pre-compressed data was correctly identified and not compressed again");
+                }
+                else
+                {
+                    Console.WriteLine("Pre-compressed data was compressed again (not ideal but still valid)");
+                }
+            }
+            
+            // Most importantly, verify the system didn't waste resources
+            Assert.True(randomDataWriteTime < 5000, 
+                "Processing non-compressible data shouldn't take excessive time");
+                
+            // Overall storage should be reasonable
+            var finalStats = provider.GetCacheStats();
+            Console.WriteLine($"Total storage usage: {finalStats.StorageUsageBytes} bytes");
+            Console.WriteLine($"Compressed storage usage: {finalStats.CompressedStorageUsageBytes} bytes");
         }
         
         [Fact]
         public async Task Compression_TestContentTypeDetection()
         {
-            // Arrange
+            // Arrange - Create different content types to test auto-detection and algorithm selection
             var jsonData = System.Text.Json.JsonSerializer.Serialize(Enumerable.Range(0, 1000)
                 .Select(i => new { Id = i, Name = $"Item {i}", Value = i * 3.14 })
                 .ToArray());
@@ -3060,6 +3151,7 @@ namespace XPlain.Tests.Services
             var binaryData = new byte[100 * 1024]; // 100KB
             new Random(42).NextBytes(binaryData); // Random binary data
             
+            // Create cache provider with adaptive compression config
             var settings = new CacheSettings
             {
                 CacheEnabled = true,
@@ -3071,6 +3163,13 @@ namespace XPlain.Tests.Services
                     { ContentType.TextXml, CompressionAlgorithm.Brotli },
                     { ContentType.TextHtml, CompressionAlgorithm.Brotli },
                     { ContentType.BinaryData, CompressionAlgorithm.GZip }
+                },
+                // Add content-specific compression level settings
+                ContentTypeCompressionLevelMap = new Dictionary<ContentType, CompressionLevel> {
+                    { ContentType.TextJson, CompressionLevel.SmallestSize },
+                    { ContentType.TextXml, CompressionLevel.SmallestSize },
+                    { ContentType.TextHtml, CompressionLevel.SmallestSize },
+                    { ContentType.BinaryData, CompressionLevel.Fastest }
                 }
             };
             
@@ -3079,16 +3178,22 @@ namespace XPlain.Tests.Services
                 metricsService: null,
                 mlPredictionService: null);
 
-            // Act
+            // Act - Store different content types
             await provider.SetAsync("json_key", jsonData);
             await provider.SetAsync("xml_key", xmlData);
             await provider.SetAsync("html_key", htmlData);
             await provider.SetAsync("binary_key", binaryData);
             
+            // Get compression statistics
             var stats = provider.GetCacheStats();
             
-            // Assert
-            // Verify data integrity
+            // Collect size information for each content type
+            var jsonSize = jsonData.Length;
+            var xmlSize = xmlData.Length;
+            var htmlSize = htmlData.Length;
+            var binarySize = binaryData.Length;
+            
+            // Assert - Basic verification
             Assert.Equal(jsonData, await provider.GetAsync<string>("json_key"));
             Assert.Equal(xmlData, await provider.GetAsync<string>("xml_key"));
             Assert.Equal(htmlData, await provider.GetAsync<string>("html_key"));
@@ -3098,15 +3203,59 @@ namespace XPlain.Tests.Services
             Assert.True(stats.CompressionStats["Brotli"].CompressedItems > 0, 
                 "Brotli should be used for at least some content types");
                 
-            // Log compression outcomes
-            Console.WriteLine("Content Type Detection Test Results:");
+            // Log detailed compression outcomes by content type
+            Console.WriteLine("=== Content Type Detection Test Results ===");
             Console.WriteLine($"Brotli items: {stats.CompressionStats["Brotli"].CompressedItems}");
             Console.WriteLine($"GZip items: {stats.CompressionStats["GZip"].CompressedItems}");
             Console.WriteLine($"Overall compression ratio: {stats.CompressionRatio:F3}");
             
+            // Log individual content type results if available
+            if (stats.CompressionByContentType != null && stats.CompressionByContentType.Count > 0)
+            {
+                Console.WriteLine("\nCompression by Content Type:");
+                foreach (var kvp in stats.CompressionByContentType)
+                {
+                    Console.WriteLine($"  {kvp.Key}: ratio={kvp.Value.CompressionRatio:F3}, " +
+                                    $"items={kvp.Value.CompressedItems}, " +
+                                    $"avg_time={kvp.Value.AverageCompressionTimeMs:F1}ms");
+                }
+            }
+            
+            // Additional specific assertions for different content types
+            
+            // JSON data should use Brotli with smallest size and compress very well
+            var jsonResult = await provider.GetAsync<string>("json_key");
+            Console.WriteLine($"\nJSON: {jsonSize} bytes original");
+            Assert.Equal(jsonData, jsonResult);
+            
+            // XML data should also use Brotli and compress well
+            var xmlResult = await provider.GetAsync<string>("xml_key");
+            Console.WriteLine($"XML: {xmlSize} bytes original");
+            Assert.Equal(xmlData, xmlResult);
+            
+            // HTML data should follow the same pattern
+            var htmlResult = await provider.GetAsync<string>("html_key");
+            Console.WriteLine($"HTML: {htmlSize} bytes original");
+            Assert.Equal(htmlData, htmlResult);
+            
+            // Binary data compression will vary but should use GZip with fastest level
+            var binaryResult = await provider.GetAsync<byte[]>("binary_key");
+            Console.WriteLine($"Binary: {binarySize} bytes original");
+            Assert.Equal(binaryData, binaryResult);
+            
             // For structured text data, compression ratio should be very good
             Assert.True(stats.CompressionRatio < 0.3, 
                 "With appropriate content type detection, compression should be very effective");
+                
+            // Verify adaptive algorithm selection is working
+            if (stats.CompressionStats["Brotli"].CompressedItems > 0 && stats.CompressionStats["GZip"].CompressedItems > 0)
+            {
+                // Both algorithms should have been selected based on content type
+                Console.WriteLine("\nAdaptive algorithm selection is working correctly");
+                Console.WriteLine($"Brotli efficiency: {stats.CompressionStats["Brotli"].EfficiencyScore:F3}");
+                Console.WriteLine($"GZip efficiency: {stats.CompressionStats["GZip"].EfficiencyScore:F3}");
+                Console.WriteLine($"Most efficient algorithm: {stats.MostEfficientAlgorithm}");
+            }
         }
         
         [Fact]
