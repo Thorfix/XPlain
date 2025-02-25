@@ -3,7 +3,6 @@ using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Hosting;
-using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using XPlain.Configuration;
 
@@ -11,137 +10,143 @@ namespace XPlain.Services
 {
     public class MetricsCollectionService : BackgroundService, ICacheEventListener
     {
-        private readonly ILogger<MetricsCollectionService> _logger;
         private readonly TimeSeriesMetricsStore _metricsStore;
         private readonly MetricsSettings _settings;
-        private readonly Dictionary<string, QueryMetrics> _queryMetrics = new();
-        private readonly object _metricsLock = new();
-
+        private readonly Dictionary<string, long> _queryHits = new Dictionary<string, long>();
+        private readonly Dictionary<string, long> _queryMisses = new Dictionary<string, long>();
+        private readonly Dictionary<string, double> _responseTimesMs = new Dictionary<string, double>();
+        
         public MetricsCollectionService(
-            ILogger<MetricsCollectionService> logger,
-            TimeSeriesMetricsStore metricsStore,
-            IOptions<MetricsSettings> settings)
+            TimeSeriesMetricsStore metricsStore = null,
+            IOptions<MetricsSettings> settings = null)
         {
-            _logger = logger;
-            _metricsStore = metricsStore;
-            _settings = settings.Value;
+            _metricsStore = metricsStore ?? new TimeSeriesMetricsStore();
+            _settings = settings?.Value ?? new MetricsSettings();
         }
-
+        
+        public async Task RecordQueryMetrics(string query, double responseTimeMs, bool hit)
+        {
+            // Record query stats
+            if (hit)
+            {
+                if (_queryHits.ContainsKey(query))
+                    _queryHits[query]++;
+                else
+                    _queryHits[query] = 1;
+            }
+            else
+            {
+                if (_queryMisses.ContainsKey(query))
+                    _queryMisses[query]++;
+                else
+                    _queryMisses[query] = 1;
+            }
+            
+            // Track moving average of response times
+            if (_responseTimesMs.ContainsKey(query))
+            {
+                _responseTimesMs[query] = (_responseTimesMs[query] * 0.9) + (responseTimeMs * 0.1);
+            }
+            else
+            {
+                _responseTimesMs[query] = responseTimeMs;
+            }
+            
+            // Store as time series metrics
+            await _metricsStore.StoreMetricAsync(
+                "query.response_time",
+                responseTimeMs,
+                DateTime.UtcNow,
+                new Dictionary<string, string> { ["query"] = query, ["hit"] = hit.ToString() });
+        }
+        
         protected override async Task ExecuteAsync(CancellationToken stoppingToken)
         {
-            _logger.LogInformation("Metrics collection service started");
-
             while (!stoppingToken.IsCancellationRequested)
             {
                 try
                 {
-                    await CollectAndStoreMetrics();
+                    // Record global metrics every minute
+                    await RecordGlobalMetrics();
+                    
+                    // Wait for next collection interval
+                    await Task.Delay(TimeSpan.FromMinutes(1), stoppingToken);
+                }
+                catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+                {
+                    // Normal shutdown
+                    break;
                 }
                 catch (Exception ex)
                 {
-                    _logger.LogError(ex, "Error collecting metrics");
+                    Console.Error.WriteLine($"Error in metrics collection: {ex.Message}");
                 }
-
-                // Wait for next collection interval
-                await Task.Delay(TimeSpan.FromMinutes(_settings.CleanupIntervalMinutes), stoppingToken);
-            }
-
-            _logger.LogInformation("Metrics collection service stopped");
-        }
-
-        private async Task CollectAndStoreMetrics()
-        {
-            // Collect current metrics
-            var metrics = new Dictionary<string, object>();
-            lock (_metricsLock)
-            {
-                // Compute aggregated metrics
-                var totalQueries = 0;
-                var totalResponseTime = 0.0;
-                var cacheHits = 0;
-
-                foreach (var query in _queryMetrics.Values)
-                {
-                    totalQueries += query.Count;
-                    totalResponseTime += query.TotalResponseTime;
-                    cacheHits += query.HitCount;
-                }
-
-                // Add to metrics collection
-                metrics["query_count"] = totalQueries;
-                metrics["avg_response_time"] = totalQueries > 0 ? totalResponseTime / totalQueries : 0;
-                metrics["cache_hit_rate"] = totalQueries > 0 ? (double)cacheHits / totalQueries : 0;
-                metrics["unique_queries"] = _queryMetrics.Count;
-            }
-
-            // Store metrics
-            await _metricsStore.StoreMetricsAsync("cache_performance", metrics);
-
-            // Clean up old metrics data
-            await _metricsStore.CleanupOldMetricsAsync(TimeSpan.FromDays(_settings.DefaultRetentionDays));
-        }
-
-        public async Task RecordQueryMetrics(string key, double responseTime, bool isHit)
-        {
-            lock (_metricsLock)
-            {
-                if (!_queryMetrics.TryGetValue(key, out var metrics))
-                {
-                    metrics = new QueryMetrics();
-                    _queryMetrics[key] = metrics;
-                }
-
-                metrics.Count++;
-                metrics.TotalResponseTime += responseTime;
-                if (isHit) metrics.HitCount++;
-                metrics.LastAccessed = DateTime.UtcNow;
             }
         }
-
-        public async Task OnCacheAccess(string key, double responseTime, bool isHit)
+        
+        private async Task RecordGlobalMetrics()
         {
-            await RecordQueryMetrics(key, responseTime, isHit);
-
-            // Store individual access metrics
-            var metrics = new Dictionary<string, object>
+            // Calculate hit rate
+            long totalHits = 0;
+            long totalMisses = 0;
+            
+            foreach (var hits in _queryHits.Values)
+                totalHits += hits;
+                
+            foreach (var misses in _queryMisses.Values)
+                totalMisses += misses;
+                
+            var hitRate = totalHits + totalMisses > 0
+                ? (double)totalHits / (totalHits + totalMisses)
+                : 0;
+                
+            // Calculate average response time
+            double avgResponseTime = 0;
+            if (_responseTimesMs.Count > 0)
             {
-                ["key"] = key,
-                ["response_time"] = responseTime,
-                ["hit"] = isHit
-            };
-
-            await _metricsStore.StoreMetricsAsync("cache_access", metrics);
+                double sum = 0;
+                foreach (var time in _responseTimesMs.Values)
+                    sum += time;
+                    
+                avgResponseTime = sum / _responseTimesMs.Count;
+            }
+            
+            // Record global metrics
+            await _metricsStore.StoreMetricAsync("cache.hit_rate", hitRate, DateTime.UtcNow);
+            await _metricsStore.StoreMetricAsync("cache.avg_response_time", avgResponseTime, DateTime.UtcNow);
+            await _metricsStore.StoreMetricAsync("cache.query_count", totalHits + totalMisses, DateTime.UtcNow);
+            await _metricsStore.StoreMetricAsync("cache.memory_usage_mb", GetMemoryUsage(), DateTime.UtcNow);
         }
-
-        public async Task OnCacheEviction(string key)
+        
+        private double GetMemoryUsage()
         {
-            var metrics = new Dictionary<string, object>
-            {
-                ["key"] = key,
-                ["timestamp"] = DateTime.UtcNow
-            };
-
-            await _metricsStore.StoreMetricsAsync("cache_eviction", metrics);
+            // This is a simplified implementation that just returns the current process memory
+            var process = System.Diagnostics.Process.GetCurrentProcess();
+            return process.WorkingSet64 / (1024.0 * 1024.0);
         }
-
-        public async Task OnCachePreWarm(string key, bool success)
+        
+        // ICacheEventListener implementation
+        public Task OnCacheAccess(string key, double responseTime, bool isHit)
         {
-            var metrics = new Dictionary<string, object>
-            {
-                ["key"] = key,
-                ["success"] = success,
-                ["timestamp"] = DateTime.UtcNow
-            };
-
-            await _metricsStore.StoreMetricsAsync("cache_prewarm", metrics);
+            return RecordQueryMetrics(key, responseTime, isHit);
         }
-
-        private class QueryMetrics
+        
+        public Task OnCacheEviction(string key)
         {
-            public int Count { get; set; }
-            public double TotalResponseTime { get; set; }
-            public int HitCount { get; set; }
-            public DateTime LastAccessed { get; set; } = DateTime.UtcNow;
+            return _metricsStore.StoreMetricAsync(
+                "cache.eviction",
+                1,
+                DateTime.UtcNow,
+                new Dictionary<string, string> { ["key"] = key });
+        }
+        
+        public Task OnCachePreWarm(string key, bool success)
+        {
+            return _metricsStore.StoreMetricAsync(
+                "cache.prewarm",
+                success ? 1 : 0,
+                DateTime.UtcNow,
+                new Dictionary<string, string> { ["key"] = key });
         }
     }
 }

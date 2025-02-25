@@ -222,10 +222,9 @@ public class CacheMonitoringService : ICacheMonitoringService
             return false;
         }
 
-        public override void Dispose()
+        public void Dispose()
         {
             _mitigationTimer?.Dispose();
-            base.Dispose();
         }
 
         public async Task<Dictionary<string, double>> GetPerformancePredictionsAsync()

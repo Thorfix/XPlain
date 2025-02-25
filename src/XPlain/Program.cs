@@ -30,6 +30,8 @@ public class MonitoringThresholds
     public double MemoryUsageErrorThreshold { get; set; } = 0.95;
     public int ResponseTimeWarningThresholdMs { get; set; } = 500;
     public int ResponseTimeErrorThresholdMs { get; set; } = 1000;
+    public double MinHitRatio { get; set; } = 0.2;
+    public double MaxMemoryUsageMB { get; set; } = 1024;
     
     public void Validate()
     {
@@ -41,6 +43,12 @@ public class MonitoringThresholds
             
         if (ResponseTimeWarningThresholdMs >= ResponseTimeErrorThresholdMs)
             throw new ValidationException("Response time warning threshold must be less than error threshold");
+            
+        if (MinHitRatio < 0 || MinHitRatio > 1)
+            throw new ValidationException("Minimum hit ratio must be between 0 and 1");
+            
+        if (MaxMemoryUsageMB <= 0)
+            throw new ValidationException("Maximum memory usage must be greater than zero");
     }
 }
 
@@ -1223,6 +1231,7 @@ file class Program
             // Add common services
             services.AddHttpClient();
             services.AddSingleton<LLMProviderFactory>();
+            services.AddSingleton<IEncryptionProvider, EncryptionProvider>();
             
             // Add ASP.NET Core services
             services.AddEndpointsApiExplorer();

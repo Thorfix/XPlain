@@ -62,11 +62,4 @@ namespace XPlain.Services
             };
         }
     }
-    
-    public class CacheAccessStats
-    {
-        public long AccessCount { get; set; }
-        public long PreWarmCount { get; set; }
-        public DateTime LastAccess { get; set; } = DateTime.UtcNow;
-    }
 }

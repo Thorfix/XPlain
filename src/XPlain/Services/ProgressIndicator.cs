@@ -6,55 +6,65 @@ namespace XPlain.Services
 {
     public class ProgressIndicator : IDisposable
     {
-        private readonly string[] _indicators;
-        private readonly int _delay;
-        private readonly CancellationTokenSource _cts;
-        private Task _task;
-        private bool _isDisposed;
+        private readonly string[] _frames = { "⣾", "⣽", "⣻", "⢿", "⡿", "⣟", "⣯", "⣷" };
+        private int _frameIndex = 0;
+        private Timer _timer;
+        private bool _isRunning = false;
+        private readonly object _lock = new object();
 
-        public ProgressIndicator(string[] indicators = null, int delay = 100)
+        public ProgressIndicator()
         {
-            _indicators = indicators ?? new[] { "⣾", "⣽", "⣻", "⢿", "⡿", "⣟", "⣯", "⣷" };
-            _delay = delay;
-            _cts = new CancellationTokenSource();
         }
 
         public void Start()
         {
-            if (_task != null) return;
-
-            _task = Task.Run(async () =>
+            lock (_lock)
             {
-                if (Console.IsOutputRedirected) return;
+                if (_isRunning) return;
 
-                var index = 0;
-                while (!_cts.Token.IsCancellationRequested)
-                {
-                    var indicator = _indicators[index++ % _indicators.Length];
-                    Console.Write(indicator);
-                    await Task.Delay(_delay, _cts.Token);
-                    Console.Write("\b \b");
-                }
-            });
+                _isRunning = true;
+                _timer = new Timer(UpdateFrame, null, 0, 100);
+            }
         }
 
         public void Stop()
         {
-            _cts.Cancel();
-            if (_task != null && !_task.IsCompleted)
+            lock (_lock)
             {
-                _task.Wait(500); // Wait for task to complete, but don't wait forever
+                if (!_isRunning) return;
+
+                _timer?.Dispose();
+                _timer = null;
+                _isRunning = false;
+
+                if (!Console.IsOutputRedirected)
+                {
+                    Console.Write("\b \b");
+                }
             }
-            _task = null;
+        }
+
+        private void UpdateFrame(object state)
+        {
+            if (Console.IsOutputRedirected) return;
+
+            lock (_lock)
+            {
+                if (!_isRunning) return;
+
+                int currentLeft = Console.CursorLeft;
+                if (currentLeft > 0)
+                {
+                    Console.Write("\b");
+                }
+                Console.Write(_frames[_frameIndex]);
+                _frameIndex = (_frameIndex + 1) % _frames.Length;
+            }
         }
 
         public void Dispose()
         {
-            if (_isDisposed) return;
-
             Stop();
-            _cts.Dispose();
-            _isDisposed = true;
         }
     }
 }

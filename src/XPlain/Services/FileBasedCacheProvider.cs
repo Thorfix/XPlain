@@ -13,7 +13,7 @@ namespace XPlain.Services
         private ICacheEvictionPolicy _evictionPolicy;
         internal CircuitBreaker CircuitBreaker => _circuitBreaker;
         internal ICacheEvictionPolicy EvictionPolicy => _evictionPolicy;
-        internal IEncryptionProvider EncryptionProvider => null; // Not implemented
+        internal IEncryptionProvider EncryptionProvider { get; }
         
         private readonly CircuitBreaker _circuitBreaker;
         private readonly MLPredictionService _mlPredictionService;
@@ -29,12 +29,14 @@ namespace XPlain.Services
         public FileBasedCacheProvider(
             IOptions<CacheSettings> cacheSettings = null,
             MetricsCollectionService metricsService = null,
-            MLPredictionService mlPredictionService = null)
+            MLPredictionService mlPredictionService = null,
+            IEncryptionProvider encryptionProvider = null)
         {
             _evictionPolicy = new DummyEvictionPolicy();
             _mlPredictionService = mlPredictionService;
             _metricsService = metricsService;
             _circuitBreaker = new CircuitBreaker(3, TimeSpan.FromMinutes(5));
+            EncryptionProvider = encryptionProvider ?? new EncryptionProvider(cacheSettings);
             MaintenanceLogs = new List<MaintenanceLogEntry>();
             _cache = new Dictionary<string, CacheEntry>();
             _accessStats = new Dictionary<string, CacheAccessStats>();

@@ -24,6 +24,8 @@ public class AnthropicClient : BaseLLMProvider, IAnthropicClient, IDisposable
     public override string ProviderName => "Anthropic";
     public override string ModelName => _settings.DefaultModel;
 
+    // Static list of retryable HTTP status codes
+
     private static readonly HashSet<HttpStatusCode> RetryableStatusCodes = new()
     {
         HttpStatusCode.TooManyRequests,
@@ -43,7 +45,7 @@ public class AnthropicClient : BaseLLMProvider, IAnthropicClient, IDisposable
         LLMProviderMetrics metrics,
         IOptions<LLMSettings> llmSettings,
         IInputValidator inputValidator,
-        IOptions<StreamingSettings> streamingSettings)
+        IOptions<StreamingSettings> streamingSettings = null)
         : base(logger, httpClient, rateLimitingService, metrics, llmSettings, inputValidator)
     {
         _settings = settings.Value;
@@ -65,7 +67,7 @@ public class AnthropicClient : BaseLLMProvider, IAnthropicClient, IDisposable
         ICacheProvider cacheProvider,
         IRateLimitingService rateLimitingService,
         IOptions<AnthropicSettings> settings,
-        IOptions<StreamingSettings> streamingSettings)
+        IOptions<StreamingSettings> streamingSettings = null)
         : base(
             cacheProvider,
             rateLimitingService,
