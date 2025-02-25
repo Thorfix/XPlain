@@ -14,6 +14,13 @@ namespace XPlain.Services
         /// <param name="cancellationToken">Cancellation token</param>
         /// <returns>A task that completes when the request can proceed</returns>
         Task AcquirePermitAsync(string provider, int priority = 0, CancellationToken cancellationToken = default);
+        
+        /// <summary>
+        /// Wait for availability before proceeding with a request
+        /// </summary>
+        /// <param name="provider">The LLM provider name</param>
+        /// <returns>True if the request can proceed, false if it can't</returns>
+        Task<bool> WaitForAvailabilityAsync(string provider);
 
         /// <summary>
         /// Release a permit after an API request completes

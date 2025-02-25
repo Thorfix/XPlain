@@ -8,7 +8,7 @@ using XPlain.Configuration;
 
 namespace XPlain.Services
 {
-    public class FileBasedCacheProvider : ICacheProvider
+    public class FileBasedCacheProvider : ICacheProvider, ICacheEventListener
     {
         private ICacheEvictionPolicy _evictionPolicy;
         private readonly CircuitBreaker _circuitBreaker;
@@ -610,6 +610,43 @@ namespace XPlain.Services
         public IEnumerable<CacheEvictionEvent> GetRecentEvictions(int count)
         {
             return _evictionPolicy.GetRecentEvictions(count);
+        }
+        
+        // ICacheEventListener implementation
+        public Task OnCacheAccess(string key, double responseTime, bool isHit)
+        {
+            if (!_accessStats.ContainsKey(key))
+            {
+                _accessStats[key] = new CacheAccessStats();
+            }
+            
+            _accessStats[key].AccessCount++;
+            _accessStats[key].LastAccess = DateTime.UtcNow;
+            
+            return Task.CompletedTask;
+        }
+
+        public Task OnCacheEviction(string key)
+        {
+            // Track eviction statistics
+            if (_cache.ContainsKey(key))
+            {
+                _cache.Remove(key);
+            }
+            
+            return Task.CompletedTask;
+        }
+
+        public Task OnCachePreWarm(string key, bool success)
+        {
+            if (!_accessStats.ContainsKey(key))
+            {
+                _accessStats[key] = new CacheAccessStats();
+            }
+            
+            _accessStats[key].PreWarmCount++;
+            
+            return Task.CompletedTask;
         }
 
         public async Task<Dictionary<string, PreWarmMetrics>> GetPreWarmCandidatesAsync()

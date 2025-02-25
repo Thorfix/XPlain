@@ -63,4 +63,7 @@ public class AnthropicSettings : LLMSettings
     
     [Range(1000, 300000, ErrorMessage = "Maximum retry delay must be between 1000 and 300000 milliseconds")]
     public int MaxRetryDelayMs { get; set; } = 30000;
+    
+    [Range(5, 300, ErrorMessage = "Timeout must be between 5 and 300 seconds")]
+    public override int TimeoutSeconds { get; set; } = 30;
 }

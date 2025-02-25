@@ -7,9 +7,102 @@ using Microsoft.Extensions.Logging;
 using XPlain.Configuration;
 using System.Collections.Generic;
 using System.Linq;
+using System.Threading.Channels; // For older .NET versions that don't have PriorityQueue
 
 namespace XPlain.Services
 {
+    public class ProviderRateLimiter
+    {
+        private readonly SemaphoreSlim _concurrencyLimiter;
+        private readonly object _syncLock = new();
+        private readonly RateLimitSettings _settings;
+        private DateTime _windowStart;
+        private int _requestsInWindow;
+        private int _totalRequests;
+        private int _rateLimitErrors;
+        private readonly Queue<(TaskCompletionSource<bool>, int)> _queue = new();
+        private readonly ILogger<RateLimitingService> _logger;
+
+        public ProviderRateLimiter(RateLimitSettings settings, ILogger<RateLimitingService> logger)
+        {
+            _settings = settings;
+            _logger = logger;
+            _concurrencyLimiter = new SemaphoreSlim(settings.MaxConcurrentRequests);
+            _windowStart = DateTime.UtcNow;
+        }
+
+        public async Task AcquireAsync(int priority, CancellationToken cancellationToken)
+        {
+            var tcs = new TaskCompletionSource<bool>();
+            lock (_syncLock)
+            {
+                _queue.Enqueue((tcs, priority));
+            }
+
+            await ProcessQueueAsync();
+            await tcs.Task;
+            await _concurrencyLimiter.WaitAsync(cancellationToken);
+            
+            lock (_syncLock)
+            {
+                var now = DateTime.UtcNow;
+                if (now - _windowStart > TimeSpan.FromSeconds(_settings.WindowSeconds))
+                {
+                    _windowStart = now;
+                    _requestsInWindow = 0;
+                }
+
+                if (_requestsInWindow >= _settings.RequestsPerWindow)
+                {
+                    _rateLimitErrors++;
+                    throw new RateLimitExceededException($"Rate limit exceeded: {_settings.RequestsPerWindow} requests per {_settings.WindowSeconds} seconds");
+                }
+
+                _requestsInWindow++;
+                _totalRequests++;
+            }
+        }
+
+        private async Task ProcessQueueAsync()
+        {
+            (TaskCompletionSource<bool> nextTcs, int priority) = (null, 0);
+            
+            lock (_syncLock)
+            {
+                if (_queue.Count > 0)
+                {
+                    nextTcs = _queue.Dequeue().Item1;
+                }
+            }
+            
+            if (nextTcs != null)
+            {
+                nextTcs.TrySetResult(true);
+            }
+        }
+
+        public void Release()
+        {
+            _concurrencyLimiter.Release();
+        }
+
+        public RateLimitMetrics GetMetrics()
+        {
+            lock (_syncLock)
+            {
+                return new RateLimitMetrics
+                {
+                    QueuedRequests = _queue.Count,
+                    ActiveRequests = _settings.MaxConcurrentRequests - _concurrencyLimiter.CurrentCount,
+                    TotalRequestsProcessed = _totalRequests,
+                    RateLimitErrors = _rateLimitErrors,
+                    WindowStartTime = _windowStart,
+                    RequestsInCurrentWindow = _requestsInWindow
+                };
+            }
+        }
+    }
+    
     public class RateLimitingService : IRateLimitingService
     {
         private readonly ConcurrentDictionary<string, ProviderRateLimiter> _limiters = new();
@@ -95,6 +188,25 @@ namespace XPlain.Services
                 return limiter.GetMetrics();
             }
             return new RateLimitMetrics();
+        }
+        
+        public async Task<bool> WaitForAvailabilityAsync(string provider)
+        {
+            try
+            {
+                var settings = GetProviderSettings(provider);
+                var limiter = _limiters.GetOrAdd(provider, key => new ProviderRateLimiter(settings, _logger));
+                
+                using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+                await limiter.AcquireAsync(0, cts.Token);
+                limiter.Release();
+                return true;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, $"Could not acquire permit for provider {provider}");
+                return false;
+            }
         }
 
         private class ProviderRateLimiter

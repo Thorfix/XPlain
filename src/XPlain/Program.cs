@@ -19,6 +19,16 @@ using XPlain.Services.Validation;
 
 namespace XPlain;
 
+public class MonitoringThresholds
+{
+    public double HitRateWarningThreshold { get; set; } = 0.6;
+    public double HitRateErrorThreshold { get; set; } = 0.4;
+    public double MemoryUsageWarningThreshold { get; set; } = 0.8;
+    public double MemoryUsageErrorThreshold { get; set; } = 0.95;
+    public int ResponseTimeWarningThresholdMs { get; set; } = 500;
+    public int ResponseTimeErrorThresholdMs { get; set; } = 1000;
+}
+
 file class Program
     {
         private const string Version = "1.0.0";

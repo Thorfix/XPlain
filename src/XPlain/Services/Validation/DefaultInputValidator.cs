@@ -4,16 +4,6 @@ using System.Text.RegularExpressions;
 
 namespace XPlain.Services.Validation
 {
-    public enum ValidationErrorType
-    {
-        EmptyInput,
-        InvalidContent,
-        TooLong,
-        ProhibitedContent,
-        ExcessiveSpecialChars,
-        Other
-    }
-
     public class InputValidationException : Exception
     {
         public ValidationErrorType ValidationError { get; }
