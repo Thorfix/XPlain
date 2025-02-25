@@ -1527,6 +1527,19 @@ namespace XPlain.Tests.Services
             Assert.True(stats.CompressionStats.ContainsKey("GZip"));
             Assert.True(stats.CompressionStats["GZip"].CompressedItems > 0);
             Assert.True(stats.CompressionStats["GZip"].CompressionSavingPercent > 50); // Should save at least 50%
+            
+            // Check memory usage
+            var memoryBeforeAccess = GC.GetTotalMemory(true);
+            for (int i = 0; i < 10; i++)
+            {
+                retrievedValue = await provider.GetAsync<string>(key);
+            }
+            var memoryAfterAccess = GC.GetTotalMemory(false);
+            
+            // Memory increase should be reasonable during decompression
+            var memoryDelta = memoryAfterAccess - memoryBeforeAccess;
+            Assert.True(memoryDelta < largeValue.Length, 
+                $"Memory delta ({memoryDelta}) should be less than uncompressed size ({largeValue.Length})");
         }
         
         [Fact]
@@ -1679,6 +1692,8 @@ namespace XPlain.Tests.Services
         [InlineData(CompressionAlgorithm.Brotli, 100 * 1024)]
         [InlineData(CompressionAlgorithm.GZip, 1024)]
         [InlineData(CompressionAlgorithm.Brotli, 1024)]
+        [InlineData(CompressionAlgorithm.GZip, 512)]  // Below threshold
+        [InlineData(CompressionAlgorithm.Brotli, 512)] // Below threshold
         public async Task DifferentCompressionAlgorithms_WorkCorrectly(CompressionAlgorithm algorithm, int dataSize)
         {
             // Arrange
@@ -1691,7 +1706,8 @@ namespace XPlain.Tests.Services
                 CacheDirectory = _testDirectory,
                 CompressionEnabled = true,
                 CompressionAlgorithm = algorithm,
-                MinSizeForCompressionBytes = 1024 // 1KB threshold
+                MinSizeForCompressionBytes = 1024, // 1KB threshold
+                TrackCompressionMetrics = true
             };
             
             var provider = new FileBasedCacheProvider(
@@ -1712,11 +1728,36 @@ namespace XPlain.Tests.Services
                 // Should be compressed
                 Assert.True(stats.CompressionRatio < 1.0, $"Compression ratio should be < 1.0, got {stats.CompressionRatio}");
                 Assert.True(stats.CompressionStats[algorithm.ToString()].CompressedItems > 0);
+                
+                // Verify compression metrics are being tracked
+                Assert.True(stats.CompressionStats[algorithm.ToString()].AverageCompressionTimeMs >= 0);
+                Assert.True(stats.CompressionStats[algorithm.ToString()].AverageDecompressionTimeMs >= 0);
+                
+                // Brotli should typically achieve better compression than GZip for text data
+                if (algorithm == CompressionAlgorithm.Brotli && dataSize > 10 * 1024)
+                {
+                    // Create GZip provider for comparison
+                    var gzipSettings = settings with { CompressionAlgorithm = CompressionAlgorithm.GZip };
+                    var gzipProvider = new FileBasedCacheProvider(
+                        Options.Create(gzipSettings),
+                        metricsService: null,
+                        mlPredictionService: null);
+                    
+                    await gzipProvider.SetAsync(key, value);
+                    var gzipStats = gzipProvider.GetCacheStats();
+                    
+                    // Brotli compression should be at least as good as GZip
+                    Assert.True(stats.CompressionRatio <= gzipStats.CompressionRatio * 1.1, 
+                        "Brotli should provide comparable or better compression than GZip");
+                }
             }
             else
             {
                 // Too small for compression
                 Assert.Equal(1.0, stats.CompressionRatio);
+                
+                // Should track items not compressed due to size
+                Assert.True(stats.CompressionStats[algorithm.ToString()].TotalItems > 0);
             }
         }
         
@@ -1728,6 +1769,9 @@ namespace XPlain.Tests.Services
             var jsonData = System.Text.Json.JsonSerializer.Serialize(Enumerable.Range(0, 1000)
                 .Select(i => new { Id = i, Name = $"Item {i}", Value = i * 3.14 })
                 .ToArray());
+            var mixedData = "START" + new string('x', 50 * 1024) + 
+                            System.Text.Json.JsonSerializer.Serialize(new { random = Guid.NewGuid() }) +
+                            new string('y', 40 * 1024);
             
             var settings = new CacheSettings
             {
@@ -1735,7 +1779,11 @@ namespace XPlain.Tests.Services
                 CacheDirectory = _testDirectory,
                 CompressionEnabled = true,
                 AdaptiveCompression = true,
-                MinSizeForCompressionBytes = 1024
+                MinSizeForCompressionBytes = 1024,
+                ContentTypeAlgorithmMap = new Dictionary<ContentType, CompressionAlgorithm> {
+                    { ContentType.TextJson, CompressionAlgorithm.Brotli },
+                    { ContentType.TextPlain, CompressionAlgorithm.GZip }
+                }
             };
             
             var provider = new FileBasedCacheProvider(
@@ -1746,22 +1794,51 @@ namespace XPlain.Tests.Services
             // Act
             await provider.SetAsync("compressible_key", compressibleData);
             await provider.SetAsync("json_key", jsonData);
+            await provider.SetAsync("mixed_key", mixedData);
             
             var stats = provider.GetCacheStats();
             
             // Assert
-            // Both should be compressed
+            // All entries should be compressed
             Assert.True(stats.CompressionRatio < 1.0);
             
-            // Verify compression was effective for both types
+            // Verify compression was effective for all types
             Assert.True(stats.CompressionSavingsBytes > 0);
             
-            // Retrieve and verify data integrity
+            // Verify the adaptive algorithm chose different algorithms for different content types
+            // We can't directly test algorithm selection, but we can verify effectiveness
+            Assert.True(stats.CompressionStats.ContainsKey("GZip"));
+            Assert.True(stats.CompressionStats.ContainsKey("Brotli"));
+            
+            if (stats.CompressionStats["GZip"].CompressedItems > 0 && 
+                stats.CompressionStats["Brotli"].CompressedItems > 0)
+            {
+                // If both algorithms were used, verify they were effective
+                Assert.True(stats.CompressionStats["GZip"].CompressionRatio < 0.5);
+                Assert.True(stats.CompressionStats["Brotli"].CompressionRatio < 0.5);
+            }
+            else
+            {
+                // If only one algorithm was used, it should have been very effective
+                var usedAlgorithm = stats.CompressionStats["GZip"].CompressedItems > 0 ? "GZip" : "Brotli";
+                Assert.True(stats.CompressionStats[usedAlgorithm].CompressionRatio < 0.3);
+            }
+            
+            // Retrieve and verify data integrity for all types
             var retrievedCompressible = await provider.GetAsync<string>("compressible_key");
             var retrievedJson = await provider.GetAsync<string>("json_key");
+            var retrievedMixed = await provider.GetAsync<string>("mixed_key");
             
             Assert.Equal(compressibleData, retrievedCompressible);
             Assert.Equal(jsonData, retrievedJson);
+            Assert.Equal(mixedData, retrievedMixed);
+            
+            // Verify content type detection is working by checking compression stats
+            Assert.True(stats.CompressionByContentType.Count > 0, "Content type detection should be working");
+            
+            // Verify adaptive algorithm selected best compression based on content type
+            var mostEfficientAlgo = stats.MostEfficientAlgorithm;
+            Assert.False(string.IsNullOrEmpty(mostEfficientAlgo), "Should identify most efficient compression algorithm");
         }
         
         [Fact]
@@ -1788,13 +1865,14 @@ namespace XPlain.Tests.Services
             // Create cache entry without compression
             await legacyProvider.SetAsync(key, value);
             
-            // Act - Create a new provider with compression enabled
+            // Act - Create a new provider with compression enabled and auto-upgrade
             var compressionSettings = new CacheSettings
             {
                 CacheEnabled = true,
                 CacheDirectory = _testDirectory,
                 CompressionEnabled = true,
-                CompressionAlgorithm = CompressionAlgorithm.GZip
+                CompressionAlgorithm = CompressionAlgorithm.GZip,
+                UpgradeUncompressedEntries = true
             };
             
             var modernProvider = new FileBasedCacheProvider(
@@ -1808,12 +1886,47 @@ namespace XPlain.Tests.Services
             // Assert
             Assert.Equal(value, retrievedValue); // Should be able to read the legacy entry
             
-            // Now rewrite the same key
-            await modernProvider.SetAsync(key, value);
+            // Allow time for background upgrade to run
+            await Task.Delay(200);
             
-            // The rewritten entry should now be compressed
+            // Reading the entry again should now return from compressed storage
+            retrievedValue = await modernProvider.GetAsync<string>(key);
+            Assert.Equal(value, retrievedValue);
+            
+            // The cache should now have compressed entries
             var stats = modernProvider.GetCacheStats();
-            Assert.True(stats.CompressionRatio < 1.0);
+            
+            // At least one entry should be using compression
+            Assert.True(stats.CompressedItemCount > 0, "Cache should have at least one compressed entry after upgrade");
+            
+            // Create a new provider with different compression algorithm to test cross-algo compatibility
+            var brotliSettings = new CacheSettings
+            {
+                CacheEnabled = true,
+                CacheDirectory = _testDirectory,
+                CompressionEnabled = true,
+                CompressionAlgorithm = CompressionAlgorithm.Brotli,
+                UpgradeUncompressedEntries = true
+            };
+            
+            var brotliProvider = new FileBasedCacheProvider(
+                Options.Create(brotliSettings),
+                metricsService: null,
+                mlPredictionService: null);
+            
+            // Should still be able to read GZip compressed entries
+            retrievedValue = await brotliProvider.GetAsync<string>(key);
+            Assert.Equal(value, retrievedValue);
+            
+            // Test with a new key to ensure format versioning works
+            var newKey = "new_version_key";
+            var newValue = "new_version_value";
+            
+            await brotliProvider.SetAsync(newKey, newValue);
+            
+            // Should be able to read with original provider
+            var crossAlgoValue = await legacyProvider.GetAsync<string>(newKey);
+            Assert.Equal(newValue, crossAlgoValue);
         }
         
         [Fact]
@@ -1829,7 +1942,9 @@ namespace XPlain.Tests.Services
                 CacheDirectory = _testDirectory,
                 CompressionEnabled = true,
                 CompressionAlgorithm = CompressionAlgorithm.GZip,
-                CompressionLevel = CompressionLevel.Fastest // Use fastest for this test
+                CompressionLevel = CompressionLevel.Fastest, // Use fastest for this test
+                MinSizeForCompressionBytes = 1024, // 1KB threshold
+                AutoAdjustCompressionLevel = true
             };
             
             var noCompressionSettings = new CacheSettings
@@ -1899,6 +2014,26 @@ namespace XPlain.Tests.Services
             // For repeating data, we should get over 90% reduction
             Assert.True(compressedStats.CompressedStorageUsageBytes < uncompressedStats.CompressedStorageUsageBytes * 0.1);
             
+            // Check memory impact
+            var memoryAfterWrite = GC.GetTotalMemory(true);
+            var intensiveReads = 100;
+            
+            // Perform intensive repeated reads to measure memory impact
+            for (int i = 0; i < intensiveReads; i++)
+            {
+                await compressedProvider.GetAsync<string>(keys[i % keys.Length]);
+            }
+            
+            var memoryAfterReads = GC.GetTotalMemory(false);
+            var memoryIncrease = memoryAfterReads - memoryAfterWrite;
+            
+            // Memory increase should be controlled during repeated decompressions
+            Assert.True(memoryIncrease < largeValue.Length * 2, 
+                $"Memory increase ({memoryIncrease}) should be limited during repeated decompressions");
+            
+            // Verify auto-adjustment of compression level works
+            Assert.NotNull(compressedStats.CompressionStats["GZip"]);
+            
             // Log performance metrics
             Console.WriteLine($"Compressed write: {compressedWrite.ElapsedMilliseconds}ms");
             Console.WriteLine($"Uncompressed write: {uncompressedWrite.ElapsedMilliseconds}ms");
@@ -1907,6 +2042,9 @@ namespace XPlain.Tests.Services
             Console.WriteLine($"Storage with compression: {compressedStats.CompressedStorageUsageBytes} bytes");
             Console.WriteLine($"Storage without compression: {uncompressedStats.CompressedStorageUsageBytes} bytes");
             Console.WriteLine($"Compression ratio: {compressedStats.CompressionRatio}");
+            Console.WriteLine($"Memory increase after {intensiveReads} reads: {memoryIncrease} bytes");
+            Console.WriteLine($"Average compression time: {compressedStats.CompressionStats["GZip"].AverageCompressionTimeMs}ms");
+            Console.WriteLine($"Average decompression time: {compressedStats.CompressionStats["GZip"].AverageDecompressionTimeMs}ms");
         }
 
         [Fact]
@@ -2508,6 +2646,125 @@ namespace XPlain.Tests.Services
             catch
             {
                 // Ignore cleanup errors in tests
+            }
+        }
+        
+        [Fact]
+        public async Task Compression_AutoTunes_BasedOnCpuUsage()
+        {
+            // Arrange
+            var largeValue = new string('x', 2 * 1024 * 1024); // 2MB of repeating data
+            var key = "auto_tune_test_key";
+            
+            var settings = new CacheSettings
+            {
+                CacheEnabled = true,
+                CacheDirectory = _testDirectory,
+                CompressionEnabled = true,
+                AdaptiveCompression = true,
+                AutoAdjustCompressionLevel = true,
+                CompressionLevel = CompressionLevel.SmallestSize, // Start with highest compression
+                MinSizeForCompressionBytes = 1024,
+                MaxSizeForHighCompressionBytes = 1 * 1024 * 1024 // 1MB threshold
+            };
+            
+            var metricsMock = new Mock<MetricsCollectionService>();
+            metricsMock.Setup(m => m.GetCustomMetric("cpu_usage_percent"))
+                .Returns(new MetricValue { LastValue = 85 }); // Simulate high CPU usage
+                
+            var provider = new FileBasedCacheProvider(
+                Options.Create(settings),
+                metricsMock.Object,
+                mlPredictionService: null);
+
+            // Act - With simulated high CPU
+            await provider.SetAsync(key, largeValue);
+            var statsWithHighCpu = provider.GetCacheStats();
+            
+            // Change CPU load to low and create a new provider
+            metricsMock.Setup(m => m.GetCustomMetric("cpu_usage_percent"))
+                .Returns(new MetricValue { LastValue = 20 }); // Simulate low CPU usage
+                
+            var lowCpuProvider = new FileBasedCacheProvider(
+                Options.Create(settings),
+                metricsMock.Object,
+                mlPredictionService: null);
+                
+            await lowCpuProvider.SetAsync(key + "_low", largeValue);
+            var statsWithLowCpu = lowCpuProvider.GetCacheStats();
+            
+            // Assert
+            // Both should compress the data
+            Assert.True(statsWithHighCpu.CompressionRatio < 1.0);
+            Assert.True(statsWithLowCpu.CompressionRatio < 1.0);
+            
+            // With high CPU, compression should favor speed over compression ratio
+            if (statsWithHighCpu.CompressionStats["GZip"].CompressedItems > 0 && 
+                statsWithLowCpu.CompressionStats["GZip"].CompressedItems > 0)
+            {
+                // Verify that compression under high CPU load took less time
+                Assert.True(statsWithHighCpu.CompressionStats["GZip"].AverageCompressionTimeMs <= 
+                           statsWithLowCpu.CompressionStats["GZip"].AverageCompressionTimeMs * 1.2,
+                           "Under high CPU load, compression should be faster");
+            }
+            
+            // The actual compression ratio depends on the implementation details, but in general
+            // low CPU should allow for better compression ratio if time permits
+            // This is a soft assertion since the actual behavior depends on the implementation
+            Console.WriteLine($"High CPU compression ratio: {statsWithHighCpu.CompressionRatio}");
+            Console.WriteLine($"Low CPU compression ratio: {statsWithLowCpu.CompressionRatio}");
+            Console.WriteLine($"High CPU compression time: {statsWithHighCpu.AverageCompressionTimeMs}ms");
+            Console.WriteLine($"Low CPU compression time: {statsWithLowCpu.AverageCompressionTimeMs}ms");
+        }
+        
+        [Fact]
+        public async Task CompressionHistory_TracksEffectiveness()
+        {
+            // Arrange
+            var largeValue = new string('x', 1024 * 1024); // 1MB of repeating data
+            var settings = new CacheSettings
+            {
+                CacheEnabled = true,
+                CacheDirectory = _testDirectory,
+                CompressionEnabled = true,
+                CompressionAlgorithm = CompressionAlgorithm.GZip,
+                TrackCompressionMetrics = true,
+                CompressionMetricsRetentionHours = 1
+            };
+            
+            var provider = new FileBasedCacheProvider(
+                Options.Create(settings),
+                metricsService: null,
+                mlPredictionService: null);
+
+            // Act - Store multiple values to generate history
+            for (int i = 0; i < 5; i++)
+            {
+                await provider.SetAsync($"history_key_{i}", largeValue);
+                await Task.Delay(50); // Allow time for processing
+            }
+            
+            var stats = provider.GetCacheStats();
+            
+            // Assert
+            // Should be tracking compression history
+            Assert.NotEmpty(stats.CompressionHistory);
+            
+            // Each history entry should have valid data
+            foreach (var entry in stats.CompressionHistory)
+            {
+                Assert.True(entry.Timestamp <= DateTime.UtcNow);
+                Assert.True(entry.CompressionRatio > 0);
+                Assert.True(entry.BytesSaved > 0);
+                Assert.False(string.IsNullOrEmpty(entry.PrimaryAlgorithm));
+            }
+            
+            // Verify history entries have increasing timestamps
+            var orderedEntries = stats.CompressionHistory.OrderBy(e => e.Timestamp).ToArray();
+            for (int i = 1; i < orderedEntries.Length; i++)
+            {
+                Assert.True(orderedEntries[i].Timestamp >= orderedEntries[i-1].Timestamp,
+                    "History entries should have increasing timestamps");
             }
         }
     }

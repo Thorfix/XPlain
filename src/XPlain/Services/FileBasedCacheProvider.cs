@@ -1569,14 +1569,71 @@ namespace XPlain.Services
             
             try
             {
+                // Apply CPU and memory resource constraints to auto-adjust compression level if enabled
+                if (_cacheSettings.AutoAdjustCompressionLevel && _metricsService != null)
+                {
+                    var cpuMetric = _metricsService.GetCustomMetric("cpu_usage_percent");
+                    if (cpuMetric != null && cpuMetric.LastValue > 80) // High CPU usage detected
+                    {
+                        // Downgrade to faster compression
+                        level = CompressionLevel.Fastest;
+                        
+                        MaintenanceLogs.Add(new MaintenanceLogEntry
+                        {
+                            Operation = "CompressionAutoTune",
+                            Status = "LevelDowngraded",
+                            Metadata = new Dictionary<string, object>
+                            {
+                                ["reason"] = "High CPU usage",
+                                ["cpu_usage"] = cpuMetric.LastValue,
+                                ["original_level"] = level.ToString(),
+                                ["adjusted_level"] = CompressionLevel.Fastest.ToString()
+                            }
+                        });
+                    }
+                    
+                    // For very large data, always use faster compression to avoid memory pressure
+                    if (data.Length > _cacheSettings.MaxSizeForHighCompressionBytes && level == CompressionLevel.SmallestSize)
+                    {
+                        level = CompressionLevel.Optimal;
+                        
+                        MaintenanceLogs.Add(new MaintenanceLogEntry
+                        {
+                            Operation = "CompressionAutoTune",
+                            Status = "LevelAdjusted",
+                            Metadata = new Dictionary<string, object>
+                            {
+                                ["reason"] = "Large data size",
+                                ["data_size"] = data.Length,
+                                ["threshold"] = _cacheSettings.MaxSizeForHighCompressionBytes,
+                                ["adjusted_level"] = CompressionLevel.Optimal.ToString()
+                            }
+                        });
+                    }
+                }
+                
                 using var outputStream = new MemoryStream();
+                bool useMemoryEfficient = data.Length > 10 * 1024 * 1024; // For very large data (>10MB)
                 
                 switch (algorithm)
                 {
                     case CompressionAlgorithm.GZip:
                         using (var gzipStream = new GZipStream(outputStream, level))
                         {
-                            gzipStream.Write(data, 0, data.Length);
+                            if (useMemoryEfficient)
+                            {
+                                // Use smaller chunks for very large data to reduce memory pressure
+                                const int chunkSize = 81920; // 80KB chunks
+                                for (int offset = 0; offset < data.Length; offset += chunkSize)
+                                {
+                                    int bytesToWrite = Math.Min(chunkSize, data.Length - offset);
+                                    gzipStream.Write(data, offset, bytesToWrite);
+                                }
+                            }
+                            else
+                            {
+                                gzipStream.Write(data, 0, data.Length);
+                            }
                             gzipStream.Flush();
                         }
                         break;
@@ -1584,7 +1641,20 @@ namespace XPlain.Services
                     case CompressionAlgorithm.Brotli:
                         using (var brotliStream = new BrotliStream(outputStream, level))
                         {
-                            brotliStream.Write(data, 0, data.Length);
+                            if (useMemoryEfficient)
+                            {
+                                // Use smaller chunks for very large data to reduce memory pressure
+                                const int chunkSize = 81920; // 80KB chunks
+                                for (int offset = 0; offset < data.Length; offset += chunkSize)
+                                {
+                                    int bytesToWrite = Math.Min(chunkSize, data.Length - offset);
+                                    brotliStream.Write(data, offset, bytesToWrite);
+                                }
+                            }
+                            else
+                            {
+                                brotliStream.Write(data, 0, data.Length);
+                            }
                             brotliStream.Flush();
                         }
                         break;
@@ -1623,11 +1693,27 @@ namespace XPlain.Services
                             }
                         });
                     }
+                    
+                    // Record our success for adaptive algorithm selection
+                    if (_metricsService != null)
+                    {
+                        _ = _metricsService.RecordCustomMetric($"compression_success_{algorithm}", 1);
+                        _ = _metricsService.RecordCustomMetric($"compression_ratio_{algorithm}", compressionRatio);
+                        _ = _metricsService.RecordCustomMetric($"compression_time_{algorithm}", stopwatch.ElapsedMilliseconds);
+                        _ = _metricsService.RecordCustomMetric($"bytes_saved_{algorithm}", data.Length - result.Length);
+                    }
+                    
                     return result;
                 }
                 
                 // If compression didn't reduce size enough, return original data
                 UpdateCompressionStats(algorithm.ToString(), data.Length, data.Length, stopwatch.ElapsedMilliseconds, 0, false);
+                
+                if (_metricsService != null)
+                {
+                    _ = _metricsService.RecordCustomMetric($"compression_skipped_{algorithm}", 1);
+                }
+                
                 return data;
             }
             catch (Exception ex)
@@ -1645,6 +1731,12 @@ namespace XPlain.Services
                         ["data_size"] = data.Length
                     }
                 });
+                
+                if (_metricsService != null)
+                {
+                    _ = _metricsService.RecordCustomMetric($"compression_error_{algorithm}", 1);
+                }
+                
                 return data;
             }
         }
@@ -1668,19 +1760,55 @@ namespace XPlain.Services
                 using var inputStream = new MemoryStream(data);
                 using var outputStream = new MemoryStream();
                 
+                // Use buffer for more efficient memory usage during decompression
+                byte[] buffer = null;
+                
+                // For large compressed data, use a larger buffer
+                if (data.Length > 1024 * 1024) // > 1MB
+                {
+                    buffer = new byte[81920]; // 80KB buffer for large data
+                }
+                else if (data.Length > 100 * 1024) // > 100KB
+                {
+                    buffer = new byte[32768]; // 32KB buffer for medium data
+                }
+                // For small data, let the CopyTo method handle buffer allocation
+                
                 switch (algorithm)
                 {
                     case CompressionAlgorithm.GZip:
                         using (var gzipStream = new GZipStream(inputStream, CompressionMode.Decompress))
                         {
-                            gzipStream.CopyTo(outputStream);
+                            if (buffer != null)
+                            {
+                                int read;
+                                while ((read = gzipStream.Read(buffer, 0, buffer.Length)) > 0)
+                                {
+                                    outputStream.Write(buffer, 0, read);
+                                }
+                            }
+                            else
+                            {
+                                gzipStream.CopyTo(outputStream);
+                            }
                         }
                         break;
                         
                     case CompressionAlgorithm.Brotli:
                         using (var brotliStream = new BrotliStream(inputStream, CompressionMode.Decompress))
                         {
-                            brotliStream.CopyTo(outputStream);
+                            if (buffer != null)
+                            {
+                                int read;
+                                while ((read = brotliStream.Read(buffer, 0, buffer.Length)) > 0)
+                                {
+                                    outputStream.Write(buffer, 0, read);
+                                }
+                            }
+                            else
+                            {
+                                brotliStream.CopyTo(outputStream);
+                            }
                         }
                         break;
                         
@@ -1692,10 +1820,41 @@ namespace XPlain.Services
                 
                 // Update decompression stats
                 stopwatch.Stop();
-                UpdateCompressionStats(algorithm.ToString(), result.Length, data.Length, 0, stopwatch.ElapsedMilliseconds);
+                var decompressionTime = stopwatch.ElapsedMilliseconds;
+                UpdateCompressionStats(algorithm.ToString(), result.Length, data.Length, 0, decompressionTime);
+                
+                // Track memory usage and performance for large decompression operations
+                if (result.Length > 5 * 1024 * 1024) // > 5MB uncompressed
+                {
+                    var memoryAfter = GC.GetTotalMemory(false);
+                    
+                    // Log memory usage for large decompression operations
+                    MaintenanceLogs.Add(new MaintenanceLogEntry
+                    {
+                        Operation = "LargeDecompression",
+                        Status = "Success",
+                        Metadata = new Dictionary<string, object>
+                        {
+                            ["algorithm"] = algorithm.ToString(),
+                            ["compressed_size"] = data.Length,
+                            ["uncompressed_size"] = result.Length,
+                            ["memory_used"] = memoryAfter,
+                            ["decompression_time_ms"] = decompressionTime,
+                            ["compression_ratio"] = (double)data.Length / result.Length
+                        }
+                    });
+                    
+                    // Record metrics for large decompressions
+                    if (_metricsService != null)
+                    {
+                        _ = _metricsService.RecordCustomMetric("large_decompression_count", 1);
+                        _ = _metricsService.RecordCustomMetric("large_decompression_time_ms", decompressionTime);
+                        _ = _metricsService.RecordCustomMetric("large_decompression_size_mb", result.Length / (1024.0 * 1024.0));
+                    }
+                }
                 
                 // Log successful decompression
-                if (_cacheSettings.TrackCompressionMetrics && _metricsService != null && stopwatch.ElapsedMilliseconds > 5) // Only log non-trivial operations
+                if (_cacheSettings.TrackCompressionMetrics && _metricsService != null && decompressionTime > 5) // Only log non-trivial operations
                 {
                     MaintenanceLogs.Add(new MaintenanceLogEntry
                     {
@@ -1707,9 +1866,19 @@ namespace XPlain.Services
                             ["compressed_size"] = data.Length,
                             ["original_size"] = result.Length,
                             ["ratio"] = result.Length > 0 ? (double)data.Length / result.Length : 1.0,
-                            ["time_ms"] = stopwatch.ElapsedMilliseconds
+                            ["time_ms"] = decompressionTime
                         }
                     });
+                    
+                    // Record metrics for decompression performance
+                    _ = _metricsService.RecordCustomMetric($"decompression_time_{algorithm}", decompressionTime);
+                    
+                    // Track performance ratio (bytes decompressed per ms)
+                    if (decompressionTime > 0)
+                    {
+                        var bytesPerMs = result.Length / decompressionTime;
+                        _ = _metricsService.RecordCustomMetric($"decompression_throughput_{algorithm}", bytesPerMs);
+                    }
                 }
                 
                 return result;
@@ -1717,6 +1886,7 @@ namespace XPlain.Services
             catch (Exception ex)
             {
                 // Log error and return original data if decompression fails
+                stopwatch.Stop();
                 MaintenanceLogs.Add(new MaintenanceLogEntry
                 {
                     Operation = "Decompression",
@@ -1726,9 +1896,17 @@ namespace XPlain.Services
                         ["error"] = ex.Message,
                         ["algorithm"] = algorithm.ToString(),
                         ["data_size"] = data.Length,
+                        ["time_spent_ms"] = stopwatch.ElapsedMilliseconds,
                         ["stack_trace"] = ex.StackTrace?.Substring(0, Math.Min(500, ex.StackTrace?.Length ?? 0))
                     }
                 });
+                
+                if (_metricsService != null)
+                {
+                    _ = _metricsService.RecordCustomMetric($"decompression_error_{algorithm}", 1);
+                    _ = _metricsService.RecordCustomMetric("decompression_errors_total", 1);
+                }
+                
                 return data;
             }
         }
