@@ -15,6 +15,7 @@ namespace XPlain.Services
         private readonly Dictionary<string, long> _queryHits = new Dictionary<string, long>();
         private readonly Dictionary<string, long> _queryMisses = new Dictionary<string, long>();
         private readonly Dictionary<string, double> _responseTimesMs = new Dictionary<string, double>();
+        private readonly Dictionary<string, MetricValue> _customMetrics = new Dictionary<string, MetricValue>();
         
         public MetricsCollectionService(
             TimeSeriesMetricsStore metricsStore = null,
@@ -116,6 +117,21 @@ namespace XPlain.Services
             await _metricsStore.StoreMetricAsync("cache.avg_response_time", avgResponseTime, DateTime.UtcNow);
             await _metricsStore.StoreMetricAsync("cache.query_count", totalHits + totalMisses, DateTime.UtcNow);
             await _metricsStore.StoreMetricAsync("cache.memory_usage_mb", GetMemoryUsage(), DateTime.UtcNow);
+            
+            // Record CPU usage for adaptive compression
+            await _metricsStore.StoreMetricAsync("system.cpu_usage_percent", GetCpuUsage(), DateTime.UtcNow);
+            
+            // Record compression metrics if available
+            foreach (var metric in _customMetrics)
+            {
+                if (metric.Key.StartsWith("compression"))
+                {
+                    await _metricsStore.StoreMetricAsync(
+                        $"cache.{metric.Key}", 
+                        metric.Value.LastValue, 
+                        DateTime.UtcNow);
+                }
+            }
         }
         
         private double GetMemoryUsage()
@@ -123,6 +139,60 @@ namespace XPlain.Services
             // This is a simplified implementation that just returns the current process memory
             var process = System.Diagnostics.Process.GetCurrentProcess();
             return process.WorkingSet64 / (1024.0 * 1024.0);
+        }
+        
+        private double GetCpuUsage()
+        {
+            try
+            {
+                var cpuCounter = new System.Diagnostics.PerformanceCounter("Processor", "% Processor Time", "_Total");
+                cpuCounter.NextValue(); // First call will always return 0
+                Thread.Sleep(100); // Wait a bit for measurement
+                return cpuCounter.NextValue();
+            }
+            catch (Exception)
+            {
+                // Fallback to a default value if performance counter is not available
+                return 50.0; // Assume 50% CPU usage
+            }
+        }
+        
+        public async Task RecordCacheWriteMetric(string key, double responseTimeMs)
+        {
+            await _metricsStore.StoreMetricAsync(
+                "cache.write_time",
+                responseTimeMs,
+                DateTime.UtcNow,
+                new Dictionary<string, string> { ["key"] = key });
+        }
+        
+        public async Task RecordCustomMetric(string metricName, double value)
+        {
+            // Store custom metrics for later aggregation
+            if (!_customMetrics.TryGetValue(metricName, out var metric))
+            {
+                metric = new MetricValue();
+                _customMetrics[metricName] = metric;
+            }
+            
+            // Update metric with new value using exponential moving average
+            metric.Update(value);
+            
+            // For compression metrics, store in time series as well
+            if (metricName.StartsWith("compression") || 
+                metricName.StartsWith("decompression") ||
+                metricName.StartsWith("bytes_saved"))
+            {
+                await _metricsStore.StoreMetricAsync(
+                    $"cache.{metricName}",
+                    value,
+                    DateTime.UtcNow);
+            }
+        }
+        
+        public MetricValue GetCustomMetric(string metricName)
+        {
+            return _customMetrics.TryGetValue(metricName, out var metric) ? metric : null;
         }
         
         // ICacheEventListener implementation

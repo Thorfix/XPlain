@@ -30,6 +30,14 @@ namespace XPlain.Configuration
         
         public bool EnableHistoricalStorage { get; set; } = true;
         
+        public bool TrackCompressionMetrics { get; set; } = true;
+        
+        [Range(1, 365)]
+        public int CompressionMetricsRetentionDays { get; set; } = 7;
+        
+        [Range(0.0, 1.0)]
+        public double CompressionRatioAlertThreshold { get; set; } = 0.8;
+        
         public void Validate()
         {
             if (CollectionIntervalSeconds < 1 || CollectionIntervalSeconds > 3600)
@@ -52,6 +60,12 @@ namespace XPlain.Configuration
                 
             if (MetricDataPointsRetention < 1 || MetricDataPointsRetention > 10000)
                 throw new ValidationException("Metric data points retention must be between 1 and 10000");
+                
+            if (CompressionMetricsRetentionDays < 1 || CompressionMetricsRetentionDays > 365)
+                throw new ValidationException("Compression metrics retention days must be between 1 and 365");
+                
+            if (CompressionRatioAlertThreshold < 0.0 || CompressionRatioAlertThreshold > 1.0)
+                throw new ValidationException("Compression ratio alert threshold must be between 0.0 and 1.0");
         }
     }
 }

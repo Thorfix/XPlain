@@ -18,6 +18,7 @@ namespace XPlain.Services
     {
         private readonly ILogger<TimeSeriesMetricsStore> _logger;
         private readonly Dictionary<string, List<MetricDataPoint>> _metrics = new();
+        private readonly Dictionary<string, Dictionary<string, string>> _metricTags = new();
         private readonly object _lock = new();
         private readonly MetricsSettings _settings;
 
@@ -29,11 +30,16 @@ namespace XPlain.Services
             _settings = settings?.Value ?? new MetricsSettings();
         }
 
-        public async Task RecordMetricAsync(string metricName, double value)
+        public async Task StoreMetricAsync(string metricName, double value, DateTime timestamp, Dictionary<string, string> tags = null)
+        {
+            await RecordMetricAsync(metricName, value, tags, timestamp);
+        }
+        
+        public async Task RecordMetricAsync(string metricName, double value, Dictionary<string, string> tags = null, DateTime? timestamp = null)
         {
             try
             {
-                var now = DateTime.UtcNow;
+                var now = timestamp ?? DateTime.UtcNow;
                 
                 lock (_lock)
                 {
@@ -48,6 +54,21 @@ namespace XPlain.Services
                         Timestamp = now,
                         Value = value
                     });
+                    
+                    // Store tags if provided
+                    if (tags != null && tags.Count > 0)
+                    {
+                        if (!_metricTags.TryGetValue(metricName, out var existingTags))
+                        {
+                            existingTags = new Dictionary<string, string>();
+                            _metricTags[metricName] = existingTags;
+                        }
+                        
+                        foreach (var tag in tags)
+                        {
+                            existingTags[tag.Key] = tag.Value;
+                        }
+                    }
                     
                     // Keep only the most recent data points based on retention policy
                     if (points.Count > _settings.MetricDataPointsRetention)
@@ -162,6 +183,27 @@ namespace XPlain.Services
             {
                 _logger.LogError(ex, $"Error retrieving available metrics: {ex.Message}");
                 return new List<string>();
+            }
+        }
+        
+        public async Task<Dictionary<string, string>> GetMetricTagsAsync(string metricName)
+        {
+            try
+            {
+                lock (_lock)
+                {
+                    if (_metricTags.TryGetValue(metricName, out var tags))
+                    {
+                        return new Dictionary<string, string>(tags);
+                    }
+                    
+                    return new Dictionary<string, string>();
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, $"Error retrieving tags for metric {metricName}: {ex.Message}");
+                return new Dictionary<string, string>();
             }
         }
     }
