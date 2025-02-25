@@ -1,6 +1,8 @@
 using System;
 using System.Text;
 using System.Security.Cryptography;
+using System.Diagnostics;
+using System.Collections.Concurrent;
 using Microsoft.Extensions.Options;
 using Moq;
 using Xunit;
@@ -19,11 +21,7 @@ namespace XPlain.Tests.Services
         // Add stopwatch for performance tracking in tests
         private readonly Stopwatch _stopwatch = new Stopwatch();
 
-        // Comprehensive tests added for compression functionality:
-    // - Compression_OptimizesMemoryForExtremelyLargeData: Tests memory efficiency with very large (40MB) datasets
-    // - Compression_NonCompressibleBinaryData_HandledCorrectly: Ensures non-compressible data is handled properly
-    // - Compression_AdaptiveContentTypeDetection_CrossDataTypes: Tests content-type detection and algorithm selection
-    // - Compression_LegacyMigrationAndVersionCompatibility_WorksCorrectly: Verifies version compatibility
+        // Comprehensive tests for compression functionality
     
     public FileBasedCacheProviderTests()
         {
