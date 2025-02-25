@@ -42,6 +42,9 @@ namespace XPlain.Services
         private readonly int _minSizeForCompression;
         private readonly bool _adaptiveCompression;
         private readonly Dictionary<string, CompressionMetrics> _compressionStats;
+        private readonly List<CompressionHistoryEntry> _compressionHistory = new List<CompressionHistoryEntry>();
+        private readonly Dictionary<ContentType, CompressionMetrics> _compressionByContentType = new Dictionary<ContentType, CompressionMetrics>();
+        private ContentType _lastContentType = ContentType.Unknown;
         
         // Settings from configuration
         private readonly CacheSettings _cacheSettings;
@@ -585,6 +588,9 @@ namespace XPlain.Services
                 // Determine if this entry should be compressed
                 var shouldCompress = _compressionEnabled && originalSize >= _minSizeForCompression;
                 
+                // Detect content type first for better algorithm selection
+                var contentType = DetectContentType(serializedValue, typeof(T).Name);
+                
                 // Determine optimal compression algorithm and level for this data
                 var compressionAlgorithm = shouldCompress 
                     ? DetermineOptimalCompressionAlgorithm(originalSize, typeof(T).Name) 
@@ -593,6 +599,13 @@ namespace XPlain.Services
                 var compressionLevel = shouldCompress
                     ? DetermineOptimalCompressionLevel(originalSize, typeof(T).Name)
                     : CompressionLevel.Fastest; // Default, though not used if not compressing
+                    
+                // If adaptive compression is enabled, check for content-type specific compression level
+                if (shouldCompress && _adaptiveCompression && 
+                    _cacheSettings.ContentTypeCompressionLevelMap.TryGetValue(contentType, out var contentTypeLevel))
+                {
+                    compressionLevel = contentTypeLevel;
+                }
                 
                 // Apply compression if needed
                 byte[] compressedValue = null;
@@ -1206,6 +1219,9 @@ namespace XPlain.Services
             return entry.CacheFormatVersion < 2;
         }
         
+        /// <summary>
+        /// Migrates legacy cache entries to compressed format
+        /// </summary>
         private async Task MigrateLegacyCacheEntries()
         {
             // Skip if compression is disabled
@@ -1541,6 +1557,9 @@ namespace XPlain.Services
         }
         
         // Compression-related methods
+        /// <summary>
+        /// Compresses data using the specified algorithm and compression level
+        /// </summary>
         private byte[] CompressData(byte[] data, CompressionAlgorithm algorithm, CompressionLevel level)
         {
             if (data == null || data.Length == 0)
@@ -1630,6 +1649,9 @@ namespace XPlain.Services
             }
         }
         
+        /// <summary>
+        /// Decompresses data that was compressed with the specified algorithm
+        /// </summary>
         private byte[] DecompressData(byte[] data, CompressionAlgorithm algorithm)
         {
             if (data == null || data.Length == 0)
@@ -1711,6 +1733,9 @@ namespace XPlain.Services
             }
         }
         
+        /// <summary>
+        /// Updates compression statistics with the results of a compression or decompression operation
+        /// </summary>
         private void UpdateCompressionStats(string algorithm, long originalSize, long compressedSize, 
                                            double compressionTimeMs, double decompressionTimeMs, 
                                            bool wasCompressed = true)
@@ -1726,7 +1751,7 @@ namespace XPlain.Services
                 }
                 
                 var stats = _compressionStats[algorithm];
-                ContentType contentType = ContentType.Unknown;
+                ContentType contentType = _lastContentType;
                 
                 if (compressionTimeMs > 0)
                 {
@@ -1930,6 +1955,133 @@ namespace XPlain.Services
             }
         }
         
+        /// <summary>
+        /// Detects content type from data sample and type name
+        /// </summary>
+        private ContentType DetectContentType(byte[] data, string typeName)
+        {
+            if (data == null || data.Length < 16)
+                return ContentType.Unknown;
+                
+            // Check for common JSON pattern at the beginning of data
+            if (data.Length >= 2 && (data[0] == '{' && data[1] == '"' || data[0] == '[' && data[1] == '{'))
+            {
+                _lastContentType = ContentType.TextJson;
+                return ContentType.TextJson;
+            }
+            
+            // Check for XML declaration or root element
+            if (data.Length >= 5 && 
+                (data[0] == '<' && data[1] == '?' && data[2] == 'x' && data[3] == 'm' && data[4] == 'l') ||
+                (data[0] == '<' && data[1] != '/' && data[1] != '!' && data[1] != '?'))
+            {
+                _lastContentType = ContentType.TextXml;
+                return ContentType.TextXml;
+            }
+            
+            // Check for HTML tags
+            if (data.Length >= 14 && 
+                (string.Equals(System.Text.Encoding.ASCII.GetString(data, 0, 14), "<!DOCTYPE html", StringComparison.OrdinalIgnoreCase) ||
+                 data.Length >= 6 && string.Equals(System.Text.Encoding.ASCII.GetString(data, 0, 6), "<html>", StringComparison.OrdinalIgnoreCase)))
+            {
+                _lastContentType = ContentType.TextHtml;
+                return ContentType.TextHtml;
+            }
+            
+            // Check content using type name
+            if (!string.IsNullOrEmpty(typeName))
+            {
+                // Check for text-based content
+                if (typeName.Contains("String", StringComparison.OrdinalIgnoreCase) ||
+                    typeName.Contains("Text", StringComparison.OrdinalIgnoreCase))
+                {
+                    _lastContentType = ContentType.TextPlain;
+                    return ContentType.TextPlain;
+                }
+                
+                // Check for image data
+                if (typeName.Contains("Image", StringComparison.OrdinalIgnoreCase) ||
+                    typeName.Contains("Bitmap", StringComparison.OrdinalIgnoreCase) ||
+                    typeName.Contains("Jpeg", StringComparison.OrdinalIgnoreCase) ||
+                    typeName.Contains("Png", StringComparison.OrdinalIgnoreCase))
+                {
+                    _lastContentType = ContentType.Image;
+                    return ContentType.Image;
+                }
+                
+                // Check for binary data
+                if (typeName.Contains("Byte[]", StringComparison.OrdinalIgnoreCase) ||
+                    typeName.Contains("Binary", StringComparison.OrdinalIgnoreCase))
+                {
+                    _lastContentType = ContentType.BinaryData;
+                    return ContentType.BinaryData;
+                }
+                
+                // Check for common compressed formats
+                if (typeName.Contains("Zip", StringComparison.OrdinalIgnoreCase) ||
+                    typeName.Contains("Compressed", StringComparison.OrdinalIgnoreCase) ||
+                    typeName.Contains("Gzip", StringComparison.OrdinalIgnoreCase) ||
+                    typeName.Contains("Brotli", StringComparison.OrdinalIgnoreCase))
+                {
+                    _lastContentType = ContentType.CompressedData;
+                    return ContentType.CompressedData;
+                }
+            }
+            
+            // Check for probable text content by looking at the first 100 bytes
+            // Text content should mostly contain printable ASCII characters
+            if (data.Length >= 30)
+            {
+                int textCharCount = 0;
+                int binaryCharCount = 0;
+                int sampleSize = Math.Min(100, data.Length);
+                
+                for (int i = 0; i < sampleSize; i++)
+                {
+                    // ASCII printable chars (32-126) plus common whitespace (9, 10, 13)
+                    if ((data[i] >= 32 && data[i] <= 126) || data[i] == 9 || data[i] == 10 || data[i] == 13)
+                    {
+                        textCharCount++;
+                    }
+                    else
+                    {
+                        binaryCharCount++;
+                    }
+                }
+                
+                // If 80% or more are text characters, it's probably a text format
+                if (textCharCount >= sampleSize * 0.8)
+                {
+                    _lastContentType = ContentType.TextPlain;
+                    return ContentType.TextPlain;
+                }
+                
+                // If 60% or more are binary, it's probably binary data
+                if (binaryCharCount >= sampleSize * 0.6)
+                {
+                    _lastContentType = ContentType.BinaryData;
+                    return ContentType.BinaryData;
+                }
+            }
+            
+            // Check for compressed data signatures
+            if (data.Length >= 4 && data[0] == 0x1F && data[1] == 0x8B) // GZip signature
+            {
+                _lastContentType = ContentType.CompressedData;
+                return ContentType.CompressedData;
+            }
+            
+            if (data.Length >= 2 && data[0] == 0x50 && data[1] == 0x4B) // ZIP signature
+            {
+                _lastContentType = ContentType.CompressedData;
+                return ContentType.CompressedData;
+            }
+            
+            // Default to binary data for unknown formats
+            _lastContentType = ContentType.BinaryData;
+            return ContentType.BinaryData;
+        }
+        
         private CompressionAlgorithm DetermineOptimalCompressionAlgorithm(int dataSize, string dataType)
         {
             if (!_adaptiveCompression)
@@ -1941,6 +2093,13 @@ namespace XPlain.Services
             if (dataSize < _minSizeForCompression)
             {
                 return CompressionAlgorithm.None;
+            }
+            
+            // If we have a content type mapping available, use it
+            if (_lastContentType != ContentType.Unknown && 
+                _cacheSettings.ContentTypeAlgorithmMap.TryGetValue(_lastContentType, out var mappedAlgorithm))
+            {
+                return mappedAlgorithm;
             }
             
             // Use content-based heuristics for optimal algorithm selection
