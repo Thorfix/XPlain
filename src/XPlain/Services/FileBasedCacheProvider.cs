@@ -40,6 +40,12 @@ namespace XPlain.Services
                 ["cpu"] = 100,     // Default 100% of base allocation
                 ["storage"] = 100  // Default 100% of base allocation
             };
+            
+            // Register this instance with the metrics service if provided
+            if (_metricsService != null)
+            {
+                _ = AddEventListener(_metricsService);
+            }
         }
 
         // Simple dummy eviction policy implementation for basic functionality
@@ -155,17 +161,26 @@ namespace XPlain.Services
                 if (_cache.TryGetValue(key, out var entry))
                 {
                     stopwatch.Stop();
-                    await _metricsService.RecordQueryMetrics(key, stopwatch.ElapsedMilliseconds, !entry.IsExpired);
+                    if (_metricsService != null)
+                    {
+                        await _metricsService.RecordQueryMetrics(key, stopwatch.ElapsedMilliseconds, !entry.IsExpired);
+                    }
                     return !entry.IsExpired;
                 }
                 stopwatch.Stop();
-                await _metricsService.RecordQueryMetrics(key, stopwatch.ElapsedMilliseconds, false);
+                if (_metricsService != null)
+                {
+                    await _metricsService.RecordQueryMetrics(key, stopwatch.ElapsedMilliseconds, false);
+                }
                 return false;
             }
             catch
             {
                 stopwatch.Stop();
-                await _metricsService.RecordQueryMetrics(key, stopwatch.ElapsedMilliseconds, false);
+                if (_metricsService != null)
+                {
+                    await _metricsService.RecordQueryMetrics(key, stopwatch.ElapsedMilliseconds, false);
+                }
                 throw;
             }
         }
@@ -173,8 +188,30 @@ namespace XPlain.Services
         // Required ICacheProvider implementation
         public async Task<bool> PreWarmKey(string key, PreWarmPriority priority = PreWarmPriority.Medium)
         {
-            // Just a placeholder that returns success
-            return true;
+            try
+            {
+                // Mark as pre-warmed in access stats
+                if (!_accessStats.ContainsKey(key))
+                {
+                    _accessStats[key] = new CacheAccessStats
+                    {
+                        PreWarmCount = 1,
+                        LastAccess = DateTime.UtcNow
+                    };
+                }
+                else
+                {
+                    _accessStats[key].PreWarmCount++;
+                }
+                
+                await NotifyPreWarmListeners(key, true);
+                return true;
+            }
+            catch (Exception)
+            {
+                await NotifyPreWarmListeners(key, false);
+                return false;
+            }
         }
 
         public async Task<T> GetAsync<T>(string key)

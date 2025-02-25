@@ -28,6 +28,20 @@ public class AnthropicSettings : LLMSettings
         get => Model;
         set => Model = value;
     }
+    
+    public override void Validate()
+    {
+        base.Validate();
+        
+        if (string.IsNullOrEmpty(ApiToken))
+            throw new ValidationException("Anthropic API token is required");
+            
+        if (string.IsNullOrEmpty(ApiEndpoint))
+            throw new ValidationException("API endpoint is required");
+            
+        if (MaxTokenLimit <= 0)
+            throw new ValidationException("Maximum token limit must be greater than zero");
+    }
 
     [Range(1, 10, ErrorMessage = "Maximum retry attempts must be between 1 and 10")]
     public int MaxRetryAttempts { get; set; } = 3;

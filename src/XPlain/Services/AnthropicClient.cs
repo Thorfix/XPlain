@@ -73,7 +73,7 @@ public class AnthropicClient : BaseLLMProvider, IAnthropicClient, IDisposable
             new HttpClient(),
             rateLimitingService,
             new LLMProviderMetrics(),
-            new OptionsWrapper<LLMSettings>(settings.Value),
+            Options.Create<LLMSettings>(settings.Value),
             new DefaultInputValidator())
     {
         _settings = settings.Value;

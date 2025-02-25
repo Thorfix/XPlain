@@ -3,35 +3,6 @@ using System.ComponentModel.DataAnnotations;
 
 namespace XPlain.Configuration;
 
-[AttributeUsage(AttributeTargets.Property)]
-public class OptionGroupAttribute : Attribute
-{
-    public OptionGroup Group { get; }
-
-    public OptionGroupAttribute(OptionGroup group)
-    {
-        Group = group;
-    }
-}
-
-public enum OptionGroup
-{
-    [Description("Required options for the application")]
-    Required,
-
-    [Description("Options for controlling execution mode")]
-    ExecutionMode,
-
-    [Description("Options for controlling output")]
-    Output,
-
-    [Description("Options for configuring the LLM model")]
-    Model,
-
-    [Description("Options for cache management")]
-    Cache
-}
-
 public enum OutputFormat
 {
     Text,
@@ -39,84 +10,84 @@ public enum OutputFormat
     Markdown
 }
 
-public class CommandLineOptions
+public enum OptionGroup
 {
-    [OptionGroup(OptionGroup.Required)]
-    [Description("Path to the code directory to analyze")]
-    [Required(ErrorMessage = "Codebase path is required")]
-    public string CodebasePath { get; set; } = string.Empty;
+    [Description("Required options for the command")]
+    Required,
+    
+    [Description("Options controlling how the command executes")]
+    ExecutionMode,
+    
+    [Description("Options controlling the output format and verbosity")]
+    Output,
+    
+    [Description("Options controlling the AI model and configuration")]
+    Model
+}
 
-    [OptionGroup(OptionGroup.ExecutionMode)]
-    [Description("Direct question about the code (if not provided, enters interactive mode)")]
-    public string? DirectQuestion { get; set; }
-
-    [OptionGroup(OptionGroup.Output)]
-    [Description("Output verbosity level (0=quiet, 1=normal, 2=verbose)")]
-    [Range(0, 2, ErrorMessage = "Verbosity level must be between 0 and 2")]
-    public int VerbosityLevel { get; set; } = 1;
-
-    [OptionGroup(OptionGroup.Output)]
-    [Description("Output format (text, json, markdown)")]
-    public OutputFormat OutputFormat { get; set; } = OutputFormat.Text;
-
-    [OptionGroup(OptionGroup.Model)]
-    [Description("Path to custom configuration file")]
-    public string? ConfigPath { get; set; }
-
-    [OptionGroup(OptionGroup.Model)]
-    [Description("LLM provider to use (e.g., Anthropic)")]
-    [Required(ErrorMessage = "LLM provider is required")]
-    public string Provider { get; set; } = "Anthropic";
-
-    [OptionGroup(OptionGroup.Model)]
-    [Description("Model name to use with the selected provider")]
-    [Required(ErrorMessage = "Model name is required")]
-    public string ModelName { get; set; } = "claude-3-sonnet-20240229";
-
-    [OptionGroup(OptionGroup.Model)]
-    [Description("API key for the selected provider")]
-    public string? ApiKey { get; set; }
-
-    [OptionGroup(OptionGroup.Cache)]
-    [Description("Display cache statistics")]
-    public bool ShowCacheStats { get; set; }
-
-    [OptionGroup(OptionGroup.Output)]
-    [Description("Enable streaming responses")]
-    public bool EnableStreaming { get; set; } = false;
-
-    public bool InteractiveMode => string.IsNullOrEmpty(DirectQuestion) && !ShowCacheStats;
-
-    public void Validate()
+[AttributeUsage(AttributeTargets.Property)]
+public class OptionGroupAttribute : Attribute
+{
+    public OptionGroup Group { get; }
+    
+    public OptionGroupAttribute(OptionGroup group)
     {
-        var validationContext = new ValidationContext(this);
-        var validationResults = new List<ValidationResult>();
-        if (!Validator.TryValidateObject(this, validationContext, validationResults, true))
-        {
-            throw new OptionsValidationException("Invalid command line options", validationResults);
-        }
-
-        if (!Directory.Exists(CodebasePath))
-        {
-            throw new OptionsValidationException("Invalid codebase path", 
-                new[] { new ValidationResult("The specified codebase path does not exist", new[] { nameof(CodebasePath) }) });
-        }
-
-        if (!string.IsNullOrEmpty(ConfigPath) && !File.Exists(ConfigPath))
-        {
-            throw new OptionsValidationException("Invalid config path",
-                new[] { new ValidationResult("The specified configuration file does not exist", new[] { nameof(ConfigPath) }) });
-        }
+        Group = group;
     }
 }
 
-public class OptionsValidationException : Exception
+public class CommandLineOptions
 {
-    public IEnumerable<ValidationResult> ValidationResults { get; }
-
-    public OptionsValidationException(string message, IEnumerable<ValidationResult> validationResults)
-        : base(message)
+    [OptionGroup(OptionGroup.Required)]
+    [Description("Path to the codebase to analyze")]
+    [Required(ErrorMessage = "Codebase path is required")]
+    public string CodebasePath { get; set; }
+    
+    [OptionGroup(OptionGroup.ExecutionMode)]
+    [Description("Direct question to ask about the code (enables non-interactive mode)")]
+    public string DirectQuestion { get; set; }
+    
+    [OptionGroup(OptionGroup.Output)]
+    [Description("Format for output (text, json, markdown)")]
+    public OutputFormat OutputFormat { get; set; } = OutputFormat.Text;
+    
+    [OptionGroup(OptionGroup.Output)]
+    [Description("Verbosity level (0=quiet, 1=normal, 2=verbose)")]
+    [Range(0, 2, ErrorMessage = "Verbosity level must be between 0 and 2")]
+    public int VerbosityLevel { get; set; } = 1;
+    
+    [OptionGroup(OptionGroup.Model)]
+    [Description("Path to config file with API keys and model settings")]
+    public string ConfigPath { get; set; }
+    
+    [OptionGroup(OptionGroup.Model)]
+    [Description("Provider to use (anthropic, openai, azureopenai)")]
+    public string Provider { get; set; }
+    
+    [OptionGroup(OptionGroup.Model)]
+    [Description("Model name to use")]
+    public string ModelName { get; set; }
+    
+    [OptionGroup(OptionGroup.Model)]
+    [Description("API key to use (overrides config file)")]
+    public string ApiKey { get; set; }
+    
+    [OptionGroup(OptionGroup.ExecutionMode)]
+    [Description("Enable streaming responses in real-time")]
+    public static bool EnableStreaming { get; set; } = false;
+    
+    [OptionGroup(OptionGroup.Output)]
+    [Description("Show cache statistics")]
+    public bool ShowCacheStats { get; set; } = false;
+    
+    public bool InteractiveMode { get; set; } = true;
+    
+    public void Validate()
     {
-        ValidationResults = validationResults;
+        if (string.IsNullOrEmpty(CodebasePath))
+            throw new ValidationException("Codebase path is required");
+            
+        if (!System.IO.Directory.Exists(CodebasePath))
+            throw new ValidationException($"Directory not found: {CodebasePath}");
     }
 }
