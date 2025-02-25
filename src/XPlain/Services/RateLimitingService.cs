@@ -197,7 +197,30 @@ namespace XPlain.Services
                 var settings = GetProviderSettings(provider);
                 var limiter = _limiters.GetOrAdd(provider, key => new ProviderRateLimiter(settings, _logger));
                 
-                using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+                // Check if we're currently at or near rate limit
+                var currentMetrics = limiter.GetMetrics();
+                
+                if (currentMetrics.RequestsInCurrentWindow >= settings.RequestsPerWindow * 0.9)
+                {
+                    // We're close to the rate limit, wait for next window
+                    var timeToNextWindow = TimeSpan.FromSeconds(settings.WindowSeconds) - 
+                        (DateTime.UtcNow - currentMetrics.WindowStartTime);
+                    
+                    if (timeToNextWindow > TimeSpan.Zero && timeToNextWindow < TimeSpan.FromSeconds(settings.WindowSeconds))
+                    {
+                        try
+                        {
+                            await Task.Delay(timeToNextWindow, new CancellationTokenSource(TimeSpan.FromSeconds(5)).Token);
+                        }
+                        catch (TaskCanceledException)
+                        {
+                            return false;
+                        }
+                    }
+                }
+                
+                // Now try to acquire a permit briefly to confirm availability
+                using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(1));
                 await limiter.AcquireAsync(0, cts.Token);
                 limiter.Release();
                 return true;

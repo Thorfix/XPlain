@@ -11,6 +11,10 @@ namespace XPlain.Services
     public class FileBasedCacheProvider : ICacheProvider, ICacheEventListener
     {
         private ICacheEvictionPolicy _evictionPolicy;
+        internal CircuitBreaker CircuitBreaker => _circuitBreaker;
+        internal ICacheEvictionPolicy EvictionPolicy => _evictionPolicy;
+        internal IEncryptionProvider EncryptionProvider => null; // Not implemented
+        
         private readonly CircuitBreaker _circuitBreaker;
         private readonly MLPredictionService _mlPredictionService;
         private readonly MetricsCollectionService _metricsService;

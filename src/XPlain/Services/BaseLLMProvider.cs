@@ -190,7 +190,8 @@ namespace XPlain.Services
             {
                 try
                 {
-                    if (!await _rateLimitingService.WaitForAvailabilityAsync(ProviderName))
+                    bool available = await _rateLimitingService.WaitForAvailabilityAsync(ProviderName);
+                    if (!available)
                     {
                         throw new LLMProviderException(
                             "Rate limit exceeded", 

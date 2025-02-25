@@ -137,14 +137,12 @@ public class CacheMonitoringService : ICacheMonitoringService
         private readonly Dictionary<string, Dictionary<string, double>> _policyPerformanceHistory;
         private readonly List<PreWarmingMonitoringMetrics> _preWarmingMetrics;
         private readonly MLPredictionService _predictionService;
-        private readonly AutomaticMitigationService _mitigationService;
         private readonly System.Timers.Timer _mitigationTimer;
         private readonly Dictionary<string, PredictionThresholds> _predictionThresholds;
 
         public CacheMonitoringService(
             ICacheProvider cacheProvider,
-            MLPredictionService predictionService,
-            AutomaticMitigationService mitigationService)
+            MLPredictionService predictionService = null)
         {
             _cacheProvider = cacheProvider;
             _activeAlerts = new List<CacheAlert>();
@@ -173,9 +171,8 @@ public class CacheMonitoringService : ICacheMonitoringService
             _policySwitchHistory = new Dictionary<string, List<PolicySwitchEvent>>();
             _policyPerformanceHistory = new Dictionary<string, Dictionary<string, double>>();
             _preWarmingMetrics = new List<PreWarmingMonitoringMetrics>();
-            _predictionService = predictionService;
-            _mitigationService = mitigationService;
-
+            _predictionService = predictionService ?? new MLPredictionService();
+            
             // Setup automatic mitigation timer
             _mitigationTimer = new System.Timers.Timer(30000); // Check every 30 seconds
             _mitigationTimer.Elapsed += async (sender, e) => await CheckAndApplyMitigations();
@@ -186,10 +183,14 @@ public class CacheMonitoringService : ICacheMonitoringService
         {
             try
             {
-                var predictions = await _predictionService.PredictPerformanceMetrics();
-                if (ShouldApplyMitigations(predictions))
+                // Simple implementation without dependency on mitigationService
+                var stats = _cacheProvider.GetCacheStats();
+                if (stats.HitRatio < 0.5)
                 {
-                    await _mitigationService.ApplyMitigations();
+                    await CreateAlertAsync(
+                        "LowHitRate",
+                        $"Cache hit rate is low: {stats.HitRatio:P2}",
+                        "Warning");
                 }
             }
             catch (Exception ex)
@@ -197,25 +198,27 @@ public class CacheMonitoringService : ICacheMonitoringService
                 // Log error but don't stop monitoring
                 await CreateAlertAsync(
                     "MitigationError",
-                    $"Error during automatic mitigation: {ex.Message}",
+                    $"Error during automatic monitoring: {ex.Message}",
                     "Warning");
             }
         }
 
-        private bool ShouldApplyMitigations(Dictionary<string, PredictionResult> predictions)
+        private bool ShouldApplyMitigations(Dictionary<string, double> metrics)
         {
-            foreach (var (metric, prediction) in predictions)
-            {
-                if (prediction.Confidence < 0.7) continue; // Only act on high-confidence predictions
-
-                switch (metric.ToLower())
-                {
-                    case "cachehitrate" when prediction.Value < _thresholds.MinHitRatio:
-                    case "memoryusage" when prediction.Value > _thresholds.MaxMemoryUsageMB * 0.9:
-                    case "averageresponsetime" when prediction.Value > _thresholds.MaxResponseTimeMs * 0.9:
-                        return true;
-                }
-            }
+            if (metrics == null) return false;
+            
+            if (metrics.TryGetValue("CacheHitRate", out var hitRate) && 
+                hitRate < _thresholds.HitRateWarningThreshold)
+                return true;
+                
+            if (metrics.TryGetValue("MemoryUsage", out var memUsage) && 
+                memUsage > _thresholds.MemoryUsageWarningThreshold)
+                return true;
+                
+            if (metrics.TryGetValue("AverageResponseTime", out var respTime) && 
+                respTime > _thresholds.ResponseTimeWarningThresholdMs)
+                return true;
+                
             return false;
         }
 
@@ -225,9 +228,17 @@ public class CacheMonitoringService : ICacheMonitoringService
             base.Dispose();
         }
 
-        public async Task<Dictionary<string, PredictionResult>> GetPerformancePredictionsAsync()
+        public async Task<Dictionary<string, double>> GetPerformancePredictionsAsync()
         {
-            return await _predictionService.PredictPerformanceMetrics();
+            // Simple implementation without ML predictions
+            var stats = _cacheProvider.GetCacheStats();
+            
+            return new Dictionary<string, double>
+            {
+                ["HitRate"] = stats.HitRatio,
+                ["ResponseTime"] = stats.AverageResponseTimes.Values.DefaultIfEmpty(0).Average(),
+                ["MemoryUsage"] = stats.StorageUsageBytes / (1024.0 * 1024.0)
+            };
         }
 
         public async Task<Dictionary<string, PredictionThresholds>> GetPredictionThresholdsAsync()
@@ -434,36 +445,14 @@ public class CacheMonitoringService : ICacheMonitoringService
 
         public async Task<Dictionary<string, double>> GetPerformanceMetricsAsync()
         {
+            var stats = _cacheProvider.GetCacheStats();
             var metrics = new Dictionary<string, double>();
             
             // Get basic metrics
-            metrics["AverageResponseTime"] = (await GetQueryPerformanceAsync())
-                .Values
-                .Average(p => p.AverageResponseTime);
-            
-            metrics["CacheHitRate"] = await GetCurrentHitRatioAsync();
-            metrics["MemoryUsage"] = await GetMemoryUsageAsync();
-            
-            // Add pre-warming metrics
-            var preWarmMetrics = await GetAggregatePreWarmingMetrics(TimeSpan.FromHours(24));
-            metrics["PreWarmSuccessRate"] = preWarmMetrics.SuccessRate;
-            metrics["PreWarmResourceUsage"] = preWarmMetrics.AverageResourceUsage;
-            metrics["PreWarmCacheHitImprovement"] = preWarmMetrics.CacheHitImprovementPercent;
-            metrics["PreWarmResponseTimeImprovement"] = preWarmMetrics.AverageResponseTimeImprovement;
-            
-            // Get adaptive policy metrics
-            if (_cacheProvider is FileBasedCacheProvider provider)
-            {
-                var policy = provider.EvictionPolicy as AdaptiveCacheEvictionPolicy;
-                if (policy != null)
-                {
-                    var policyMetrics = policy.GetPolicyMetrics();
-                    foreach (var (key, value) in policyMetrics)
-                    {
-                        metrics[$"adaptive_policy_{key}"] = value;
-                    }
-                }
-            }
+            metrics["AverageResponseTime"] = stats.AverageResponseTimes.Values.DefaultIfEmpty(0).Average();
+            metrics["CacheHitRate"] = stats.HitRatio;
+            metrics["MemoryUsage"] = stats.StorageUsageBytes / (1024.0 * 1024.0);
+            metrics["CachedItems"] = stats.CachedItemCount;
             
             // Calculate trend metrics
             metrics["policy_switch_frequency"] = CalculatePolicySwitchFrequency();
@@ -472,40 +461,30 @@ public class CacheMonitoringService : ICacheMonitoringService
             return metrics;
         }
 
-        public async Task<double> GetCurrentHitRatioAsync()
-        {
-            // Implementation to calculate hit ratio
-            return 0.8;
-        }
 
-        public async Task<Dictionary<string, CachePerformanceMetrics>> GetQueryPerformanceAsync()
-        {
-            // Implementation to get query performance metrics
-            throw new NotImplementedException();
-        }
-
-        public async Task<double> GetMemoryUsageAsync()
-        {
-            // Implementation to get memory usage
-            return 500;
-        }
-
-        public async Task<long> GetStorageUsageAsync()
-        {
-            // Implementation to get storage usage
-            return 1000000;
-        }
-
-        public async Task<int> GetCachedItemCountAsync()
-        {
-            // Implementation to get cached item count
-            return 1000;
-        }
 
         public async Task<List<CacheAnalytics>> GetAnalyticsHistoryAsync(TimeSpan period)
         {
-            // Implementation to get analytics history
-            throw new NotImplementedException();
+            var cacheProvider = _cacheProvider as FileBasedCacheProvider;
+            if (cacheProvider != null)
+            {
+                var analytics = await cacheProvider.GetAnalyticsHistoryAsync(DateTime.UtcNow - period);
+                
+                return analytics.Select(a => new CacheAnalytics 
+                {
+                    Timestamp = a.Timestamp,
+                    Stats = a.Stats,
+                    MemoryUsageMB = a.MemoryUsageMB,
+                    CpuUsagePercent = 0, // Not available in original data
+                    CustomMetrics = new Dictionary<string, object>
+                    {
+                        ["QueryCount"] = a.QueryCount
+                    }
+                }).ToList();
+            }
+            
+            // Return empty list if not available
+            return new List<CacheAnalytics>();
         }
 
         public async Task<List<string>> GetOptimizationRecommendationsAsync()
@@ -560,11 +539,54 @@ public class CacheMonitoringService : ICacheMonitoringService
 
         public async Task<string> GeneratePerformanceReportAsync(string format)
         {
-            // Implementation to generate performance report
-            throw new NotImplementedException();
+            var stats = _cacheProvider.GetCacheStats();
+            var metrics = await GetPerformanceMetricsAsync();
+            
+            switch (format.ToLower())
+            {
+                case "json":
+                    return System.Text.Json.JsonSerializer.Serialize(new
+                    {
+                        Metrics = metrics,
+                        CacheStats = stats,
+                        GeneratedAt = DateTime.UtcNow,
+                        ActiveAlerts = _activeAlerts.Count
+                    }, new System.Text.Json.JsonSerializerOptions { WriteIndented = true });
+                    
+                case "markdown":
+                    var md = new System.Text.StringBuilder();
+                    md.AppendLine("# Cache Performance Report");
+                    md.AppendLine($"Generated at: {DateTime.UtcNow:yyyy-MM-dd HH:mm:ss} UTC\n");
+                    
+                    md.AppendLine("## Cache Statistics");
+                    md.AppendLine($"- Hit Ratio: {stats.HitRatio:P2}");
+                    md.AppendLine($"- Cache Hits: {stats.Hits}");
+                    md.AppendLine($"- Cache Misses: {stats.Misses}");
+                    md.AppendLine($"- Cached Items: {stats.CachedItemCount}");
+                    md.AppendLine($"- Storage Usage: {stats.StorageUsageBytes / (1024.0 * 1024.0):F2} MB");
+                    md.AppendLine($"- Active Alerts: {_activeAlerts.Count}");
+                    
+                    md.AppendLine("\n## Performance Metrics");
+                    foreach (var (key, value) in metrics)
+                    {
+                        md.AppendLine($"- {key}: {value:F2}");
+                    }
+                    
+                    return md.ToString();
+                    
+                default:
+                    return $"Cache Performance Report\n" +
+                           $"Generated at: {DateTime.UtcNow:yyyy-MM-dd HH:mm:ss} UTC\n\n" +
+                           $"Hit Ratio: {stats.HitRatio:P2}\n" +
+                           $"Cache Hits: {stats.Hits}\n" +
+                           $"Cache Misses: {stats.Misses}\n" +
+                           $"Cached Items: {stats.CachedItemCount}\n" +
+                           $"Storage Usage: {stats.StorageUsageBytes / (1024.0 * 1024.0):F2} MB\n" +
+                           $"Active Alerts: {_activeAlerts.Count}";
+            }
         }
 
-        public async Task<CacheAlert> CreateAlertAsync(string type, string message, string severity, Dictionary<string, object>? metadata = null)
+        public async Task<bool> CreateAlertAsync(string type, string message, string severity, Dictionary<string, object>? metadata = null)
         {
             var alert = new CacheAlert
             {
@@ -575,7 +597,7 @@ public class CacheMonitoringService : ICacheMonitoringService
             };
 
             _activeAlerts.Add(alert);
-            return alert;
+            return true;
         }
 
         public async Task<bool> ResolveAlertAsync(string alertId)
