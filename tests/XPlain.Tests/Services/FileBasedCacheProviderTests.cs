@@ -29,7 +29,17 @@ namespace XPlain.Tests.Services
                 EncryptionAlgorithm = "AES",
                 CacheExpirationHours = 24,
                 AllowUnencryptedLegacyFiles = false,
-                CodebasePath = _testDirectory
+                CodebasePath = _testDirectory,
+                // Enable compression by default for tests
+                CompressionEnabled = true,
+                CompressionAlgorithm = CompressionAlgorithm.GZip,
+                CompressionLevel = CompressionLevel.Optimal,
+                MinSizeForCompressionBytes = 1024, // 1KB threshold
+                AdaptiveCompression = true,
+                ContentTypeAlgorithmMap = new Dictionary<ContentType, CompressionAlgorithm> {
+                    { ContentType.TextJson, CompressionAlgorithm.Brotli },
+                    { ContentType.TextPlain, CompressionAlgorithm.GZip }
+                }
             };
 
             _llmProviderMock = new Mock<ILLMProvider>();
