@@ -1,87 +1,56 @@
 using System;
-using System.Threading;
+using System.Collections.Generic;
+using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 
 namespace XPlain.Services
 {
-    public enum CircuitState
-    {
-        Closed,     // Normal operation - requests flow through
-        Open,       // Failing - requests are blocked
-        HalfOpen    // Testing - limited requests allowed
-    }
-
     public class CircuitBreaker
     {
         private readonly int _maxFailures;
         private readonly TimeSpan _resetTimeout;
-        private volatile CircuitState _state = CircuitState.Closed;
         private int _failureCount;
-        private DateTime _lastStateChange = DateTime.UtcNow;
-        private DateTime _nextRetryTime = DateTime.MaxValue;
+        private DateTime _lastFailure = DateTime.MinValue;
         private readonly object _syncLock = new();
+        private bool _isOpen;
 
-        public CircuitBreaker(
-            int maxFailures = 3, 
-            TimeSpan? resetTimeout = null)
+        public CircuitBreaker(int maxFailures = 3, TimeSpan? resetTimeout = null)
         {
-            _maxFailures = maxFailures > 0 ? maxFailures : throw new ArgumentOutOfRangeException(nameof(maxFailures));
-            _resetTimeout = resetTimeout ?? TimeSpan.FromMinutes(1);
+            _maxFailures = maxFailures;
+            _resetTimeout = resetTimeout ?? TimeSpan.FromMinutes(5);
         }
 
-        public CircuitBreaker(
-            double failureThreshold = 0.7,
-            int resetTimeoutMs = 30000)
+        public CircuitBreaker(double failureThreshold, int resetTimeoutMs)
         {
-            _maxFailures = (int)Math.Max(1, Math.Ceiling(10 * failureThreshold));
+            _maxFailures = (int)(1.0 / (1.0 - failureThreshold));
             _resetTimeout = TimeSpan.FromMilliseconds(resetTimeoutMs);
-        }
-
-        public CircuitState CurrentState => _state;
-        public int FailureCount => _failureCount;
-        public DateTime LastStateChange => _lastStateChange;
-        public DateTime NextRetryTime => _nextRetryTime;
-
-        public bool IsAllowed()
-        {
-            return CanProcess();
         }
 
         public bool CanProcess()
         {
             lock (_syncLock)
             {
-                switch (_state)
+                if (_isOpen && DateTime.UtcNow - _lastFailure > _resetTimeout)
                 {
-                    case CircuitState.Closed:
-                        return true;
-
-                    case CircuitState.Open:
-                        if (DateTime.UtcNow >= _nextRetryTime)
-                        {
-                            TransitionToHalfOpen();
-                            return true;
-                        }
-                        return false;
-
-                    case CircuitState.HalfOpen:
-                        return true;
-
-                    default:
-                        return false;
+                    // Auto-reset after timeout
+                    _isOpen = false;
+                    _failureCount = 0;
                 }
+                return !_isOpen;
             }
+        }
+
+        public bool IsAllowed()
+        {
+            return CanProcess();
         }
 
         public void RecordSuccess()
         {
             lock (_syncLock)
             {
-                switch (_state)
-                {
-                    case CircuitState.HalfOpen:
-                        Reset();
-                        break;
-                }
+                _failureCount = 0;
+                _isOpen = false;
             }
         }
 
@@ -89,26 +58,13 @@ namespace XPlain.Services
         {
             lock (_syncLock)
             {
-                switch (_state)
+                _failureCount++;
+                _lastFailure = DateTime.UtcNow;
+                if (_failureCount >= _maxFailures)
                 {
-                    case CircuitState.Closed:
-                        _failureCount++;
-                        if (_failureCount >= _maxFailures)
-                        {
-                            TransitionToOpen();
-                        }
-                        break;
-
-                    case CircuitState.HalfOpen:
-                        TransitionToOpen();
-                        break;
+                    _isOpen = true;
                 }
             }
-        }
-
-        public void OnFailure()
-        {
-            RecordFailure();
         }
 
         public void OnSuccess()
@@ -116,25 +72,9 @@ namespace XPlain.Services
             RecordSuccess();
         }
 
-        private void TransitionToOpen()
+        public void OnFailure()
         {
-            _state = CircuitState.Open;
-            _lastStateChange = DateTime.UtcNow;
-            _nextRetryTime = DateTime.UtcNow.Add(_resetTimeout);
-        }
-
-        private void TransitionToHalfOpen()
-        {
-            _state = CircuitState.HalfOpen;
-            _lastStateChange = DateTime.UtcNow;
-        }
-
-        private void Reset()
-        {
-            _state = CircuitState.Closed;
-            _failureCount = 0;
-            _lastStateChange = DateTime.UtcNow;
-            _nextRetryTime = DateTime.MaxValue;
+            RecordFailure();
         }
     }
 }

@@ -16,12 +16,9 @@ namespace XPlain.Services
         IEnumerable<CacheEvictionEvent> GetRecentEvictions(int count);
     }
 
-    public enum EvictionStrategy
+    public class CacheEvictionEvent
     {
-        LRU,
-        LFU,
-        HitRateWeighted,
-        SizeWeighted,
-        Adaptive
+        public string Reason { get; set; }
+        public DateTime Timestamp { get; set; } = DateTime.UtcNow;
     }
 }

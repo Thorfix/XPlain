@@ -1120,7 +1120,8 @@ file class Program
             configuration.GetSection("Streaming").Bind(streamingSettings);
             services.AddSingleton(Options.Create(streamingSettings));
             
-            // Register LLMProviderMetrics to track performance - already registered above
+            // Register LLMProviderMetrics to track performance
+            services.AddSingleton<LLMProviderMetrics>();
             
             // Configure ML model monitoring and alerting
             services.AddSingleton<IModelPerformanceMonitor, ModelPerformanceMonitor>();

@@ -5,13 +5,13 @@ namespace XPlain.Services
 {
     public class Logger<T> : ILogger<T>
     {
-        private readonly ILoggerFactory _loggerFactory;
+        private readonly ILoggerFactory _factory;
         private readonly ILogger _logger;
 
-        public Logger(ILoggerFactory loggerFactory)
+        public Logger(ILoggerFactory factory)
         {
-            _loggerFactory = loggerFactory;
-            _logger = _loggerFactory.CreateLogger<T>();
+            _factory = factory ?? throw new ArgumentNullException(nameof(factory));
+            _logger = _factory.CreateLogger<T>();
         }
 
         public IDisposable BeginScope<TState>(TState state)

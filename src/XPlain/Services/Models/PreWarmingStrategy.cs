@@ -3,14 +3,6 @@ using System.Collections.Generic;
 
 namespace XPlain.Services
 {
-    public enum PreWarmPriority
-    {
-        Low,
-        Medium,
-        High,
-        Critical
-    }
-
     public class PreWarmingStrategy
     {
         public Dictionary<string, PreWarmPriority> KeyPriorities { get; set; } = new();

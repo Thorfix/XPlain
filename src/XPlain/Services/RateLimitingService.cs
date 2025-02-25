@@ -209,6 +209,45 @@ namespace XPlain.Services
             }
         }
 
+        private class PriorityQueue<TValue, TPriority>
+        {
+            private readonly List<(TValue Value, TPriority Priority)> _items = new();
+            
+            public int Count => _items.Count;
+            
+            public void Enqueue(TValue value, TPriority priority)
+            {
+                _items.Add((value, priority));
+                _items.Sort((a, b) => Comparer<TPriority>.Default.Compare(a.Priority, b.Priority));
+            }
+            
+            public bool TryPeek(out TValue value, out TPriority priority)
+            {
+                if (_items.Count == 0)
+                {
+                    value = default;
+                    priority = default;
+                    return false;
+                }
+                
+                value = _items[0].Value;
+                priority = _items[0].Priority;
+                return true;
+            }
+            
+            public TValue Dequeue()
+            {
+                if (_items.Count == 0)
+                {
+                    throw new InvalidOperationException("Queue is empty");
+                }
+                
+                var result = _items[0].Value;
+                _items.RemoveAt(0);
+                return result;
+            }
+        }
+
         private class ProviderRateLimiter
         {
             private readonly SemaphoreSlim _concurrencyLimiter;
@@ -220,7 +259,7 @@ namespace XPlain.Services
             private int _totalRequests;
             private int _rateLimitErrors;
 
-            public ProviderRateLimiter(RateLimitSettings settings)
+            public ProviderRateLimiter(RateLimitSettings settings, ILogger<RateLimitingService> logger)
             {
                 _settings = settings;
                 _concurrencyLimiter = new SemaphoreSlim(settings.MaxConcurrentRequests);

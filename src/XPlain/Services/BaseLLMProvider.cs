@@ -59,6 +59,23 @@ namespace XPlain.Services
                 resetTimeout: TimeSpan.FromMinutes(5));
         }
 
+        // Default constructor for testing
+        protected BaseLLMProvider()
+        {
+            _logger = new Logger<BaseLLMProvider>(new LoggerFactory());
+            _httpClient = new HttpClient();
+            _rateLimitingService = new RateLimitingService(
+                Options.Create(new RateLimitSettings()), 
+                new Logger<RateLimitingService>(new LoggerFactory()));
+            _metrics = new LLMProviderMetrics();
+            _timeout = TimeSpan.FromSeconds(30);
+            _inputValidator = new DefaultInputValidator();
+            
+            _circuitBreaker = new CircuitBreaker(
+                maxFailures: 3,
+                resetTimeout: TimeSpan.FromMinutes(5));
+        }
+
         public abstract string ProviderName { get; }
         public abstract string ModelName { get; }
 

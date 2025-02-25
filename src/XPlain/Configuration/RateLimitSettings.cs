@@ -1,20 +1,42 @@
+using System.Collections.Generic;
+using System.ComponentModel.DataAnnotations;
+
 namespace XPlain.Configuration
 {
     public class RateLimitSettings
     {
-        public int RequestsPerWindow { get; set; } = 50;
+        [Range(1, 1000)]
+        public int RequestsPerWindow { get; set; } = 60;
+        
+        [Range(1, 3600)]
         public int WindowSeconds { get; set; } = 60;
-        public int MaxConcurrentRequests { get; set; } = 5;
+        
+        [Range(1, 100)]
+        public int MaxConcurrentRequests { get; set; } = 10;
+        
+        [Range(0, 10)]
         public int DefaultRetryCount { get; set; } = 3;
+        
+        [Range(100, 10000)]
         public int InitialRetryDelayMs { get; set; } = 1000;
-        public double MaxRetryDelayMs { get; set; } = 32000; // Max delay between retries
-        public double RetryBackoffMultiplier { get; set; } = 2.0; // Exponential backoff multiplier
-        public decimal CostPerRequest { get; set; } = 0.01M; // Default cost per request in USD
-        public decimal DailyCostLimit { get; set; } = 50.0M; // Daily cost limit in USD
-        public Dictionary<string, ProviderSettings> ProviderSpecificSettings { get; set; } = new();
-    }
+        
+        [Range(1000, 300000)]
+        public int MaxRetryDelayMs { get; set; } = 30000;
+        
+        [Range(1.1, 5.0)]
+        public double RetryBackoffMultiplier { get; set; } = 2.0;
 
-    public class ProviderSettings
+        [Range(0.001, 100.0)]
+        public decimal CostPerRequest { get; set; } = 0.01m;
+        
+        [Range(0.01, 1000.0)]
+        public decimal DailyCostLimit { get; set; } = 10.0m;
+        
+        public Dictionary<string, ProviderRateLimitSettings> ProviderSpecificSettings { get; set; } 
+            = new Dictionary<string, ProviderRateLimitSettings>();
+    }
+    
+    public class ProviderRateLimitSettings
     {
         public int? RequestsPerWindow { get; set; }
         public int? WindowSeconds { get; set; }

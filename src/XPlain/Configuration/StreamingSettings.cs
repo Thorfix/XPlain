@@ -1,24 +1,19 @@
-namespace XPlain.Configuration;
+using System.ComponentModel.DataAnnotations;
 
-public class StreamingSettings
+namespace XPlain.Configuration
 {
-    /// <summary>
-    /// Whether streaming is enabled by default
-    /// </summary>
-    public bool EnableStreamingByDefault { get; set; } = false;
-
-    /// <summary>
-    /// Maximum timeout for streaming connections in seconds
-    /// </summary>
-    public int StreamingTimeoutSeconds { get; set; } = 30;
-
-    /// <summary>
-    /// Number of retry attempts for failed streaming connections
-    /// </summary>
-    public int MaxStreamingRetries { get; set; } = 3;
-
-    /// <summary>
-    /// Initial delay between retries in milliseconds
-    /// </summary>
-    public int InitialRetryDelayMs { get; set; } = 1000;
+    public class StreamingSettings
+    {
+        [Required]
+        public bool EnableStreamingByDefault { get; set; }
+        
+        [Range(5, 300)]
+        public int StreamingTimeoutSeconds { get; set; } = 30;
+        
+        [Range(0, 10)]
+        public int MaxStreamingRetries { get; set; } = 3;
+        
+        [Range(100, 10000)]
+        public int InitialRetryDelayMs { get; set; } = 1000;
+    }
 }

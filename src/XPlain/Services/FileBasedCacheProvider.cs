@@ -30,7 +30,7 @@ namespace XPlain.Services
             _evictionPolicy = new DummyEvictionPolicy();
             _mlPredictionService = mlPredictionService;
             _metricsService = metricsService;
-            _circuitBreaker = new CircuitBreaker();
+            _circuitBreaker = new CircuitBreaker(3, TimeSpan.FromMinutes(5));
             MaintenanceLogs = new List<MaintenanceLogEntry>();
             _cache = new Dictionary<string, CacheEntry>();
             _accessStats = new Dictionary<string, CacheAccessStats>();

@@ -15,7 +15,7 @@ namespace XPlain.Configuration
         public string ApiKey { get; set; }
         
         [Range(5, 300, ErrorMessage = "Timeout must be between 5 and 300 seconds")]
-        public int TimeoutSeconds { get; set; } = 30;
+        public virtual int TimeoutSeconds { get; set; } = 30;
         
         public LLMFallbackSettings Fallback { get; set; }
         
