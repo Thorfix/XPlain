@@ -194,6 +194,24 @@ namespace XPlain.Services
                             // Apply the new resource limits
                             ApplyResourceLimit(resource, limit);
                             
+                            // Update compression settings based on resource limits
+                            if (resource.Equals("cpu", StringComparison.OrdinalIgnoreCase) && 
+                                _compressionEnabled && _adaptiveCompression)
+                            {
+                                // If CPU resource is constrained, adjust compression level
+                                if (limit < 50)
+                                {
+                                    // Under heavy CPU constraints, use fastest compression
+                                    _compressionLevel = CompressionLevel.Fastest;
+                                }
+                                else if (limit < 80)
+                                {
+                                    // Under moderate CPU constraints, use optimal compression
+                                    _compressionLevel = CompressionLevel.Optimal;
+                                }
+                                // Otherwise keep current compression level
+                            }
+                            
                             MaintenanceLogs.Add(new MaintenanceLogEntry
                             {
                                 Operation = "ResourceAllocation",
@@ -1770,25 +1788,43 @@ namespace XPlain.Services
                     return data;
                 
                 using var inputStream = new MemoryStream(data);
-                using var outputStream = new MemoryStream();
                 
-                // Use buffer for more efficient memory usage during decompression
-                byte[] buffer = null;
+                // Estimate output size to pre-allocate memory and improve efficiency
+                // Most text-based formats compress to ~25-30% of original size, so multiply by 4 for a safe estimate
+                // Cap at 100MB to prevent excessive memory allocation
+                var estimatedOutputSize = Math.Min(data.Length * 4, 100 * 1024 * 1024);
+                
+                // For very small data, use a more modest estimate
+                if (data.Length < 1024)
+                    estimatedOutputSize = 4096;
+                else if (data.Length < 10 * 1024)
+                    estimatedOutputSize = data.Length * 10;
+                
+                using var outputStream = new MemoryStream(estimatedOutputSize);
+                
+                // Always use buffer for more efficient memory usage during decompression
+                int bufferSize;
                 
                 // Optimize buffer size based on compressed data size
                 if (data.Length > 1024 * 1024) // > 1MB
                 {
-                    buffer = new byte[81920]; // 80KB buffer for large data
+                    bufferSize = 81920; // 80KB buffer for large data
                 }
                 else if (data.Length > 100 * 1024) // > 100KB
                 {
-                    buffer = new byte[32768]; // 32KB buffer for medium data
+                    bufferSize = 32768; // 32KB buffer for medium data
                 }
                 else if (data.Length > 10 * 1024) // > 10KB
                 {
-                    buffer = new byte[8192]; // 8KB buffer for small data
+                    bufferSize = 8192; // 8KB buffer for small data
                 }
-                // For very small data, let the CopyTo method handle buffer allocation
+                else
+                {
+                    bufferSize = 4096; // 4KB buffer for small data
+                }
+                
+                // Always use a buffer for controlled memory usage
+                var buffer = new byte[bufferSize];
                 
                 switch (algorithm)
                 {
@@ -2305,7 +2341,7 @@ namespace XPlain.Services
         
         private CompressionAlgorithm DetermineOptimalCompressionAlgorithm(int dataSize, string dataType)
         {
-            if (!_adaptiveCompression)
+            if (!_compressionEnabled || !_adaptiveCompression)
             {
                 return _compressionAlgorithm;
             }
@@ -2314,6 +2350,14 @@ namespace XPlain.Services
             if (dataSize < _minSizeForCompression)
             {
                 return CompressionAlgorithm.None;
+            }
+            
+            // First attempt a quick content type detection by analyzing the data
+            byte[] sampleBytes = null;
+            if (_lastContentType == ContentType.Unknown && typeof(byte[]).Name == dataType)
+            {
+                // If we have byte array data, we might be able to inspect it directly
+                // This would be handled by DetectContentType below when it's called with actual data
             }
             
             // If we have a content type mapping available, use it
@@ -2346,10 +2390,33 @@ namespace XPlain.Services
                 dataType?.Contains("video", StringComparison.OrdinalIgnoreCase) == true ||
                 dataType?.Contains("audio", StringComparison.OrdinalIgnoreCase) == true ||
                 dataType?.Contains("zip", StringComparison.OrdinalIgnoreCase) == true ||
-                dataType?.Contains("compressed", StringComparison.OrdinalIgnoreCase) == true)
+                dataType?.Contains("compressed", StringComparison.OrdinalIgnoreCase) == true ||
+                dataType?.Contains("jpg", StringComparison.OrdinalIgnoreCase) == true ||
+                dataType?.Contains("png", StringComparison.OrdinalIgnoreCase) == true ||
+                dataType?.Contains("gif", StringComparison.OrdinalIgnoreCase) == true ||
+                dataType?.Contains("mp3", StringComparison.OrdinalIgnoreCase) == true ||
+                dataType?.Contains("mp4", StringComparison.OrdinalIgnoreCase) == true)
             {
                 // Binary formats like images/videos are often already compressed, skip compression
                 return CompressionAlgorithm.None;
+            }
+            
+            // Check CPU usage if available to further tune algorithm selection
+            if (_metricsService != null)
+            {
+                try
+                {
+                    var cpuMetric = _metricsService.GetCustomMetric("cpu_usage_percent");
+                    if (cpuMetric != null && cpuMetric.LastValue > 70)
+                    {
+                        // Under high CPU load, favor GZip which is generally faster
+                        return CompressionAlgorithm.GZip;
+                    }
+                }
+                catch
+                {
+                    // Ignore metrics errors and continue with regular selection
+                }
             }
             
             // Check compression stats to make a data-driven decision
@@ -2362,34 +2429,42 @@ namespace XPlain.Services
                 var gzipTime = _compressionStats["GZip"].AverageCompressionTimeMs;
                 var brotliTime = _compressionStats["Brotli"].AverageCompressionTimeMs;
                 
-                // If Brotli is significantly better in compression ratio (>15% better)
-                if (brotliEfficiency < gzipEfficiency * 0.85)
+                // Calculate efficiency scores that balance compression ratio and CPU cost
+                var gzipScore = (1 - gzipEfficiency) * (100.0 / Math.Max(1.0, gzipTime));
+                var brotliScore = (1 - brotliEfficiency) * (100.0 / Math.Max(1.0, brotliTime));
+                
+                // Choose algorithm with better overall efficiency
+                if (brotliScore > gzipScore * 1.1) // Brotli is at least 10% more efficient
                 {
                     return CompressionAlgorithm.Brotli;
                 }
-                
-                // If both are similar but GZip is much faster
-                if (brotliEfficiency >= gzipEfficiency * 0.85 && gzipTime < brotliTime * 0.7)
+                else if (gzipScore > brotliScore * 1.1) // GZip is at least 10% more efficient
                 {
                     return CompressionAlgorithm.GZip;
                 }
                 
-                // If GZip is only slightly worse but much faster
-                if (brotliEfficiency < gzipEfficiency && brotliEfficiency >= gzipEfficiency * 0.9 && 
-                    gzipTime < brotliTime * 0.5)
+                // If efficiency is similar but one algorithm is much faster
+                if (Math.Abs(brotliScore - gzipScore) / Math.Max(brotliScore, gzipScore) < 0.1)
                 {
-                    return CompressionAlgorithm.GZip;
+                    return gzipTime < brotliTime ? CompressionAlgorithm.GZip : CompressionAlgorithm.Brotli;
                 }
                 
-                // Default to the better ratio algorithm
-                return brotliEfficiency < gzipEfficiency ? CompressionAlgorithm.Brotli : CompressionAlgorithm.GZip;
+                // Default to the better efficiency score
+                return brotliScore > gzipScore ? CompressionAlgorithm.Brotli : CompressionAlgorithm.GZip;
             }
             
             // Data size based decisions when we don't have enough stats
             
-            // For very large data, favor compression ratio (Brotli)
+            // For very large data, favor compression ratio (Brotli) unless CPU is constrained
             if (dataSize > 5 * 1024 * 1024) // > 5MB
             {
+                // For extremely large data, check available memory
+                if (dataSize > 20 * 1024 * 1024) // > 20MB
+                {
+                    // For huge data, use GZip which typically uses less memory
+                    return CompressionAlgorithm.GZip;
+                }
+                
                 return CompressionAlgorithm.Brotli;
             }
             
@@ -2399,11 +2474,26 @@ namespace XPlain.Services
                 // Analyze a sample of the data to determine if it's likely compressible
                 if (dataType?.Contains("object", StringComparison.OrdinalIgnoreCase) == true ||
                     dataType?.Contains("dictionary", StringComparison.OrdinalIgnoreCase) == true ||
-                    dataType?.Contains("array", StringComparison.OrdinalIgnoreCase) == true)
+                    dataType?.Contains("array", StringComparison.OrdinalIgnoreCase) == true ||
+                    dataType?.Contains("list", StringComparison.OrdinalIgnoreCase) == true)
                 {
-                    // These are likely complex data structures serialized to JSON
+                    // These are likely complex data structures serialized to JSON or similar
                     return CompressionAlgorithm.Brotli;
                 }
+            }
+            
+            // Check memory constraints - if memory is tight, favor GZip which uses less memory
+            try
+            {
+                var availableMemoryMB = GC.GetGCMemoryInfo().TotalAvailableMemoryBytes / (1024 * 1024);
+                if (availableMemoryMB < 200) // Less than 200 MB available
+                {
+                    return CompressionAlgorithm.GZip;
+                }
+            }
+            catch
+            {
+                // Ignore memory check errors and continue
             }
             
             // Default to GZip for balanced performance/compression ratio
@@ -2412,19 +2502,24 @@ namespace XPlain.Services
         
         private CompressionLevel DetermineOptimalCompressionLevel(int dataSize, string dataType)
         {
-            if (!_adaptiveCompression)
+            if (!_compressionEnabled || !_adaptiveCompression)
             {
                 return _compressionLevel;
             }
             
             // Check CPU load if we have resource monitoring
             bool highCpuLoad = false;
+            bool moderateCpuLoad = false;
+            double cpuLoad = 0;
+            
             if (_metricsService != null)
             {
                 try
                 {
-                    var cpuLoad = _metricsService.GetCustomMetric("cpu_usage_percent")?.LastValue ?? 0;
+                    var cpuMetric = _metricsService.GetCustomMetric("cpu_usage_percent");
+                    cpuLoad = cpuMetric?.LastValue ?? 0;
                     highCpuLoad = cpuLoad > 80; // Consider CPU load high if > 80%
+                    moderateCpuLoad = cpuLoad > 60; // Consider CPU load moderate if > 60%
                     
                     // If system is under high CPU pressure, use faster compression regardless of other factors
                     if (highCpuLoad)
@@ -2438,9 +2533,28 @@ namespace XPlain.Services
                 }
             }
             
-            // Size-based adaptive compression
+            // Check memory constraints
+            bool memoryConstrained = false;
+            try
+            {
+                var availableMemoryMB = GC.GetGCMemoryInfo().TotalAvailableMemoryBytes / (1024 * 1024);
+                memoryConstrained = availableMemoryMB < 200; // Less than 200 MB available
+                
+                // If memory is very constrained, use fastest compression to minimize memory usage
+                if (availableMemoryMB < 100)
+                {
+                    return CompressionLevel.Fastest;
+                }
+            }
+            catch
+            {
+                // If we can't check memory, assume it's not constrained
+                memoryConstrained = false;
+            }
             
-            // For extremely large data, always use fastest compression
+            // Size-based adaptive compression - now with memory and CPU awareness
+            
+            // For extremely large data, always use fastest compression to minimize memory usage
             if (dataSize > 50 * 1024 * 1024) // 50MB
             {
                 return CompressionLevel.Fastest;
@@ -2450,10 +2564,12 @@ namespace XPlain.Services
             if (dataSize > 10 * 1024 * 1024) // 10MB
             {
                 // For highly compressible data types, it might still be worth using optimal compression
-                if (dataType?.Contains("json", StringComparison.OrdinalIgnoreCase) == true ||
+                // unless system resources are constrained
+                if (!moderateCpuLoad && !memoryConstrained &&
+                    (dataType?.Contains("json", StringComparison.OrdinalIgnoreCase) == true ||
                     dataType?.Contains("text", StringComparison.OrdinalIgnoreCase) == true ||
                     dataType?.Contains("xml", StringComparison.OrdinalIgnoreCase) == true ||
-                    dataType?.Contains("string", StringComparison.OrdinalIgnoreCase) == true)
+                    dataType?.Contains("string", StringComparison.OrdinalIgnoreCase) == true))
                 {
                     return CompressionLevel.Optimal;
                 }
@@ -2471,13 +2587,13 @@ namespace XPlain.Services
                     dataType?.Contains("string", StringComparison.OrdinalIgnoreCase) == true)
                 {
                     // For very large text files, consider CPU usage vs storage savings
-                    if (dataSize > 5 * 1024 * 1024) // > 5MB
+                    if (dataSize > 5 * 1024 * 1024 || moderateCpuLoad) // > 5MB or moderate CPU load
                     {
                         return CompressionLevel.Optimal;
                     }
                     
-                    // Smaller text files can use higher compression
-                    return CompressionLevel.SmallestSize;
+                    // Smaller text files can use higher compression if resources allow
+                    return highCpuLoad || memoryConstrained ? CompressionLevel.Optimal : CompressionLevel.SmallestSize;
                 }
                 
                 // For binary data that might compress poorly, use fastest
@@ -2487,8 +2603,8 @@ namespace XPlain.Services
                     return CompressionLevel.Fastest;
                 }
                 
-                // Default for large data
-                return CompressionLevel.Optimal;
+                // Default for large data - consider CPU load
+                return moderateCpuLoad ? CompressionLevel.Fastest : CompressionLevel.Optimal;
             }
             
             // For medium data (100KB-1MB), optimize for compression ratio
@@ -2500,11 +2616,12 @@ namespace XPlain.Services
                     dataType?.Contains("xml", StringComparison.OrdinalIgnoreCase) == true ||
                     dataType?.Contains("string", StringComparison.OrdinalIgnoreCase) == true)
                 {
-                    return CompressionLevel.SmallestSize;
+                    // Use higher compression only if CPU allows
+                    return moderateCpuLoad ? CompressionLevel.Optimal : CompressionLevel.SmallestSize;
                 }
                 
                 // For other types, use optimal balance
-                return CompressionLevel.Optimal;
+                return moderateCpuLoad ? CompressionLevel.Fastest : CompressionLevel.Optimal;
             }
             
             // For smaller data (< 100KB), use maximum compression if it's a format that compresses well
@@ -2513,7 +2630,8 @@ namespace XPlain.Services
                 dataType?.Contains("xml", StringComparison.OrdinalIgnoreCase) == true ||
                 dataType?.Contains("string", StringComparison.OrdinalIgnoreCase) == true)
             {
-                return CompressionLevel.SmallestSize;
+                // Small data compresses quickly even at highest level, but still consider CPU load
+                return highCpuLoad ? CompressionLevel.Optimal : CompressionLevel.SmallestSize;
             }
             
             // Learn from past compression statistics if available
@@ -2524,7 +2642,7 @@ namespace XPlain.Services
                 
                 // If we consistently get excellent compression (ratio < 0.3), 
                 // the data is highly compressible and worth more CPU time
-                if (gzipStats.CompressionRatio < 0.3)
+                if (gzipStats.CompressionRatio < 0.3 && !highCpuLoad)
                 {
                     return CompressionLevel.SmallestSize;
                 }
@@ -2535,10 +2653,40 @@ namespace XPlain.Services
                 {
                     return CompressionLevel.Fastest;
                 }
+                
+                // If compression time is becoming excessive, back off to faster compression
+                if (gzipStats.AverageCompressionTimeMs > 200) // More than 200ms is quite slow
+                {
+                    return CompressionLevel.Fastest;
+                }
+                
+                // If decompression time is becoming excessive, use a more balanced approach
+                if (gzipStats.AverageDecompressionTimeMs > 100) // More than 100ms is concerning
+                {
+                    return CompressionLevel.Optimal;
+                }
+            }
+            
+            // Check content type specific recommendations
+            if (_lastContentType != ContentType.Unknown && 
+                _cacheSettings.ContentTypeCompressionLevelMap.TryGetValue(_lastContentType, out var contentTypeLevel))
+            {
+                // If we have specific settings for this content type, use them
+                // but still consider system load
+                if (highCpuLoad && contentTypeLevel == CompressionLevel.SmallestSize)
+                {
+                    return CompressionLevel.Optimal;
+                }
+                else if (moderateCpuLoad && contentTypeLevel == CompressionLevel.SmallestSize)
+                {
+                    return CompressionLevel.Optimal;
+                }
+                
+                return contentTypeLevel;
             }
             
             // Default to optimal for small to medium data of unknown type
-            return CompressionLevel.Optimal;
+            return moderateCpuLoad ? CompressionLevel.Fastest : CompressionLevel.Optimal;
         }
 
         private class CacheEntry
